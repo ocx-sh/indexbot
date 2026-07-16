@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Bot toolchain targets. Included by the root taskfile under the `bot:`
+# namespace (`task bot:lint`, `task bot:test`, `task bot:audit`) — these are
+# exactly what ci.yml's bot-lint / bot-test / bot-audit jobs run. Frozen
+# contract with ci.yml and the root taskfile; keep in lockstep
+# (.claude/state/plans/plan_index_v1.md WP1-C,
+# .claude/artifacts/adr_index_bot_and_workflow_security.md BD-3/BD-7).
+#
+# Default working directory for every task below is this file's directory
+# (bot/) — Task's include default, not overridden.
+
+version: '3'
+
+tasks:
+  sync:
+    desc: uv sync (frozen if uv.lock is committed, else a regular sync)
+    internal: true
+    set: [e, u, pipefail]
+    cmds:
+      - |
+        if [ -f uv.lock ]; then
+          uv sync --frozen
+        else
+          uv sync
+        fi
+
+  lint:
+    desc: ruff check + ruff format --check + pyright + bandit (config-driven via pyproject.toml)
+    deps: [sync]
+    cmds:
+      - uv run ruff check .
+      - uv run ruff format --check .
+      - uv run pyright
+      - uv run bandit -c pyproject.toml -r src tests
+
+  test:
+    desc: pytest, 100% branch-coverage gate (fail_under in pyproject.toml)
+    deps: [sync]
+    cmds:
+      - uv run pytest
+
+  audit:
+    desc: pip-audit against the bot's resolved dependency set
+    deps: [sync]
+    cmds:
+      - uv run pip-audit
