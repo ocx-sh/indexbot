@@ -22,7 +22,6 @@ _DIGEST = f"sha256:{'a' * 64}"
 def _args(**overrides: object) -> argparse.Namespace:
     defaults: dict[str, object] = {
         "index_dir": "",
-        "site_dist": "site",
         "out": "dist",
         "check": False,
     }
@@ -77,30 +76,13 @@ class _VanishingFiles(InMemoryFiles):
         return super().read_bytes(path)
 
 
-def test_requires_at_least_one_output_tree() -> None:
-    files = InMemoryFiles()
-    with pytest.raises(ValidationError, match="at least one of --site-dist or --out"):
-        run(_args(site_dist=None, out=None), files=files)
-
-
-def test_writes_only_wrapper_pages_when_out_omitted() -> None:
-    files = InMemoryFiles()
-    _seed_source(files)
-    before = set(files.files)
-
-    result = run(_args(site_dist="site", out=None), files=files)
-
-    assert result == ExitCode.OK
-    assert set(files.files) - before == {"site/kitware/cmake.md"}
-
-
-def test_writes_only_dist_files_when_site_dist_omitted() -> None:
+def test_writes_dist_files() -> None:
     files = InMemoryFiles()
     _seed_source(files)
     before = set(files.files)
     hex_digest = _DIGEST.removeprefix("sha256:")
 
-    result = run(_args(site_dist=None, out="dist"), files=files)
+    result = run(_args(out="dist"), files=files)
 
     assert result == ExitCode.OK
     assert set(files.files) - before == {
@@ -108,23 +90,22 @@ def test_writes_only_dist_files_when_site_dist_omitted() -> None:
         "dist/c/index.json",
         "dist/p/kitware/cmake.json",
         f"dist/p/kitware/cmake/o/sha256/{hex_digest}.json",
-        "dist/data/catalog/packages.json",
+        "dist/data/catalog/catalog.json",
     }
     assert files.read_bytes("dist/p/kitware/cmake.json") == files.read_bytes("p/kitware/cmake.json")
 
 
-def test_writes_both_trees_when_both_given_and_tolerates_trailing_slash() -> None:
+def test_tolerates_trailing_slash_on_out() -> None:
     files = InMemoryFiles()
     _seed_source(files)
 
-    result = run(_args(site_dist="site/", out="dist/"), files=files)
+    result = run(_args(out="dist/"), files=files)
 
     assert result == ExitCode.OK
-    assert files.exists("site/kitware/cmake.md")
     assert files.exists("dist/config.json")
 
 
-def test_check_mode_clean_when_trees_already_match_and_writes_nothing() -> None:
+def test_check_mode_clean_when_tree_already_matches_and_writes_nothing() -> None:
     files = InMemoryFiles()
     _seed_source(files)
     run(_args(), files=files)
@@ -136,10 +117,9 @@ def test_check_mode_clean_when_trees_already_match_and_writes_nothing() -> None:
     assert files.files == snapshot
 
 
-def test_check_mode_drifted_when_site_tree_missing() -> None:
+def test_check_mode_drifted_when_out_tree_missing() -> None:
     files = InMemoryFiles()
-    _seed_source(files)
-    run(_args(site_dist=None, out="dist"), files=files)  # only dist written, site left absent
+    _seed_source(files)  # source present, dist never written
 
     result = run(_args(check=True), files=files)
 
@@ -174,10 +154,10 @@ def test_index_dir_prefix_is_respected() -> None:
     files = InMemoryFiles()
     _seed_source(files, index_dir="public/")  # trailing slash tolerated
 
-    result = run(_args(index_dir="public", site_dist="site", out=None), files=files)
+    result = run(_args(index_dir="public", out="dist"), files=files)
 
     assert result == ExitCode.OK
-    assert files.exists("site/kitware/cmake.md")
+    assert files.exists("dist/p/kitware/cmake.json")
 
 
 def test_cas_subtree_file_without_a_root_is_ignored() -> None:
@@ -188,8 +168,8 @@ def test_cas_subtree_file_without_a_root_is_ignored() -> None:
     result = run(_args(), files=files)
 
     assert result == ExitCode.OK
-    catalog = json.loads(files.read_bytes("dist/data/catalog/packages.json") or b"[]")
-    assert catalog == []
+    catalog = json.loads(files.read_bytes("dist/data/catalog/catalog.json") or b"{}")
+    assert catalog["packages"] == []
 
 
 def test_root_vanishing_between_list_and_read_raises() -> None:
@@ -204,12 +184,9 @@ def test_golden_plan_execution_against_real_filesystem(tmp_path: Path) -> None:
     files = LocalFiles(root=tmp_path)
     _seed_source(files)
 
-    result = run(_args(index_dir="", site_dist="site/src", out="site/.vitepress/dist"), files=files)
+    result = run(_args(index_dir="", out="site/.vitepress/dist"), files=files)
 
     assert result == ExitCode.OK
-
-    wrapper = (tmp_path / "site/src/kitware/cmake.md").read_text(encoding="utf-8")
-    assert "# ocx.sh/kitware/cmake" in wrapper
 
     config = json.loads((tmp_path / "site/.vitepress/dist/config.json").read_text(encoding="utf-8"))
     assert config == {"format_version": 1}
@@ -224,6 +201,6 @@ def test_golden_plan_execution_against_real_filesystem(tmp_path: Path) -> None:
     assert cas_copy == _observation_bytes()
 
     catalog = json.loads(
-        (tmp_path / "site/.vitepress/dist/data/catalog/packages.json").read_text(encoding="utf-8")
+        (tmp_path / "site/.vitepress/dist/data/catalog/catalog.json").read_text(encoding="utf-8")
     )
-    assert catalog[0]["name"] == "ocx.sh/kitware/cmake"
+    assert catalog["packages"][0]["name"] == "ocx.sh/kitware/cmake"

@@ -3,9 +3,9 @@
 Each case builds `SourcePackage` fixtures as plain Python literals (no need
 to round-trip through JSON just to build a fixture — CONTRACTS.md §2), runs
 `build_render_plan`, and byte-compares every produced `FileWrite` against a
-committed expected file under `tests/golden/render/<case>/expected/{dist,
-wrapper_pages}/**` — and asserts no *extra* files were produced, so orphan
-pruning is verified by absence, not just by what's present.
+committed expected file under `tests/golden/render/<case>/expected/dist/**`
+— and asserts no *extra* files were produced, so orphan pruning is verified
+by absence, not just by what's present.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from indexbot.core.render import FileWrite, RenderPlan, SourcePackage, build_render_plan
+from indexbot.core.render import FileWrite, SourcePackage, build_render_plan
 from indexbot.model import Desc, Owner, PackageId, PackageRoot, TagEntry, Yank
 
 _GOLDEN_ROOT = Path(__file__).parent.parent / "golden" / "render"
@@ -28,11 +28,16 @@ def _owner() -> Owner:
     return Owner(github="alice", github_id=1)
 
 
-def _obs_bytes(tag_hint: str) -> bytes:
-    return (
-        '{"platforms": [{"platform": {"architecture": "amd64", "os": "linux"}, '
-        f'"digest": "sha256:manifest-{tag_hint}"}}]}}'
-    ).encode()
+_DEFAULT_PLATFORM = {"architecture": "amd64", "os": "linux"}
+
+
+def _obs_bytes(
+    tag_hint: str, *, platforms: tuple[dict[str, str], ...] = (_DEFAULT_PLATFORM,)
+) -> bytes:
+    entries = [
+        {"platform": platform, "digest": f"sha256:manifest-{tag_hint}"} for platform in platforms
+    ]
+    return json.dumps({"platforms": entries}).encode()
 
 
 def _root_raw(root: PackageRoot) -> bytes:
@@ -115,8 +120,19 @@ def _case_normal() -> list[SourcePackage]:
         logo=_digest("l"),
     )
     content_by_digest = {
-        f"{_digest('1')}.json": _obs_bytes("1.0.0"),
-        f"{_digest('2')}.json": _obs_bytes("0.9.0"),
+        # Different platform sets across the two live tags -- exercises
+        # `_catalog_platforms`' union + dedup (linux/amd64 shared by both) +
+        # sort (darwin/arm64 sorts before linux/amd64).
+        f"{_digest('1')}.json": _obs_bytes(
+            "1.0.0", platforms=({"architecture": "amd64", "os": "linux"},)
+        ),
+        f"{_digest('2')}.json": _obs_bytes(
+            "0.9.0",
+            platforms=(
+                {"architecture": "amd64", "os": "linux"},
+                {"architecture": "arm64", "os": "darwin"},
+            ),
+        ),
         f"{_digest('r')}.md": b"# CMake\n\nCross-platform build system generator.\n",
         f"{_digest('l')}.svg": b"<svg>cmake-logo</svg>",
     }
@@ -281,10 +297,9 @@ def _assert_tree_matches(root: Path, files: tuple[FileWrite, ...]) -> None:
         assert actual == expected
 
 
-def _assert_matches_golden(case: str, plan: RenderPlan) -> None:
+def _assert_matches_golden(case: str, plan: tuple[FileWrite, ...]) -> None:
     case_dir = _GOLDEN_ROOT / case / "expected"
-    _assert_tree_matches(case_dir / "dist", plan.dist_files)
-    _assert_tree_matches(case_dir / "wrapper_pages", plan.wrapper_pages)
+    _assert_tree_matches(case_dir / "dist", plan)
 
 
 def test_render_normal() -> None:
@@ -319,12 +334,18 @@ def test_build_render_plan_sorts_packages_by_package_id() -> None:
     # Passed out of alphabetical order; "kitware/cmake" < "mvdan/shfmt".
     packages = _case_no_desc() + _case_normal()
     plan = build_render_plan(packages)
-    assert [fw.path for fw in plan.wrapper_pages] == ["kitware/cmake.md", "mvdan/shfmt.md"]
+    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
+    assert isinstance(catalog_file.content, str)
+    catalog = json.loads(catalog_file.content)
+    assert [p["name"] for p in catalog["packages"]] == [
+        "ocx.sh/kitware/cmake",
+        "ocx.sh/mvdan/shfmt",
+    ]
 
 
 def test_build_render_plan_respects_format_version_param() -> None:
     plan = build_render_plan(_case_no_desc(), format_version=7)
-    config = next(fw for fw in plan.dist_files if fw.path == "config.json")
+    config = next(fw for fw in plan if fw.path == "config.json")
     assert isinstance(config.content, str)
     assert json.loads(config.content) == {"format_version": 7}
 
@@ -332,7 +353,7 @@ def test_build_render_plan_respects_format_version_param() -> None:
 def test_build_render_plan_package_index_digest_matches_root_raw_sha256() -> None:
     packages = _case_no_desc()
     plan = build_render_plan(packages)
-    index_file = next(fw for fw in plan.dist_files if fw.path == "c/index.json")
+    index_file = next(fw for fw in plan if fw.path == "c/index.json")
     assert isinstance(index_file.content, str)
     index = json.loads(index_file.content)
     assert index["format_version"] == 1
@@ -342,9 +363,16 @@ def test_build_render_plan_package_index_digest_matches_root_raw_sha256() -> Non
 
 def test_build_render_plan_package_index_empty_for_no_packages() -> None:
     plan = build_render_plan([])
-    index_file = next(fw for fw in plan.dist_files if fw.path == "c/index.json")
+    index_file = next(fw for fw in plan if fw.path == "c/index.json")
     assert isinstance(index_file.content, str)
     assert json.loads(index_file.content) == {"format_version": 1, "packages": {}}
+
+
+def test_build_render_plan_catalog_generated_null_for_no_packages() -> None:
+    plan = build_render_plan([])
+    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
+    assert isinstance(catalog_file.content, str)
+    assert json.loads(catalog_file.content) == {"generated": None, "packages": []}
 
 
 def test_build_render_plan_reachability_readme_without_logo() -> None:
@@ -373,9 +401,9 @@ def test_build_render_plan_reachability_readme_without_logo() -> None:
         content_by_digest=content_by_digest,
     )
     plan = build_render_plan([package])
-    dist_paths = {fw.path for fw in plan.dist_files}
+    dist_paths = {fw.path for fw in plan}
     assert f"p/mvdan/shfmt2/o/sha256/{'h' * 64}.md" in dist_paths
-    catalog_file = next(fw for fw in plan.dist_files if fw.path == "data/catalog/packages.json")
+    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
     catalog = json.loads(catalog_file.content)
-    assert catalog[0]["logoUrl"] is None
-    assert catalog[0]["readmeUrl"] == f"/p/mvdan/shfmt2/o/sha256/{'h' * 64}.md"
+    assert catalog["packages"][0]["logoUrl"] is None
+    assert catalog["packages"][0]["readmeUrl"] == f"/p/mvdan/shfmt2/o/sha256/{'h' * 64}.md"

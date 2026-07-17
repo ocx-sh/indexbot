@@ -1,0 +1,26 @@
+{
+  "generated": "2026-07-17T00:00:00Z",
+  "packages": [
+    {
+      "namespace": "gitlab-org",
+      "package": "glab",
+      "name": "ocx.sh/gitlab-org/glab",
+      "status": "active",
+      "deprecatedMessage": null,
+      "supersededBy": null,
+      "title": "glab",
+      "description": "GitLab CLI.",
+      "keywords": [
+        "git",
+        "cli"
+      ],
+      "latestVersion": "1.42.0",
+      "tagCount": 1,
+      "platforms": [
+        "linux/amd64"
+      ],
+      "logoUrl": "/p/gitlab-org/glab/o/sha256/pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp.png",
+      "readmeUrl": null
+    }
+  ]
+}

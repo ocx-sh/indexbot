@@ -7,9 +7,15 @@ express: path<->name derivation (G-02), repository host allowlisting (G-03,
 checked before any network intent — SSRF ordering), reserved-namespace
 rejection (ADR-2 ND-4), digest-hex `fullmatch` before any path join,
 content-digest self-consistency (CAS integrity), dangling-reference
-detection, and the `PackageRoot`/`ObservationObject` <-> `dict` codec every
+detection, the `PackageRoot`/`ObservationObject` <-> `dict` codec every
 other module reuses (CONTRACTS.md §1/§5.6) rather than hand-rolling a second
-encoder.
+encoder, and `cas_relpath` — the one CAS relative-path builder every writer
+(`core/render.py`, `cli/reconcile.py`) reuses rather than hand-rolling the
+`p/<ns>/<pkg>/o/sha256/<hex>.<ext>` shape a second time (relocated here from
+the now-deleted `core/catalog_md.py`, site redesign plan_site_redesign
+WP-bot — `core/validate_entry.py` is this repo's one shared foundation
+module, not `core/catalog_md.py`, whose only other export was VitePress
+wrapper-page markdown the site redesign's dynamic routes retire).
 
 `OCI_REPOSITORY_RE` here and `core/validate_payload.py`'s `PACKAGE_ID_RE` are
 two structurally distinct constants (ADR-4 BD-4's two-regex rule) — one
@@ -204,6 +210,17 @@ def parse_digest(raw: str) -> str:
     if _DIGEST_RE.fullmatch(raw) is None:
         raise ValidationError(f"{raw!r} is not a valid sha256 digest")
     return raw
+
+
+def cas_relpath(namespace: str, package: str, digest: str, ext: str) -> str:
+    """Deployed relative path (no leading `/`) of a CAS object.
+
+    `p/<namespace>/<package>/o/sha256/<hex>.<ext>` per the wire path map
+    (`plan_index_v1.md`). `digest` is the full `sha256:<hex>` string; only
+    the hex half appears in the path itself.
+    """
+    hex_digest = digest.removeprefix("sha256:")
+    return f"p/{namespace}/{package}/o/sha256/{hex_digest}.{ext}"
 
 
 def check_content_digest_self_consistent(tag: TagEntry, object_bytes: bytes) -> None:

@@ -1,0 +1,23 @@
+{
+  "generated": "2026-07-17T00:00:00Z",
+  "packages": [
+    {
+      "namespace": "ziglang",
+      "package": "zig",
+      "name": "ocx.sh/ziglang/zig",
+      "status": "active",
+      "deprecatedMessage": null,
+      "supersededBy": null,
+      "title": "ocx.sh/ziglang/zig",
+      "description": "",
+      "keywords": [],
+      "latestVersion": "0.13.0",
+      "tagCount": 2,
+      "platforms": [
+        "linux/amd64"
+      ],
+      "logoUrl": null,
+      "readmeUrl": null
+    }
+  ]
+}

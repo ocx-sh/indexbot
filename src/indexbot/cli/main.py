@@ -70,13 +70,10 @@ def _add_reconcile_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_render_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--index-dir", required=True, help="p/ listing prefix within the checkout")
     parser.add_argument(
-        "--site-dist", default=None, help="write wrapper_pages under this prefix (pre-build)"
+        "--out", required=True, help="write the rendered dist tree under this prefix"
     )
     parser.add_argument(
-        "--out", default=None, help="write dist_files under this prefix (post-build)"
-    )
-    parser.add_argument(
-        "--check", action="store_true", help="report drift against the given tree(s), write nothing"
+        "--check", action="store_true", help="report drift against the --out tree, write nothing"
     )
 
 

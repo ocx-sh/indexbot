@@ -37,12 +37,12 @@ from typing import TYPE_CHECKING, cast
 
 from indexbot.cli._common import write_github_output
 from indexbot.core.anomaly import check_tag_mutations
-from indexbot.core.catalog_md import cas_relpath
 from indexbot.core.desc import check_desc_change
 from indexbot.core.diff import diff
 from indexbot.core.observe import observe
 from indexbot.core.regenerate import regenerate
 from indexbot.core.validate_entry import (
+    cas_relpath,
     check_repository_allowlisted,
     check_repository_shape,
     parse_package_root,
