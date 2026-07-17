@@ -53,8 +53,8 @@ other module reuses; do not hand-roll a second encoder.
   `png_only_logo`, `nested_namespace`). Each case directory holds
   `input/` (the `SourcePackage` fixtures, as plain Python data built in the
   test file — no need to serialize/deserialize JSON just to build a fixture)
-  and `expected/` (the exact files a `RenderPlan.dist_files`/`wrapper_pages`
-  walk should produce, compared byte-for-byte). Keep fixtures as Python
+  and `expected/dist/` (the exact files `build_render_plan`'s returned tuple
+  should produce, compared byte-for-byte). Keep fixtures as Python
   literals in the test module unless a case is large enough that a checked-in
   file genuinely reads better — most of these don't need one.
 - **respx** (`adapters/ghcr.py`, `adapters/github_api.py`, WP2-C/WP2-D): one
@@ -490,7 +490,17 @@ plan's "partial-success semantics" (clean-subset PR + one anomaly issue
 listing every finding + exit 65) — `check_tag_mutations` itself never
 raises `AnomalyError`; the CLI layer maps a non-empty result to that outcome.
 
-## 8. `core/render.py` / `core/catalog_md.py` (WP2-F)
+## 8. `core/render.py` (WP2-F, reshaped by `plan_site_redesign` WP-bot)
+
+`core/catalog_md.py` — this section's original wrapper-page-Markdown
+module — is **deleted**. `plan_site_redesign` retired bot-generated
+per-package wrapper pages in favor of dynamic routes
+(`site/src/[ns]/[pkg].paths.ts`, globbing the committed `p/*/*.json` tree
+directly at VitePress build time — see `adr_catalog_docs_colocation.md`
+Amendment A1 and `site/README.md`). `core/render.py` now emits exactly one
+output tree; `cas_relpath` (the CAS path-building helper the deleted module
+also used) relocated to `core/validate_entry.py`, alongside
+`cli/reconcile.py`'s existing import of it.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -505,27 +515,28 @@ class SourcePackage:
 
 @dataclass(frozen=True, slots=True)
 class FileWrite:
-    path: str            # relative to whichever output root `RenderPlan` field it's in
+    path: str            # relative to the dist output root (`--out`)
     content: str | bytes
 
-@dataclass(frozen=True, slots=True)
-class RenderPlan:
-    wrapper_pages: tuple[FileWrite, ...]   # write BEFORE the VitePress build — target site/src/**
-    dist_files: tuple[FileWrite, ...]      # write AFTER the VitePress build — target site/.vitepress/dist/**
-
-def build_render_plan(packages: Sequence[SourcePackage], *, format_version: int = 1) -> RenderPlan:
+def build_render_plan(packages: Sequence[SourcePackage], *, format_version: int = 1) -> tuple[FileWrite, ...]:
 ```
 
-Pure (§0). Reachability walk per package: only `tags[*].content` digests
-and, transitively, `desc.readme`/`desc.logo` digests are copied — CAS
-objects orphaned by a repointed or yanked tag are pruning candidates
-(ADR-1 D8, **deployment artifact only**, never source-tree git history).
-A yanked tag's content is pruned **only if unreachable from every other
-live tag** — yanking does not itself force pruning while another tag still
-shares the digest (emergent aliasing, ADR-1 D3, applies to reachability
-too).
+Pure (§0). No `RenderPlan` wrapper dataclass any more — `build_render_plan`
+returns the flat dist-tree file list directly, since there is only ever one
+output tree (`--out`, applied by `cli/render.py` after `site:build`'s
+VitePress build completes — see `taskfile.yml`'s `render:build` task and its
+`emptyOutDir` footgun comment).
 
-`dist_files` contents:
+Reachability walk per package: only `tags[*].content` digests of *live*
+(non-yanked) tags, and, transitively, `desc.readme`/`desc.logo` digests, are
+copied — CAS objects orphaned by a repointed or yanked tag are pruning
+candidates (ADR-1 D8, **deployment artifact only**, never source-tree git
+history). A yanked tag's content is pruned **only if unreachable from every
+other live tag** — yanking does not itself force pruning while another tag
+still shares the digest (emergent aliasing, ADR-1 D3, applies to
+reachability too).
+
+Returned file list:
 - `config.json`: `{"format_version": format_version}`, exactly (D7 —
   nothing else, ever).
 - One `p/<namespace>/<package>.json` per package: `content = source.root_raw`
@@ -539,19 +550,33 @@ too).
   re-serialization through §1's canonical form (root bytes are never digested
   for wire-contract purposes elsewhere either, same rationale as §5's
   `serialize_package_root`).
-- `/data/catalog/**` — summary JSON the catalog UI reads, referencing blobs
-  by their CAS URL (never duplicating blob bytes into `/data/catalog`, per
-  ADR-3's explicit divergence from `ocx-sh/ocx`'s website). **Not** wire
-  contract (ADR-1 D2, ADR-3) — exact shape is WP2-F's call; keep it a plain
-  JSON summary array/object, no framework-specific format.
-
-`wrapper_pages`: one `FileWrite` per package
-(`<namespace>/<package>.md`) built by `core/catalog_md.py`'s
-`render_wrapper_page(root: PackageRoot) -> str` (pure — VitePress-flavored
-Markdown: frontmatter with title/description/keywords from `root.desc`,
-degrading gracefully — literal `[]`/empty strings — when `root.desc is None`
-per plan risk 6, then a body that links the CAS readme URL rather than
-inlining its content, per ADR-3's CAS-reference-not-duplication design).
+- `data/catalog/catalog.json` — the catalog-grid view-model, frozen shape
+  (`plan_site_redesign`), referencing logo/readme blobs by their CAS URL
+  rather than duplicating blob bytes into `/data/catalog` (ADR-3's explicit
+  divergence from `ocx-sh/ocx`'s website). **Not** wire contract (ADR-1 D2,
+  ADR-3):
+  ```jsonc
+  {
+    "generated": "…Z" | null,   // lexicographic max over every tag's observed
+                                 // + yanked.at value across every package;
+                                 // null if no package has ever carried a tag.
+                                 // No datetime import — a wall-clock value
+                                 // would break `render --check` idempotency.
+    "packages": [{              // sorted by package_id
+      "namespace": "kitware", "package": "cmake", "name": "ocx.sh/kitware/cmake",
+      "status": "active" | "deprecated" | "yanked",
+      "deprecatedMessage": string | null,
+      "supersededBy": string | null,
+      "title": string, "description": string, "keywords": string[],
+      "latestVersion": string | null,
+      "tagCount": number,        // non-yanked tag count
+      "platforms": string[],     // "<os>/<architecture>" union across every
+                                  // non-yanked tag's observation object,
+                                  // deduped + sorted
+      "logoUrl": string | null, "readmeUrl": string | null   // pre-resolved CAS paths
+    }]
+  }
+  ```
 
 Note on `content_by_digest` keying: a CAS digest alone does not carry its
 file extension (`.json` vs `.md` vs `.svg`/`.png`) — the extension is only
@@ -655,16 +680,21 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   a WARN to stderr, exit 0 (surfacing on the PR itself, e.g. as a job
   annotation, is this module's job — do not fail the build for an
   unconfirmed probe, ADR-4 Risk 2).
-- **`cli/render.py`**: `FilePort.list_files("p/")` -> parse every root +
-  every CAS object into `SourcePackage` -> `render.build_render_plan` ->
-  write `wrapper_pages` (before VitePress build, ADR-3) — **this CLI
-  subcommand does not itself invoke `bun run docs:build`**, that's
-  `render-deploy.yml`'s job (Phase 3, WP3-A); `indexbot render` is invoked
-  twice by that workflow, once for wrapper pages, once for `dist_files`,
-  per ADR-3's Technical Details build-order section — take a `--phase
-  {wrapper-pages,dist}` flag (or two subcommands; your call, document
-  whichever in your own module) rather than assuming a single invocation
-  does both.
+- **`cli/render.py`** (reshaped by `plan_site_redesign` WP-bot): `FilePort.list_files("p/")`
+  under `--index-dir` -> parse every root + every CAS object into
+  `SourcePackage` -> `render.build_render_plan` -> write the returned file
+  tuple under `--out`. `--out` is `required=True` at the argparse layer
+  (`cli/main.py`'s `_add_render_arguments` owns the missing-flag usage
+  error, so this module never raises its own `ValidationError` for it);
+  `--site-dist` (the old wrapper-pages target) is gone — this CLI
+  subcommand emits exactly one output tree now, so there is no second
+  invocation or `--phase` split. **This subcommand does not itself invoke
+  the VitePress build** — that's `render-deploy.yml`'s job
+  (`task render:build`), which runs `site:build` first (dynamic routes glob
+  `p/*/*.json` directly, no wrapper-page pre-emission needed) and
+  `indexbot render --out` second, into the same `emptyOutDir`-wiped tree.
+  `--check` computes the plan and reports drift against `--out` without
+  writing, `ExitCode.VALIDATION_FAILURE` on drift.
 - **`cli/seed_import.py`**: reads local `CATALOG.md` (title/description/
   keywords — frontmatter shape TBD by whoever writes this WP; note the
   precedent in `ocx_lib::package::description::Frontmatter`, §7's desc.py
