@@ -18,6 +18,8 @@ from indexbot.model import (
     PackageRoot,
     PlatformEntry,
     TagEntry,
+    Upstream,
+    Yank,
 )
 from tests.fakes import FakeRegistry, InMemoryFiles
 
@@ -51,6 +53,7 @@ def _build(
     repository: str = _REPOSITORY,
     tags: dict[str, TagEntry] | None = None,
     desc: Desc | None = None,
+    upstream: Upstream | None = None,
     extra_files: dict[str, bytes] | None = None,
 ) -> InMemoryFiles:
     """A minimal `PackageRoot`, serialized and stored at `path` — every
@@ -64,6 +67,7 @@ def _build(
         deprecated_message=None,
         created="2026-07-17",
         desc=desc,
+        upstream=upstream,
         tags={} if tags is None else tags,
     )
     files: dict[str, bytes] = {path: serialize_package_root(root)}
@@ -78,7 +82,7 @@ def _valid_package() -> tuple[InMemoryFiles, FakeRegistry]:
     object_bytes = _observation_bytes()
     tag_digest = _content_digest(object_bytes)
     files = _build(
-        tags={"3.28.1": TagEntry(content=tag_digest, observed="T0")},
+        tags={"3.28.1": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
         extra_files={_cas_path(tag_digest): object_bytes},
     )
     registry = FakeRegistry(
@@ -146,7 +150,7 @@ def test_run_tag_with_no_platforms_passes() -> None:
     object_bytes = _observation_bytes(platforms=())
     tag_digest = _content_digest(object_bytes)
     files = _build(
-        tags={"latest": TagEntry(content=tag_digest, observed="T0")},
+        tags={"latest": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
         extra_files={_cas_path(tag_digest): object_bytes},
     )
     registry = FakeRegistry(ownership={_REPOSITORY: "confirmed"})
@@ -159,7 +163,7 @@ def test_run_desc_without_readme_or_logo_passes() -> None:
     tag_digest = _content_digest(object_bytes)
     desc = Desc(digest="sha256:" + "d" * 64, title="CMake", description="Build tool")
     files = _build(
-        tags={"3.28.1": TagEntry(content=tag_digest, observed="T0")},
+        tags={"3.28.1": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
         desc=desc,
         extra_files={_cas_path(tag_digest): object_bytes},
     )
@@ -184,7 +188,7 @@ def test_run_desc_with_readme_and_logo_passes() -> None:
         logo=logo_digest,
     )
     files = _build(
-        tags={"3.28.1": TagEntry(content=tag_digest, observed="T0")},
+        tags={"3.28.1": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
         desc=desc,
         extra_files={
             _cas_path(tag_digest): object_bytes,
@@ -236,6 +240,51 @@ def test_run_name_path_mismatch_is_validation_failure() -> None:
     assert result == ExitCode.VALIDATION_FAILURE
 
 
+# --- upstream.repository_url scheme (review-round-1 finding #1) -----------
+
+
+def test_run_upstream_javascript_scheme_never_touches_registry() -> None:
+    upstream = Upstream(org="Evil", repository_url="javascript:alert(1)")
+    files = _build(upstream=upstream)
+    result = validate.run(_args([_PATH]), files=files, registry=_PoisonRegistry())
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
+def test_run_upstream_https_scheme_passes(capsys: pytest.CaptureFixture[str]) -> None:
+    upstream = Upstream(org="Kitware", repository_url="https://github.com/Kitware/CMake")
+    files = _build(tags={}, upstream=upstream)
+    registry = FakeRegistry(ownership={_REPOSITORY: "confirmed"})
+    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    assert result == ExitCode.OK
+    assert f"{_PATH}: OK" in capsys.readouterr().err
+
+
+# --- tag timestamp Z-anchoring (review-round-1 finding #3) -----------------
+
+
+def test_run_tag_observed_with_utc_offset_is_validation_failure() -> None:
+    files = _build(
+        tags={
+            "3.28.1": TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00+02:00")
+        }
+    )
+    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
+def test_run_tag_yanked_at_with_utc_offset_is_validation_failure() -> None:
+    yank = Yank(reason="cve", at="2026-07-17T00:00:00+02:00")
+    files = _build(
+        tags={
+            "3.28.1": TagEntry(
+                content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z", yanked=yank
+            )
+        }
+    )
+    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
 def test_run_reserved_namespace_is_validation_failure() -> None:
     path = "p/admin/cmake.json"
     files = _build(path=path, name="ocx.sh/admin/cmake")
@@ -256,7 +305,9 @@ def test_run_repository_shape_invalid_is_validation_failure() -> None:
 
 
 def test_run_malformed_tag_digest_is_validation_failure() -> None:
-    files = _build(tags={"3.28.1": TagEntry(content="not-a-digest", observed="T0")})
+    files = _build(
+        tags={"3.28.1": TagEntry(content="not-a-digest", observed="2026-07-17T00:00:00Z")}
+    )
     result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
@@ -303,7 +354,7 @@ def test_run_malformed_platform_digest_is_validation_failure_never_reaches_regis
     )
     tag_digest = _content_digest(object_bytes)
     files = _build(
-        tags={"3.28.1": TagEntry(content=tag_digest, observed="T0")},
+        tags={"3.28.1": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
         extra_files={_cas_path(tag_digest): object_bytes},
     )
     result = validate.run(_args([_PATH]), files=files, registry=_PoisonRegistry())
@@ -332,7 +383,9 @@ def test_run_ownership_mismatch_is_validation_failure() -> None:
 
 def test_run_dangling_reference_is_anomaly() -> None:
     # A syntactically valid digest with no matching CAS object on disk.
-    files = _build(tags={"3.28.1": TagEntry(content="sha256:" + "a" * 64, observed="T0")})
+    files = _build(
+        tags={"3.28.1": TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z")}
+    )
     result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.ANOMALY
 
@@ -340,7 +393,7 @@ def test_run_dangling_reference_is_anomaly() -> None:
 def test_run_tampered_content_digest_is_anomaly() -> None:
     claimed_digest = "sha256:" + "a" * 64
     files = _build(
-        tags={"3.28.1": TagEntry(content=claimed_digest, observed="T0")},
+        tags={"3.28.1": TagEntry(content=claimed_digest, observed="2026-07-17T00:00:00Z")},
         # Present at the claimed path, but its bytes hash to something else
         # entirely — CAS integrity violation.
         extra_files={_cas_path(claimed_digest): b'{"platforms":[]}'},
@@ -372,7 +425,7 @@ def test_run_aggregates_validation_and_anomaly_anomaly_wins(
         path=anomaly_path,
         name="ocx.sh/oven-sh/bun",
         repository="oci://ghcr.io/ocx-contrib/bun",
-        tags={"1.0.0": TagEntry(content="sha256:" + "c" * 64, observed="T0")},
+        tags={"1.0.0": TagEntry(content="sha256:" + "c" * 64, observed="2026-07-17T00:00:00Z")},
     ).files[anomaly_path]
 
     result = validate.run(_args([_PATH, anomaly_path]), files=files, registry=registry)

@@ -170,18 +170,29 @@ def _case_orphan_pruned() -> list[SourcePackage]:
 
 
 def _case_yanked_excluded() -> list[SourcePackage]:
+    # `yanked.at` (2026-07-20) is strictly later than every live tag's
+    # `observed` (2026-07-17) -- proves `_generated_timestamp` actually folds
+    # in `yanked.at`, not just `observed` (finding #4: deleting that branch
+    # used to fail nothing here, since 07-17 already dominated 07-02). The
+    # yanked tag's observation object also carries a platform
+    # (windows/amd64) distinct from the live tag's (linux/amd64), so the
+    # golden `platforms` array proves exclusion by absence, not coincidence
+    # (finding #5: the two used to share a platform, making exclusion
+    # unfalsifiable).
     tags = {
         "1.0.0": TagEntry(content=_digest("x"), observed="2026-07-17T00:00:00Z"),
         "0.9.0": TagEntry(
             content=_digest("y"),
             observed="2026-07-01T00:00:00Z",
-            yanked=Yank(reason="broken build", at="2026-07-02T00:00:00Z"),
+            yanked=Yank(reason="broken build", at="2026-07-20T00:00:00Z"),
         ),
     }
     content_by_digest = {
         f"{_digest('x')}.json": _obs_bytes("1.0.0"),
         # only referenced by the yanked tag, no live tag shares it -> pruned.
-        f"{_digest('y')}.json": _obs_bytes("0.9.0-yanked"),
+        f"{_digest('y')}.json": _obs_bytes(
+            "0.9.0-yanked", platforms=({"architecture": "amd64", "os": "windows"},)
+        ),
     }
     return [
         _package(

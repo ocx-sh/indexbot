@@ -152,6 +152,69 @@ def check_superseded_by(root: PackageRoot) -> None:
         )
 
 
+_UPSTREAM_URL_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
+
+_TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+"""Z-anchored, fixed-width ISO 8601 UTC timestamp — the exact shape
+`adapters/system_clock.py`'s `SystemClock.now_iso8601` always writes.
+`schema/root.schema.json`'s `tagEntry.observed`/`yanked.at` pattern mirrors
+this constant; kept as two literal strings, not a shared import, so the
+schema stays `check-jsonschema`-standalone (ADR-4 BD-1: schema never imports
+bot code)."""
+
+
+def check_upstream_repository_url_scheme(root: PackageRoot) -> None:
+    """Input-boundary guard (review-round-1 finding #1): `upstream.repository_url`,
+    when present, must have scheme `http` or `https`.
+
+    `schema/root.schema.json`'s `format: uri` alone admits `javascript:`,
+    `data:`, or scheme-less values — the site renders this field as an
+    unescaped `href` (client-side guard is the parallel site-redesign
+    branch's concern; this closes the server-side input boundary). Pure
+    string parsing only (`urllib.parse`, mirroring
+    `check_repository_allowlisted`'s `urlsplit` pattern) — never touches a
+    `RegistryPort`.
+
+    `root.upstream is None` or `root.upstream.repository_url is None` is a
+    no-op — no upstream, or an upstream with no repository URL, carries no
+    constraint here.
+    """
+    if root.upstream is None or root.upstream.repository_url is None:
+        return
+    scheme = urlsplit(root.upstream.repository_url).scheme
+    if scheme not in _UPSTREAM_URL_SCHEMES:
+        raise ValidationError(
+            f"upstream.repository_url {root.upstream.repository_url!r} must use "
+            f"http or https scheme, got {scheme!r}"
+        )
+
+
+def check_tag_timestamps_z_anchored(root: PackageRoot) -> None:
+    """Input-boundary guard (review-round-1 finding #3): every
+    `tags[*].observed` and `tags[*].yanked.at` must match `_TIMESTAMP_RE`.
+
+    The bot itself always writes this exact shape
+    (`adapters/system_clock.py`); `yanked.at` is the one sub-field of
+    `tags[*]` a human sets directly via PR (`schema/root.schema.json`'s
+    `yanked` field, human-set, bot never writes it) and could otherwise
+    supply a schema-legal `+02:00`-offset timestamp that silently breaks
+    `core/render.py`'s `_generated_timestamp` lexicographic string max (that
+    max is valid *only* when every candidate string shares this fixed,
+    Z-anchored shape).
+    """
+    for tag_name, entry in root.tags.items():
+        if _TIMESTAMP_RE.fullmatch(entry.observed) is None:
+            raise ValidationError(
+                f"tags[{tag_name}].observed {entry.observed!r} is not a "
+                "Z-anchored UTC timestamp (YYYY-MM-DDThh:mm:ssZ)"
+            )
+        if entry.yanked is not None and _TIMESTAMP_RE.fullmatch(entry.yanked.at) is None:
+            raise ValidationError(
+                f"tags[{tag_name}].yanked.at {entry.yanked.at!r} is not a "
+                "Z-anchored UTC timestamp (YYYY-MM-DDThh:mm:ssZ)"
+            )
+
+
 def check_namespace_not_reserved(package_id: PackageId, *, allow_reserved: bool = False) -> None:
     """ADR-2 ND-4: reject a reserved segment in either the namespace or the
     package position — a routing-collision guard, not a trademark denylist.

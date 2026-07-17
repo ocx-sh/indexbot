@@ -87,6 +87,89 @@ def test_check_superseded_by_self_reference_raises() -> None:
         validate_entry.check_superseded_by(root)
 
 
+# --- check_upstream_repository_url_scheme (review-round-1 finding #1) -------
+
+
+def test_check_upstream_repository_url_scheme_upstream_none_is_a_noop() -> None:
+    root = _minimal_root(upstream=None)
+    validate_entry.check_upstream_repository_url_scheme(root)  # no raise
+
+
+def test_check_upstream_repository_url_scheme_repository_url_none_is_a_noop() -> None:
+    root = _minimal_root(upstream=Upstream(org="Kitware", repository_url=None))
+    validate_entry.check_upstream_repository_url_scheme(root)  # no raise
+
+
+def test_check_upstream_repository_url_scheme_https_ok() -> None:
+    root = _minimal_root(
+        upstream=Upstream(org="Kitware", repository_url="https://github.com/Kitware/CMake")
+    )
+    validate_entry.check_upstream_repository_url_scheme(root)  # no raise
+
+
+def test_check_upstream_repository_url_scheme_http_ok() -> None:
+    root = _minimal_root(upstream=Upstream(org="Kitware", repository_url="http://example.com/x"))
+    validate_entry.check_upstream_repository_url_scheme(root)  # no raise
+
+
+def test_check_upstream_repository_url_scheme_javascript_scheme_raises() -> None:
+    root = _minimal_root(upstream=Upstream(org="Evil", repository_url="javascript:alert(1)"))
+    with pytest.raises(ValidationError, match="http or https"):
+        validate_entry.check_upstream_repository_url_scheme(root)
+
+
+def test_check_upstream_repository_url_scheme_data_scheme_raises() -> None:
+    root = _minimal_root(
+        upstream=Upstream(org="Evil", repository_url="data:text/html,<script>alert(1)</script>")
+    )
+    with pytest.raises(ValidationError, match="http or https"):
+        validate_entry.check_upstream_repository_url_scheme(root)
+
+
+def test_check_upstream_repository_url_scheme_no_scheme_raises() -> None:
+    root = _minimal_root(
+        upstream=Upstream(org="Kitware", repository_url="github.com/Kitware/CMake")
+    )
+    with pytest.raises(ValidationError, match="http or https"):
+        validate_entry.check_upstream_repository_url_scheme(root)
+
+
+# --- check_tag_timestamps_z_anchored (review-round-1 finding #3) -----------
+
+
+def test_check_tag_timestamps_z_anchored_no_tags_is_a_noop() -> None:
+    root = _minimal_root(tags={})
+    validate_entry.check_tag_timestamps_z_anchored(root)  # no raise
+
+
+def test_check_tag_timestamps_z_anchored_ok() -> None:
+    tag = TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z")
+    root = _minimal_root(tags={"3.28.1": tag})
+    validate_entry.check_tag_timestamps_z_anchored(root)  # no raise
+
+
+def test_check_tag_timestamps_z_anchored_yanked_at_ok() -> None:
+    yank = Yank(reason="cve", at="2026-07-18T00:00:00Z")
+    tag = TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z", yanked=yank)
+    root = _minimal_root(tags={"3.27.0": tag})
+    validate_entry.check_tag_timestamps_z_anchored(root)  # no raise
+
+
+def test_check_tag_timestamps_z_anchored_observed_offset_raises() -> None:
+    tag = TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00+02:00")
+    root = _minimal_root(tags={"3.28.1": tag})
+    with pytest.raises(ValidationError, match=r"tags\[3\.28\.1\]\.observed"):
+        validate_entry.check_tag_timestamps_z_anchored(root)
+
+
+def test_check_tag_timestamps_z_anchored_yanked_at_offset_raises() -> None:
+    yank = Yank(reason="cve", at="2026-07-18T00:00:00+02:00")
+    tag = TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z", yanked=yank)
+    root = _minimal_root(tags={"3.27.0": tag})
+    with pytest.raises(ValidationError, match=r"tags\[3\.27\.0\]\.yanked\.at"):
+        validate_entry.check_tag_timestamps_z_anchored(root)
+
+
 # --- check_namespace_not_reserved -------------------------------------------
 
 
@@ -273,6 +356,24 @@ def test_parse_digest_ok() -> None:
 def test_parse_digest_rejects_malformed_and_malicious_input(raw: str) -> None:
     with pytest.raises(ValidationError):
         validate_entry.parse_digest(raw)
+
+
+# --- cas_relpath (finding #6: re-add the direct unit test lost in the
+# core/catalog_md.py -> validate_entry.py relocation) -----------------------
+
+
+def test_cas_relpath_builds_the_p_ns_pkg_o_sha256_hex_ext_shape() -> None:
+    digest = "sha256:" + "a" * 64
+    assert (
+        validate_entry.cas_relpath("kitware", "cmake", digest, "json")
+        == f"p/kitware/cmake/o/sha256/{'a' * 64}.json"
+    )
+
+
+def test_cas_relpath_varies_extension() -> None:
+    digest = "sha256:" + "b" * 64
+    assert validate_entry.cas_relpath("kitware", "cmake", digest, "md").endswith(".md")
+    assert validate_entry.cas_relpath("kitware", "cmake", digest, "svg").endswith(".svg")
 
 
 # --- check_content_digest_self_consistent ------------------------------------

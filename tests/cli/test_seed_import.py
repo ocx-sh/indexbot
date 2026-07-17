@@ -186,6 +186,20 @@ def test_upstream_fields_populate_upstream_object() -> None:
     }
 
 
+def test_upstream_repository_url_bad_scheme_raises_before_write() -> None:
+    # review-round-1 finding #1 — `--upstream-repository-url` is freshly
+    # minted CLI input; a rejected scheme must never reach `files.write_bytes`.
+    files = _files()
+    with pytest.raises(ValidationError, match="http or https"):
+        run(
+            _args(upstream_org="Evil", upstream_repository_url="javascript:alert(1)"),
+            registry=_registry(),
+            files=files,
+            clock=FixedClock(),
+        )
+    assert not files.exists("p/kitware/cmake.json")
+
+
 def test_owner_github_id_coerced_from_string() -> None:
     files = _files()
     run(_args(owner_github_id="123456"), registry=_registry(), files=files, clock=FixedClock())

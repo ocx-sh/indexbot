@@ -57,6 +57,7 @@ from indexbot.core.validate_entry import (
     check_namespace_not_reserved,
     check_repository_allowlisted,
     check_repository_shape,
+    check_upstream_repository_url_scheme,
     parse_digest,
     serialize_observation_object,
     serialize_package_root,
@@ -402,6 +403,10 @@ def run(
         superseded_by=None,
         tags=tags,
     )
+    # Input-boundary guard (review-round-1 finding #1): `--upstream-repository-url`
+    # is freshly minted CLI input here, same trust tier as `--repository`
+    # above — must be checked before it is ever persisted.
+    check_upstream_repository_url_scheme(root)
 
     files.write_bytes(root_path, serialize_package_root(root))
 

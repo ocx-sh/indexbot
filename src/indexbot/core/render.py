@@ -196,7 +196,18 @@ def _generated_timestamp(ordered: Sequence[SourcePackage]) -> str | None:
     timestamps (`schema/root.schema.json`) make lexicographic order equal
     chronological order, so no `datetime` parsing is needed anywhere in this
     pure module — `render --check` stays idempotent regardless of wall
-    clock. `None` when no package has ever carried a tag."""
+    clock. `None` when no package has ever carried a tag.
+
+    **Invariant this function relies on and never itself checks**: every
+    timestamp string it touches is Z-anchored and fixed-width
+    (`YYYY-MM-DDThh:mm:ssZ`) — a legal-but-offset `+02:00` value would sort
+    wrong here and silently produce the wrong package's timestamp as
+    `generated`. `_generated_timestamp` trusts its input; the invariant is
+    enforced upstream, at the input boundary, by
+    `core/validate_entry.py`'s `check_tag_timestamps_z_anchored` (run by
+    `cli/validate.py`'s PR gate) plus `schema/root.schema.json`'s
+    `tagEntry.observed`/`yanked.at` pattern — never re-validated here.
+    """
     timestamps: list[str] = []
     for source in ordered:
         for entry in source.root.tags.values():
