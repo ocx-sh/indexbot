@@ -1,0 +1,34 @@
+{
+  "name": "ocx.sh/kitware/cmake",
+  "repository": "oci://ghcr.io/ocx-contrib/cmake",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-07-17",
+  "desc": {
+    "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "title": "CMake",
+    "description": "Cross-platform build system generator.",
+    "keywords": [
+      "build",
+      "cmake"
+    ],
+    "readme": "sha256:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+    "logo": "sha256:llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll"
+  },
+  "tags": {
+    "1.0.0": {
+      "content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "observed": "2026-07-17T00:00:00Z"
+    },
+    "0.9.0": {
+      "content": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "observed": "2026-07-16T00:00:00Z"
+    }
+  }
+}

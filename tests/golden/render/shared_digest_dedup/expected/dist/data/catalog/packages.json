@@ -1,0 +1,15 @@
+[
+  {
+    "namespace": "ziglang",
+    "package": "zig",
+    "name": "ocx.sh/ziglang/zig",
+    "status": "active",
+    "title": "ocx.sh/ziglang/zig",
+    "description": "",
+    "keywords": [],
+    "latestVersion": "0.13.0",
+    "tagCount": 2,
+    "logoUrl": null,
+    "readmeUrl": null
+  }
+]

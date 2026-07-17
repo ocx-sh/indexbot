@@ -6,12 +6,14 @@ import pytest
 
 from indexbot.model import (
     Desc,
+    ManifestFetch,
     ObservationObject,
     OciPlatform,
     Owner,
     PackageId,
     PackageRoot,
     PlatformEntry,
+    PullRequestInfo,
     TagEntry,
     Upstream,
     Yank,
@@ -180,6 +182,38 @@ def test_package_root_tags_default_empty() -> None:
     )
     assert root.tags == {}
     assert root.desc is None
+
+
+def test_pull_request_info_fields() -> None:
+    info = PullRequestInfo(
+        number=42,
+        base_sha="aaa111",
+        head_sha="bbb222",
+        changed_paths=("p/kitware/cmake.json",),
+    )
+    assert info.number == 42
+    assert info.base_sha == "aaa111"
+    assert info.head_sha == "bbb222"
+    assert info.changed_paths == ("p/kitware/cmake.json",)
+
+
+def test_pull_request_info_is_frozen() -> None:
+    info = PullRequestInfo(number=1, base_sha="a", head_sha="b", changed_paths=())
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.number = 2  # type: ignore[misc]
+
+
+def test_manifest_fetch_fields() -> None:
+    fetch = ManifestFetch(raw=b'{"a":1}', digest="sha256:aaaa", parsed={"a": 1})
+    assert fetch.raw == b'{"a":1}'
+    assert fetch.digest == "sha256:aaaa"
+    assert fetch.parsed == {"a": 1}
+
+
+def test_manifest_fetch_is_frozen() -> None:
+    fetch = ManifestFetch(raw=b"{}", digest="sha256:aaaa", parsed={})
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        fetch.digest = "sha256:bbbb"  # type: ignore[misc]
 
 
 def test_package_root_is_frozen() -> None:

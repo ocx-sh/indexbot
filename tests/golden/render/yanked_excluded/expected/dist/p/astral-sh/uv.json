@@ -1,0 +1,28 @@
+{
+  "name": "ocx.sh/astral-sh/uv",
+  "repository": "oci://ghcr.io/ocx-contrib/uv",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-06-01",
+  "desc": null,
+  "tags": {
+    "1.0.0": {
+      "content": "sha256:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "observed": "2026-07-17T00:00:00Z"
+    },
+    "0.9.0": {
+      "content": "sha256:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "observed": "2026-07-01T00:00:00Z",
+      "yanked": {
+        "reason": "broken build",
+        "at": "2026-07-02T00:00:00Z"
+      }
+    }
+  }
+}

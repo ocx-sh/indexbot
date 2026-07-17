@@ -16,6 +16,40 @@ from typing import Literal
 Status = Literal["active", "deprecated", "yanked"]
 """`PackageRoot.status` (ADR-1 D2)."""
 
+OwnershipProbeResult = Literal["confirmed", "mismatch", "unconfirmed"]
+"""`RegistryPort.probe_ownership`'s outcome (G-15, ADR-4 carry-forward table).
+
+`"confirmed"`/`"mismatch"` are decisive; `"unconfirmed"` means the
+identifier-embedding convention was not found at all — never treated as a
+silent pass by `core/validate_entry.py` either way (ADR-4 Risk 2).
+"""
+
+CommitStatusState = Literal["success", "failure", "pending", "error"]
+"""GitHub Commit Status API state — `GitHubPort.set_commit_status`'s
+mechanism for the `governance/review-required` required status check
+(ADR-4 BD-5)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestFetch:
+    """Return of `RegistryPort.get_manifest` — a CAS-verifiable manifest read.
+
+    ADR-1's verifiability chain requires every digest this bot records to be
+    *derivable from content*, never synthesized and never trusted from a
+    response header alone. `digest` is therefore always computed by the
+    implementing adapter as `sha256:<hex of raw>` — never copied verbatim
+    from a registry-supplied header (see `ports.py`'s docstring for the full
+    doctrine and `adapters/ghcr.py`'s verify-if-present header check).
+
+    `raw` is the exact wire bytes the registry served (the CAS-verifiable
+    input `digest` was computed over); `parsed` is that same content decoded
+    as JSON, for callers that only need structured field access.
+    """
+
+    raw: bytes
+    digest: str
+    parsed: dict[str, object]
+
 
 @dataclass(frozen=True, slots=True)
 class Owner:
@@ -126,6 +160,22 @@ class PackageId:
 
     def __str__(self) -> str:
         return f"{self.namespace}/{self.package}"
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestInfo:
+    """Base/head SHAs and changed paths for one PR (`GitHubPort.get_pull_request_info`).
+
+    `cli/classify_pr.py`'s only input — read via the GitHub API diff, never
+    a checkout (ADR-4 BD-5's `governance-gate` trust boundary: `changed_paths`
+    is what G-04's "added `p/*.json` path" and G-05's human-review key-set
+    checks key off).
+    """
+
+    number: int
+    base_sha: str
+    head_sha: str
+    changed_paths: tuple[str, ...]
 
 
 def _empty_tags() -> dict[str, TagEntry]:
