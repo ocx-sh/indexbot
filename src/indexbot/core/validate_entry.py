@@ -87,6 +87,17 @@ RESERVED_NAMESPACE_SEGMENTS: Final[frozenset[str]] = frozenset(
 and package positions of a `PackageId` (the two-segment package-id shape does
 not otherwise distinguish which position collides)."""
 
+RESERVED_BRAND_SEGMENTS: Final[frozenset[str]] = frozenset(
+    {"ocx", "ocx-sh", "ocx-contrib", "ocx-rs"}
+)
+"""The subset of `RESERVED_NAMESPACE_SEGMENTS` naming OCX's own brand — the
+only segments `check_namespace_not_reserved`'s `allow_reserved=True`
+carve-out ever admits (ADR-2 ND-10's first-party `ocx/cli` example vs. ND-4's
+unconditional reservation; policy call is PR-gated, this is the mechanism
+only). Control-path segments (`p`, `o`, ...) and generic/ambiguous segments
+(`admin`, `root`, ...) stay unconditionally reserved regardless of this flag
+— never widen this set without a reviewed PR."""
+
 
 def check_name_matches_path(package_id: PackageId, root: PackageRoot) -> None:
     """G-02: `root.name` must equal the path-derived logical name."""
@@ -97,13 +108,25 @@ def check_name_matches_path(package_id: PackageId, root: PackageRoot) -> None:
         )
 
 
-def check_namespace_not_reserved(package_id: PackageId) -> None:
+def check_namespace_not_reserved(package_id: PackageId, *, allow_reserved: bool = False) -> None:
     """ADR-2 ND-4: reject a reserved segment in either the namespace or the
     package position — a routing-collision guard, not a trademark denylist.
+
+    `allow_reserved=True` narrows the blocked set to
+    `RESERVED_NAMESPACE_SEGMENTS - RESERVED_BRAND_SEGMENTS` — an explicit,
+    caller-opted-in carve-out for OCX's own first-party brand segments only
+    (e.g. `ocx/cli`); control-path and generic segments are never admitted by
+    this flag. Default `False` preserves ADR-2 ND-4's unconditional
+    reservation.
     """
-    if package_id.namespace in RESERVED_NAMESPACE_SEGMENTS:
+    blocked = (
+        RESERVED_NAMESPACE_SEGMENTS - RESERVED_BRAND_SEGMENTS
+        if allow_reserved
+        else RESERVED_NAMESPACE_SEGMENTS
+    )
+    if package_id.namespace in blocked:
         raise ValidationError(f"namespace {package_id.namespace!r} is reserved (ADR-2 ND-4)")
-    if package_id.package in RESERVED_NAMESPACE_SEGMENTS:
+    if package_id.package in blocked:
         raise ValidationError(f"package {package_id.package!r} is reserved (ADR-2 ND-4)")
 
 

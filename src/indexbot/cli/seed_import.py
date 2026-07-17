@@ -16,9 +16,15 @@ Inputs, all read via `FilePort` (never a bare filesystem call):
   choice — CONTRACTS.md flagged it as "TBD by whoever writes this WP"; see
   `open_questions`.
 - `--logo`: optional `.svg`/`.png` file, copied verbatim into this package's CAS.
-- `--mirror-yml`: a minimal hand-rolled flat `key: value` reader (no YAML
+- `--mirror-yml`: a minimal hand-rolled `key: value` reader (no YAML
   dependency declared in `pyproject.toml`, CONTRACTS.md §12/§13 open question 5)
-  for the one key this module needs: `repository`.
+  for the physical repository, either a flat `repository:` key or the nested
+  `target: {registry:, repository:}` mapping real `ocx-contrib` mirrors emit
+  today (`_resolve_repository`) — a `target.registry` that isn't on
+  `REPOSITORY_HOST_ALLOWLIST` (e.g. the legacy `ocx.sh` registry mirror bots
+  push to pending the human-gated M-1 `ghcr.io` republish) is a hard
+  `ValidationError`, never silently substituted. `--repository` overrides
+  either shape once the real physical repository exists.
 - `--namespace`/`--package`, or derived from `--catalog-md`'s path (its parent
   two path segments, e.g. `seeds/kitware/cmake/CATALOG.md` -> `kitware/cmake`).
 - `--owner-github`/`--owner-github-id` and optional `--upstream-*`: **not** in
@@ -40,12 +46,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final, cast
 
 from indexbot.core.observe import observe
 from indexbot.core.validate_entry import (
+    REPOSITORY_HOST_ALLOWLIST,
     check_namespace_not_reserved,
     check_repository_allowlisted,
     check_repository_shape,
@@ -115,16 +123,25 @@ def _parse_catalog_md(raw: str, *, source: str) -> _Frontmatter:
     return _Frontmatter(title=title, description=description, keywords=keywords, body=body)
 
 
-def _parse_mirror_yml(raw: str, *, source: str) -> dict[str, str]:
-    """Minimal hand-rolled flat `key: value` reader for `mirror.yml`.
+def _parse_mirror_yml(raw: str, *, source: str) -> dict[str, str | dict[str, str]]:
+    """Minimal hand-rolled `key: value` reader for `mirror.yml` — flat
+    top-level keys plus exactly one level of nesting.
+
+    Two shapes are known to occur in real `ocx-contrib` mirrors: the
+    original flat `repository: oci://<host>/<path>` key this module has
+    always read, and the shape mirror bots actually emit today, a nested
+    `target:` mapping (`registry:`/`repository:` indented under it). A
+    top-level key whose value is empty opens a nested mapping; every
+    following indented line becomes one of its entries.
 
     ponytail: no YAML dependency declared in `pyproject.toml` (open_questions,
-    CONTRACTS.md §13 item 5) — every known `mirror.yml` shape is a flat mapping
-    (this module only ever reads its `repository` key), so a real YAML parser
-    would be premature. Upgrade to `pyyaml`/`ruamel.yaml` (pyproject change, a
-    separate reviewed PR) if a future seed's `mirror.yml` grows nesting or lists.
+    CONTRACTS.md §13 item 5) — two known flat-or-one-level-nested shapes don't
+    justify a real YAML parser. Upgrade to `pyyaml`/`ruamel.yaml` (pyproject
+    change, a separate reviewed PR) if a future seed's `mirror.yml` grows
+    deeper nesting or lists.
     """
-    fields: dict[str, str] = {}
+    fields: dict[str, str | dict[str, str]] = {}
+    current_nested: dict[str, str] | None = None
     for line in raw.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -132,8 +149,60 @@ def _parse_mirror_yml(raw: str, *, source: str) -> dict[str, str]:
         if ":" not in stripped:
             raise ValidationError(f"{source}: malformed line {line!r}")
         key, _, value = stripped.partition(":")
-        fields[key.strip()] = value.strip().strip('"').strip("'")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        indented = line[: len(line) - len(line.lstrip(" "))] != ""
+        if not indented:
+            if value:
+                fields[key] = value
+                current_nested = None
+            else:
+                current_nested = {}
+                fields[key] = current_nested
+        else:
+            if current_nested is None:
+                raise ValidationError(f"{source}: indented line {line!r} has no parent mapping")
+            current_nested[key] = value
     return fields
+
+
+def _resolve_repository(fields: dict[str, str | dict[str, str]], *, source: str) -> str:
+    """The physical `oci://<host>/<path>` repository from a parsed
+    `mirror.yml` — the flat `repository:` key if present, else the nested
+    `target: {registry:, repository:}` mapping real `ocx-contrib` mirrors
+    emit today.
+
+    A nested `target.registry` not on `REPOSITORY_HOST_ALLOWLIST` (e.g. the
+    legacy `ocx.sh` registry mirror bots push to today) is a hard failure,
+    never silently substituted with a guessed `ghcr.io/ocx-contrib/<pkg>`
+    URI — the ghcr.io physical layer only exists once the human-gated M-1
+    republish (`ocx-mirror` scope) has actually run for this package. Pass
+    `--repository` to seed against the real physical repository once it
+    does.
+    """
+    flat_repository = fields.get("repository")
+    if isinstance(flat_repository, str) and flat_repository:
+        return flat_repository
+
+    target = fields.get("target")
+    if isinstance(target, dict):
+        registry = target.get("registry")
+        repository_path = target.get("repository")
+        if not registry or not repository_path:
+            raise ValidationError(
+                f"{source}: 'target' mapping missing required 'registry'/'repository' keys"
+            )
+        if registry not in REPOSITORY_HOST_ALLOWLIST:
+            raise ValidationError(
+                f"{source}: mirror target registry {registry!r} is not an allowlisted "
+                f"physical registry ({sorted(REPOSITORY_HOST_ALLOWLIST)!r}) — the index "
+                "requires the physical repository to live on an allowlisted registry, "
+                "which this package has not been republished to yet (pending the "
+                "human-gated M-1 ghcr.io republish); pass --repository once it has been"
+            )
+        return f"oci://{registry}/{repository_path}"
+
+    raise ValidationError(f"{source}: missing required 'repository' key (flat or nested 'target')")
 
 
 def _derive_package_id(catalog_md_path: str) -> tuple[str, str]:
@@ -210,7 +279,10 @@ def run(
     Expected `args` attributes: `catalog_md` (str), `mirror_yml` (str), `logo`
     (str | None), `namespace` (str | None), `package` (str | None), `out` (str,
     defaults to `"p"`), `owner_github` (str), `owner_github_id` (int | str),
-    `upstream_org`/`upstream_repository_url`/`upstream_disclaimer` (str | None).
+    `upstream_org`/`upstream_repository_url`/`upstream_disclaimer` (str | None),
+    `repository` (str | None — `--repository` override, see
+    `_resolve_repository`), `allow_reserved_namespace` (bool, default `False`
+    — the ADR-2 ND-10-vs-ND-4 brand carve-out; see `RESERVED_BRAND_SEGMENTS`).
     `argparse.Namespace` wiring (WP2-M) is expected to supply all of these; this
     signature's `registry`/`files`/`clock` keyword-only ports are this module's
     own addition on top of CONTRACTS.md §12's literal `run(args) -> ExitCode`
@@ -227,6 +299,8 @@ def run(
     upstream_org = cast("str | None", getattr(args, "upstream_org", None))
     upstream_repository_url = cast("str | None", getattr(args, "upstream_repository_url", None))
     upstream_disclaimer = cast("str | None", getattr(args, "upstream_disclaimer", None))
+    repository_override = cast("str | None", getattr(args, "repository", None))
+    allow_reserved = bool(getattr(args, "allow_reserved_namespace", False))
 
     namespace = cast("str | None", getattr(args, "namespace", None))
     package = cast("str | None", getattr(args, "package", None))
@@ -235,7 +309,13 @@ def run(
     if not namespace or not package:
         namespace, package = _derive_package_id(catalog_md_path)
     package_id = parse_package_id(f"{namespace}/{package}")
-    check_namespace_not_reserved(package_id)
+    if allow_reserved:
+        print(
+            f"seed-import: --allow-reserved-namespace used for {namespace}/{package} "
+            "(brand-segment carve-out — control-path and generic segments still blocked)",
+            file=sys.stderr,
+        )
+    check_namespace_not_reserved(package_id, allow_reserved=allow_reserved)
 
     package_dir = f"{out_dir}/{package_id.namespace}/{package_id.package}"
     root_path = f"{package_dir}.json"
@@ -253,9 +333,15 @@ def run(
     mirror_raw = files.read_text(mirror_yml_path)
     if mirror_raw is None:
         raise ValidationError(f"{mirror_yml_path} does not exist")
-    repository = _parse_mirror_yml(mirror_raw, source=mirror_yml_path).get("repository")
-    if not repository:
-        raise ValidationError(f"{mirror_yml_path}: missing required 'repository' key")
+
+    if repository_override is not None:
+        # --repository always wins over mirror.yml — the post-M-1 escape
+        # hatch for a package whose mirror.yml still names a non-allowlisted
+        # registry (e.g. the legacy ocx.sh mirror target).
+        repository = repository_override
+    else:
+        mirror_fields = _parse_mirror_yml(mirror_raw, source=mirror_yml_path)
+        repository = _resolve_repository(mirror_fields, source=mirror_yml_path)
 
     # G-03/SSRF ordering: both checks are pure string parsing (no RegistryPort
     # call inside either) and must run before `observe()` below.

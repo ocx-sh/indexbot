@@ -88,6 +88,40 @@ def test_reserved_segments_cover_control_paths_brand_and_generic() -> None:
     assert "kitware" not in validate_entry.RESERVED_NAMESPACE_SEGMENTS
 
 
+def test_reserved_brand_segments_is_a_subset_of_the_full_reserved_list() -> None:
+    assert {"ocx", "ocx-sh", "ocx-contrib", "ocx-rs"} == validate_entry.RESERVED_BRAND_SEGMENTS
+    assert validate_entry.RESERVED_BRAND_SEGMENTS <= validate_entry.RESERVED_NAMESPACE_SEGMENTS
+
+
+def test_check_namespace_not_reserved_allow_reserved_default_false_still_blocks_brand() -> None:
+    with pytest.raises(ValidationError, match="ADR-2 ND-4"):
+        validate_entry.check_namespace_not_reserved(PackageId(namespace="ocx", package="cli"))
+
+
+def test_check_namespace_not_reserved_allow_reserved_admits_brand_namespace() -> None:
+    package_id = PackageId(namespace="ocx", package="cli")
+    validate_entry.check_namespace_not_reserved(package_id, allow_reserved=True)  # no raise
+
+
+def test_check_namespace_not_reserved_allow_reserved_admits_brand_package() -> None:
+    package_id = PackageId(namespace="kitware", package="ocx-rs")
+    validate_entry.check_namespace_not_reserved(package_id, allow_reserved=True)  # no raise
+
+
+def test_check_namespace_not_reserved_allow_reserved_still_blocks_control_path_segment() -> None:
+    with pytest.raises(ValidationError, match="ADR-2 ND-4"):
+        validate_entry.check_namespace_not_reserved(
+            PackageId(namespace="p", package="cmake"), allow_reserved=True
+        )
+
+
+def test_check_namespace_not_reserved_allow_reserved_still_blocks_generic_segment() -> None:
+    with pytest.raises(ValidationError, match="ADR-2 ND-4"):
+        validate_entry.check_namespace_not_reserved(
+            PackageId(namespace="admin", package="cmake"), allow_reserved=True
+        )
+
+
 # --- check_repository_allowlisted (G-03, SSRF ordering) ---------------------
 
 

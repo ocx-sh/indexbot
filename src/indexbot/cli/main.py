@@ -100,6 +100,23 @@ def _add_seed_import_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--upstream-org", default=None)
     parser.add_argument("--upstream-repository-url", default=None)
     parser.add_argument("--upstream-disclaimer", default=None)
+    parser.add_argument(
+        "--repository",
+        default=None,
+        help=(
+            "override physical oci://<host>/<path> repository (validated against the host "
+            "allowlist + OCI repository grammar); wins over mirror.yml — the post-M-1 escape "
+            "hatch for a package whose mirror.yml still names a non-allowlisted registry"
+        ),
+    )
+    parser.add_argument(
+        "--allow-reserved-namespace",
+        action="store_true",
+        help=(
+            "admit OCX's own brand namespace segments (ocx, ocx-sh, ocx-contrib, ocx-rs) only "
+            "— control-path and generic reserved segments (p, admin, ...) stay blocked"
+        ),
+    )
 
 
 _ARG_POPULATORS: dict[str, Callable[[argparse.ArgumentParser], None]] = {

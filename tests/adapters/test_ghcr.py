@@ -20,7 +20,7 @@ import respx
 
 from indexbot.adapters import ghcr
 from indexbot.adapters.ghcr import GhcrRegistry
-from indexbot.errors import AnomalyError, TransientError
+from indexbot.errors import AnomalyError, TransientError, ValidationError
 from indexbot.ports import RegistryPort
 
 _BASE = "https://ghcr.io"
@@ -254,6 +254,41 @@ def test_get_manifest_persistent_401_raises_transient() -> None:
     respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/v1.0.0").mock(return_value=httpx.Response(401))
     registry = GhcrRegistry()
     with pytest.raises(TransientError, match="persistent 401"):
+        registry.get_manifest(_REPOSITORY, "v1.0.0")
+
+
+# --- 403 DENIED (missing/private repository) ----------------------------
+
+
+@respx.mock
+def test_token_endpoint_403_with_denied_body_raises_validation_error() -> None:
+    respx.get(f"{_BASE}/token").mock(
+        return_value=httpx.Response(
+            403, json={"errors": [{"code": "DENIED", "message": "requested access is denied"}]}
+        )
+    )
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/v1.0.0").mock(return_value=httpx.Response(401))
+    registry = GhcrRegistry()
+    with pytest.raises(ValidationError, match=_REPO_PATH):
+        registry.get_manifest(_REPOSITORY, "v1.0.0")
+
+
+@respx.mock
+def test_token_endpoint_403_with_empty_body_raises_validation_error() -> None:
+    respx.get(f"{_BASE}/token").mock(return_value=httpx.Response(403))
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/v1.0.0").mock(return_value=httpx.Response(401))
+    registry = GhcrRegistry()
+    with pytest.raises(ValidationError, match=_REPO_PATH):
+        registry.get_manifest(_REPOSITORY, "v1.0.0")
+
+
+@respx.mock
+def test_v2_manifest_403_raises_validation_error_not_transient() -> None:
+    # No 401 first — the resource server itself denies the anonymous request
+    # outright, no token retry possible.
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/v1.0.0").mock(return_value=httpx.Response(403))
+    registry = GhcrRegistry()
+    with pytest.raises(ValidationError, match=_REPO_PATH):
         registry.get_manifest(_REPOSITORY, "v1.0.0")
 
 

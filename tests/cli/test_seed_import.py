@@ -34,6 +34,24 @@ _MIRROR_YML = """# seed mirror config
 repository: oci://ghcr.io/ocx-contrib/cmake
 """
 
+_MIRROR_YML_TARGET_ALLOWLISTED = """target:
+  registry: ghcr.io
+  repository: ocx-contrib/cmake
+"""
+
+_MIRROR_YML_TARGET_NOT_ALLOWLISTED = """target:
+  registry: ocx.sh
+  repository: cmake
+"""
+
+_MIRROR_YML_TARGET_MISSING_REPOSITORY_KEY = """target:
+  registry: ghcr.io
+"""
+
+_MIRROR_YML_INDENTED_LINE_WITHOUT_PARENT = """repository: oci://ghcr.io/ocx-contrib/cmake
+  extra: value
+"""
+
 
 def _args(**overrides: object) -> argparse.Namespace:
     defaults: dict[str, object] = {
@@ -368,3 +386,122 @@ def test_custom_out_dir() -> None:
     files = _files()
     run(_args(out="dist/p"), registry=_registry(), files=files, clock=FixedClock())
     assert files.exists("dist/p/kitware/cmake.json")
+
+
+# --- mirror.yml nested `target:` shape (real ocx-contrib mirror shape) ----
+
+
+def test_mirror_yml_nested_target_shape_allowlisted_resolves_repository() -> None:
+    files = _files(**{"kitware/cmake/mirror.yml": _MIRROR_YML_TARGET_ALLOWLISTED})
+    result = run(_args(), registry=_registry(), files=files, clock=FixedClock())
+    assert result == ExitCode.OK
+    root = json.loads(files.read_bytes("p/kitware/cmake.json") or b"{}")
+    assert root["repository"] == _REPO
+
+
+def test_mirror_yml_nested_target_shape_not_allowlisted_raises_precise_error() -> None:
+    files = _files(**{"kitware/cmake/mirror.yml": _MIRROR_YML_TARGET_NOT_ALLOWLISTED})
+    with pytest.raises(ValidationError) as excinfo:
+        run(_args(), registry=_registry(), files=files, clock=FixedClock())
+    message = str(excinfo.value)
+    assert "ocx.sh" in message
+    assert "not an allowlisted physical registry" in message
+    assert "M-1" in message
+
+
+def test_mirror_yml_nested_target_missing_repository_key_raises() -> None:
+    files = _files(**{"kitware/cmake/mirror.yml": _MIRROR_YML_TARGET_MISSING_REPOSITORY_KEY})
+    with pytest.raises(ValidationError, match="missing required 'registry'/'repository' keys"):
+        run(_args(), registry=_registry(), files=files, clock=FixedClock())
+
+
+def test_mirror_yml_indented_line_without_parent_mapping_raises() -> None:
+    files = _files(**{"kitware/cmake/mirror.yml": _MIRROR_YML_INDENTED_LINE_WITHOUT_PARENT})
+    with pytest.raises(ValidationError, match="has no parent mapping"):
+        run(_args(), registry=_registry(), files=files, clock=FixedClock())
+
+
+# --- --repository override -------------------------------------------------
+
+
+def test_repository_override_bypasses_a_non_allowlisted_mirror_yml() -> None:
+    # mirror.yml alone would raise (M-1 dependency) — --repository is the
+    # post-M-1 escape hatch, never touching that failing resolution path.
+    files = _files(**{"kitware/cmake/mirror.yml": _MIRROR_YML_TARGET_NOT_ALLOWLISTED})
+    result = run(_args(repository=_REPO), registry=_registry(), files=files, clock=FixedClock())
+    assert result == ExitCode.OK
+    root = json.loads(files.read_bytes("p/kitware/cmake.json") or b"{}")
+    assert root["repository"] == _REPO
+
+
+def test_repository_override_rejected_host_raises() -> None:
+    files = _files()
+    with pytest.raises(ValidationError, match="not allowlisted"):
+        run(
+            _args(repository="oci://docker.io/kitware/cmake"),
+            registry=_registry(),
+            files=files,
+            clock=FixedClock(),
+        )
+
+
+def test_repository_override_malformed_shape_raises() -> None:
+    files = _files()
+    with pytest.raises(ValidationError, match="OCI repository grammar"):
+        run(
+            _args(repository="oci://ghcr.io/UPPERCASE"),
+            registry=_registry(),
+            files=files,
+            clock=FixedClock(),
+        )
+
+
+# --- --allow-reserved-namespace (mechanism only; policy PR-gated) ---------
+
+
+def test_ocx_namespace_blocked_by_default() -> None:
+    files = _files()
+    with pytest.raises(ValidationError, match="reserved"):
+        run(
+            _args(namespace="ocx", package="cli"),
+            registry=_registry(),
+            files=files,
+            clock=FixedClock(),
+        )
+
+
+def test_allow_reserved_namespace_admits_brand_segment(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = _files()
+    result = run(
+        _args(namespace="ocx", package="cli", allow_reserved_namespace=True),
+        registry=_registry(),
+        files=files,
+        clock=FixedClock(),
+    )
+    assert result == ExitCode.OK
+    assert files.exists("p/ocx/cli.json")
+    assert "seed-import: --allow-reserved-namespace used for ocx/cli" in capsys.readouterr().err
+
+
+def test_allow_reserved_namespace_does_not_admit_control_path_segment() -> None:
+    files = _files()
+    with pytest.raises(ValidationError, match="reserved"):
+        run(
+            _args(namespace="p", package="cmake", allow_reserved_namespace=True),
+            registry=_registry(),
+            files=files,
+            clock=FixedClock(),
+        )
+
+
+def test_allow_reserved_namespace_does_not_admit_generic_segment() -> None:
+    files = _files()
+    with pytest.raises(ValidationError, match="reserved"):
+        run(
+            _args(namespace="admin", package="cmake", allow_reserved_namespace=True),
+            registry=_registry(),
+            files=files,
+            clock=FixedClock(),
+        )

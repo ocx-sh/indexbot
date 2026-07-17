@@ -88,8 +88,12 @@ def _valid_package() -> tuple[InMemoryFiles, FakeRegistry]:
     return files, registry
 
 
-def _args(paths: list[str], *, offline: bool = False) -> argparse.Namespace:
-    return argparse.Namespace(paths=paths, offline=offline)
+def _args(
+    paths: list[str], *, offline: bool = False, allow_reserved_namespace: bool = False
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        paths=paths, offline=offline, allow_reserved_namespace=allow_reserved_namespace
+    )
 
 
 class _PoisonRegistry:
@@ -394,3 +398,49 @@ def test_add_arguments_offline_defaults_to_false() -> None:
     validate.add_arguments(parser)
     parsed = parser.parse_args(["p/kitware/cmake.json"])
     assert parsed.offline is False
+
+
+def test_add_arguments_registers_allow_reserved_namespace_flag() -> None:
+    parser = argparse.ArgumentParser()
+    validate.add_arguments(parser)
+    parsed = parser.parse_args(["p/kitware/cmake.json", "--allow-reserved-namespace"])
+    assert parsed.allow_reserved_namespace is True
+
+
+def test_add_arguments_allow_reserved_namespace_defaults_to_false() -> None:
+    parser = argparse.ArgumentParser()
+    validate.add_arguments(parser)
+    parsed = parser.parse_args(["p/kitware/cmake.json"])
+    assert parsed.allow_reserved_namespace is False
+
+
+# --- --allow-reserved-namespace (mechanism only; policy PR-gated) ---------
+
+
+def test_run_default_still_blocks_brand_segment() -> None:
+    path = "p/ocx/cli.json"
+    files = _build(path=path, name="ocx.sh/ocx/cli")
+    result = validate.run(_args([path]), files=files, registry=FakeRegistry())
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
+def test_run_allow_reserved_namespace_admits_brand_segment(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = "p/ocx/cli.json"
+    files = _build(path=path, name="ocx.sh/ocx/cli")
+    registry = FakeRegistry(ownership={_REPOSITORY: "confirmed"})
+    result = validate.run(
+        _args([path], allow_reserved_namespace=True), files=files, registry=registry
+    )
+    assert result == ExitCode.OK
+    assert f"{path}: --allow-reserved-namespace used" in capsys.readouterr().err
+
+
+def test_run_allow_reserved_namespace_does_not_admit_control_path_segment() -> None:
+    path = "p/admin/cmake.json"
+    files = _build(path=path, name="ocx.sh/admin/cmake")
+    result = validate.run(
+        _args([path], allow_reserved_namespace=True), files=files, registry=FakeRegistry()
+    )
+    assert result == ExitCode.VALIDATION_FAILURE

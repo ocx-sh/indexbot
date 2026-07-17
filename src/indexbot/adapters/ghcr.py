@@ -12,6 +12,12 @@ of:
   refreshed (not counted against `BackoffPolicy.max_attempts`) on exactly one
   fresh `401` — a second consecutive `401` for the same logical request is a
   persistent auth failure, raised as `TransientError`.
+- A `403` from either the token endpoint or a `/v2/` API call — GHCR's
+  `DENIED` response for a repository that is missing or private, body
+  present or not — is a permanent condition, never a bug and never worth
+  retrying: raised as `ValidationError`, distinct from the `401` dance above
+  (which *can* succeed once a token is attached) and from `TransientError`
+  (which implies retrying later might help).
 - `tags/list` pagination via the RFC 8288 `Link` response header, bounded by
   `max_pages` so a misbehaving/malicious next-link chain can't loop forever.
 - The 429/5xx retry loop — the imperative-shell half of `core/backoff.py`'s
@@ -38,7 +44,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from indexbot.core.backoff import BackoffPolicy, delay_seconds, is_retryable_status
-from indexbot.errors import AnomalyError, TransientError
+from indexbot.errors import AnomalyError, TransientError, ValidationError
 from indexbot.model import ManifestFetch
 
 if TYPE_CHECKING:
@@ -132,6 +138,19 @@ def _parse_next_link(link_header: str | None, *, base_url: str) -> str | None:
                 )
             return raw
     return None
+
+
+def _denied_message(repo_path: str) -> str:
+    """`403`/`DENIED` from GHCR (token endpoint or a `/v2/` call), body
+    present or empty — the repository is missing or private and does not
+    grant anonymous `:pull`. Permanent, not retryable: distinct from a
+    `401`, which the token dance above can still recover from.
+    """
+    return (
+        f"ghcr.io/{repo_path} is missing or does not allow anonymous pull "
+        "(GHCR denied the request with 403); the repository must exist and grant "
+        "anonymous :pull access before this bot can observe it"
+    )
 
 
 def _embedded_identifier(manifest: dict[str, object]) -> str | None:
@@ -258,6 +277,9 @@ class GhcrRegistry:
                 self._tokens[repo_path] = self._fetch_token(repo_path)
                 continue
 
+            if response.status_code == 403:
+                raise ValidationError(_denied_message(repo_path))
+
             if is_retryable_status(response.status_code):
                 if attempt >= self.policy.max_attempts:
                     raise TransientError(
@@ -278,5 +300,7 @@ class GhcrRegistry:
             params={"service": "ghcr.io", "scope": f"repository:{repo_path}:pull"},
             timeout=self.timeout,
         )
+        if response.status_code == 403:
+            raise ValidationError(_denied_message(repo_path))
         response.raise_for_status()
         return str(response.json()["token"])

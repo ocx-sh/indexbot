@@ -79,6 +79,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="skip core/registry_checks.py's G-15 network checks (digest-in-scope, ownership)",
     )
+    parser.add_argument(
+        "--allow-reserved-namespace",
+        action="store_true",
+        help=(
+            "admit OCX's own brand namespace segments (ocx, ocx-sh, ocx-contrib, ocx-rs) only "
+            "— control-path and generic reserved segments (p, admin, ...) stay blocked"
+        ),
+    )
 
 
 def _package_id_from_root_path(path: str) -> PackageId:
@@ -121,7 +129,7 @@ def _list_cas_digests(files: FilePort, namespace: str, package: str) -> frozense
 
 
 def _validate_one(
-    path: str, *, files: FilePort, registry: RegistryPort, offline: bool
+    path: str, *, files: FilePort, registry: RegistryPort, offline: bool, allow_reserved: bool
 ) -> FileReport:
     """Runs the full structural pipeline for one changed root, catching
     `ValidationError`/`AnomalyError` into a `FileReport` (first failure wins
@@ -138,7 +146,13 @@ def _validate_one(
         package_id = _package_id_from_root_path(path)
 
         check_name_matches_path(package_id, root)
-        check_namespace_not_reserved(package_id)
+        if allow_reserved:
+            print(
+                f"{path}: --allow-reserved-namespace used (brand-segment carve-out — "
+                "control-path and generic segments still blocked)",
+                file=sys.stderr,
+            )
+        check_namespace_not_reserved(package_id, allow_reserved=allow_reserved)
         # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
         # call reachable below.
         check_repository_allowlisted(root.repository)
@@ -211,7 +225,8 @@ def _print_report(report: FileReport) -> None:
 
 
 def run(args: argparse.Namespace, *, files: FilePort, registry: RegistryPort) -> ExitCode:
-    """`indexbot validate <path> [<path> ...] [--offline]` (CONTRACTS.md §12).
+    """`indexbot validate <path> [<path> ...] [--offline] [--allow-reserved-namespace]`
+    (CONTRACTS.md §12).
 
     Aggregates every path's `FileReport`: prints one structured stderr line
     per file (plus warnings — a `--offline` run's skipped G-15 checks always
@@ -221,13 +236,19 @@ def run(args: argparse.Namespace, *, files: FilePort, registry: RegistryPort) ->
     ValidationError -> exit 1" to also cover the `AnomalyError`-tier
     `validate_entry` checks it runs, e.g. dangling CAS references or a
     tampered content digest; not explicitly resolved by CONTRACTS.md/either
-    ADR, flagged in `open_questions`).
+    ADR, flagged in `open_questions`). `--allow-reserved-namespace` narrows
+    `check_namespace_not_reserved` to OCX's own brand carve-out (mechanism
+    only, policy PR-gated — same flag/semantics as `cli/seed_import.py`).
     """
     paths = cast(list[str], args.paths)
     offline = cast(bool, args.offline)
+    allow_reserved = cast(bool, args.allow_reserved_namespace)
 
     reports = [
-        _validate_one(path, files=files, registry=registry, offline=offline) for path in paths
+        _validate_one(
+            path, files=files, registry=registry, offline=offline, allow_reserved=allow_reserved
+        )
+        for path in paths
     ]
     for report in reports:
         _print_report(report)
