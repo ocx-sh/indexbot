@@ -1,15 +1,16 @@
 # indexbot
 
-Write path for the OCX public index. Subcommands (`announce`, `reconcile`,
-`validate`, `render`, `seed-import`) land in Phase 2 — today this is scaffold
-only: exit codes, error hierarchy, data model, port protocols, CLI plumbing.
+Write path for the OCX public index. Subcommands `announce`, `reconcile`,
+`validate`, `render`, `seed-import` are all implemented and wired
+(`cli/_wiring.py`); the CLI ships as the `indexbot` console script
+(`uv run indexbot <subcommand>`).
 
 ## Layout
 
-- `src/indexbot/core/` — pure logic (I/O-free; Phase 2)
-- `src/indexbot/adapters/` — the only place `httpx` is imported (Phase 2)
+- `src/indexbot/core/` — pure logic (I/O-free)
+- `src/indexbot/adapters/` — the only place `httpx` is imported
 - `src/indexbot/cli/` — argparse entrypoint + subcommands
-- `tests/fakes/` — in-memory `Protocol` implementations for Phase 2 tests
+- `tests/fakes/` — in-memory `Protocol` implementations used across tests
 
 ## Commands
 

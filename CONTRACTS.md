@@ -37,7 +37,16 @@ json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 ```
 UTF-8 encoded, then `hashlib.sha256(...).hexdigest()`, written as
 `f"sha256:{hex}"`. `ObservationObject.platforms` is sorted by
-`(platform.architecture, platform.os, platform.os_version or "", platform.variant or "")`
+`(platform.architecture, platform.os, platform.os_version or "", platform.variant or "", platform.os_features, platform.features)`
+(`core/validate_entry.py`'s `platform_sort_key` — the one shared key every
+sorter imports, never a second copy; two platforms differing only in
+`os_features`/`features`, e.g. the dual-libc `libc.glibc` vs `libc.musl`
+case, must not tie under a shorter key or Python's stable sort would leak
+registry manifest-list order into the digest). `os_features`/`features`
+are compared as tuples directly, never `",".join(...)`-ed into a string
+first — joining is not collision-free (`("a,b",)` and `("a", "b")` both
+join to `"a,b"`), which would silently reproduce the same registry-order
+dependence this key exists to eliminate
 before serialization — registry-returned manifest-list ordering must never
 affect the digest. The JSON *shape* serialized is the wire shape from
 `schema/observation-object.schema.json` (`os.version`/`os.features` as

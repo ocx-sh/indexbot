@@ -60,6 +60,41 @@ def test_observe_multi_platform_index_sorts_platforms() -> None:
     assert observation.content_digest.startswith("sha256:")
 
 
+def test_observe_dual_libc_platforms_sort_stably_by_os_features() -> None:
+    # Regression: two platforms sharing architecture/os/os_version/variant
+    # and differing ONLY in os.features (the dual-libc glibc/musl case) must
+    # not tie under the sort key — a tie would leak the registry's
+    # manifest-list order into content_digest (ADR-1 D4).
+    manifest_glibc_first: dict[str, object] = {
+        "manifests": [
+            {
+                "platform": {"architecture": "amd64", "os": "linux", "os.features": ["libc.glibc"]},
+                "digest": _DIGEST_1,
+            },
+            {
+                "platform": {"architecture": "amd64", "os": "linux", "os.features": ["libc.musl"]},
+                "digest": _DIGEST_2,
+            },
+        ]
+    }
+    manifest_musl_first: dict[str, object] = {
+        "manifests": list(reversed(manifest_glibc_first["manifests"]))  # type: ignore[arg-type]
+    }
+    registry_a = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): manifest_glibc_first}
+    )
+    registry_b = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): manifest_musl_first}
+    )
+    result_a = observe(_REPO, registry_a)
+    result_b = observe(_REPO, registry_b)
+    assert result_a[0].content_digest == result_b[0].content_digest
+    assert [p.platform.os_features for p in result_a[0].object.platforms] == [
+        ("libc.glibc",),
+        ("libc.musl",),
+    ]
+
+
 def test_observe_full_fields_platform_parses_all_fields() -> None:
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1"]},

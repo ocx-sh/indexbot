@@ -716,6 +716,65 @@ def test_serialize_observation_object_sorts_platforms_deterministically() -> Non
     ) == validate_entry.serialize_observation_object(reversed_order)
 
 
+def test_serialize_observation_object_sorts_platforms_by_os_features_too() -> None:
+    # Regression: two platforms differing ONLY in os.features (the dual-libc
+    # case) must not tie under the sort key — a tie would let Python's stable
+    # sort leak registry manifest-list order into the digest (ADR-1 D4).
+    entry_glibc = PlatformEntry(
+        platform=OciPlatform(architecture="amd64", os="linux", os_features=("libc.glibc",)),
+        digest="sha256:" + "1" * 64,
+    )
+    entry_musl = PlatformEntry(
+        platform=OciPlatform(architecture="amd64", os="linux", os_features=("libc.musl",)),
+        digest="sha256:" + "2" * 64,
+    )
+    forward = ObservationObject(platforms=(entry_glibc, entry_musl))
+    reversed_order = ObservationObject(platforms=(entry_musl, entry_glibc))
+    forward_bytes = validate_entry.serialize_observation_object(forward)
+    reversed_bytes = validate_entry.serialize_observation_object(reversed_order)
+    assert forward_bytes == reversed_bytes
+    assert hashlib.sha256(forward_bytes).hexdigest() == hashlib.sha256(reversed_bytes).hexdigest()
+
+
+def test_serialize_observation_object_sorts_platforms_by_features_too() -> None:
+    # Same regression, for the plain `features` field.
+    entry_a = PlatformEntry(
+        platform=OciPlatform(architecture="amd64", os="linux", features=("f1",)),
+        digest="sha256:" + "3" * 64,
+    )
+    entry_b = PlatformEntry(
+        platform=OciPlatform(architecture="amd64", os="linux", features=("f2",)),
+        digest="sha256:" + "4" * 64,
+    )
+    forward = ObservationObject(platforms=(entry_a, entry_b))
+    reversed_order = ObservationObject(platforms=(entry_b, entry_a))
+    assert validate_entry.serialize_observation_object(
+        forward
+    ) == validate_entry.serialize_observation_object(reversed_order)
+
+
+def test_platform_sort_key_does_not_alias_on_comma_join() -> None:
+    # Regression: two schema-legal, genuinely different os_features tuples
+    # ("a,b") and ("a", "b") must not collapse to the same sort key just
+    # because a naive `",".join(...)` would render them identically.
+    entry_one_feature = PlatformEntry(
+        platform=OciPlatform(architecture="amd64", os="linux", os_features=("a,b",)),
+        digest="sha256:" + "5" * 64,
+    )
+    entry_two_features = PlatformEntry(
+        platform=OciPlatform(architecture="amd64", os="linux", os_features=("a", "b")),
+        digest="sha256:" + "6" * 64,
+    )
+    assert validate_entry.platform_sort_key(entry_one_feature) != validate_entry.platform_sort_key(
+        entry_two_features
+    )
+    forward = ObservationObject(platforms=(entry_one_feature, entry_two_features))
+    reversed_order = ObservationObject(platforms=(entry_two_features, entry_one_feature))
+    assert validate_entry.serialize_observation_object(
+        forward
+    ) == validate_entry.serialize_observation_object(reversed_order)
+
+
 def test_serialize_observation_object_full_platform_fields() -> None:
     platform = OciPlatform(
         architecture="arm",

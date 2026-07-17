@@ -3,9 +3,9 @@
 Pure given its `RegistryPort` argument (CONTRACTS.md §0) — every physical
 registry read goes through the injected port, never `httpx` directly.
 Content-digest computation reuses `core/validate_entry.py`'s canonical
-`ObservationObject` encoder (CONTRACTS.md §1) rather than a second one, so
-two independently-computed digests for identical content stay byte-equal
-(CAS dedup, ADR-1 D3).
+`ObservationObject` encoder and `platform_sort_key` (CONTRACTS.md §1) rather
+than a second copy of either, so two independently-computed digests for
+identical content stay byte-equal (CAS dedup, ADR-1 D3).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
-from indexbot.core.validate_entry import serialize_observation_object
+from indexbot.core.validate_entry import platform_sort_key, serialize_observation_object
 from indexbot.model import ObservationObject, OciPlatform, PlatformEntry
 
 if TYPE_CHECKING:
@@ -39,11 +39,6 @@ class Observation:
     tag: str
     content_digest: str
     object: ObservationObject
-
-
-def _platform_sort_key(entry: PlatformEntry) -> tuple[str, str, str, str]:
-    platform = entry.platform
-    return (platform.architecture, platform.os, platform.os_version or "", platform.variant or "")
 
 
 def _parse_platform(raw: _Manifest) -> OciPlatform:
@@ -139,6 +134,6 @@ def observe(repository: str, registry: RegistryPort) -> tuple[Observation, ...]:
             if "manifests" in raw
             else _platforms_from_bare(raw, fetch.digest)
         )
-        obj = ObservationObject(platforms=tuple(sorted(platforms, key=_platform_sort_key)))
+        obj = ObservationObject(platforms=tuple(sorted(platforms, key=platform_sort_key)))
         observations.append(Observation(tag=tag, content_digest=_content_digest(obj), object=obj))
     return tuple(observations)

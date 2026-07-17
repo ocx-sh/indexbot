@@ -498,20 +498,51 @@ def _platform_entry_from_dict(data: dict[str, Any]) -> PlatformEntry:
     return PlatformEntry(platform=_platform_from_dict(data["platform"]), digest=data["digest"])
 
 
-def _platform_sort_key(entry: PlatformEntry) -> tuple[str, str, str, str]:
+def platform_sort_key(
+    entry: PlatformEntry,
+) -> tuple[str, str, str, str, tuple[str, ...], tuple[str, ...]]:
+    """The one canonical platform ordering key (§1) — every module that needs
+    to sort `PlatformEntry` rows (this module's `serialize_observation_object`,
+    `core/observe.py`'s construction-time sort) imports this rather than
+    hand-rolling a second copy, so the two never drift apart.
+
+    `(architecture, os, os_version or "", variant or "", os_features,
+    features)` — `os_features`/`features` must be part of the key, not
+    just the digest payload: two platforms differing *only* in one of these
+    tuple fields (e.g. the dual-libc case, `linux/amd64` + `os.features:
+    ["libc.glibc"]` vs `["libc.musl"]`) would otherwise tie under the first
+    four fields alone, and Python's stable sort would then preserve whatever
+    order the registry's manifest-list happened to return them in — silently
+    making the digest depend on registry response order and breaking ADR-1
+    D4 dedup. The tuples are compared directly (not joined into strings):
+    a `",".join(...)` collapses `("a,b",)` and `("a", "b")` to the identical
+    string `"a,b"`, which would silently re-introduce the same
+    registry-order-dependent aliasing this key exists to prevent. Tuples of
+    strings compare lexicographically element-by-element, so two distinct
+    tuples can never collide into equal keys.
+    """
     platform = entry.platform
-    return (platform.architecture, platform.os, platform.os_version or "", platform.variant or "")
+    return (
+        platform.architecture,
+        platform.os,
+        platform.os_version or "",
+        platform.variant or "",
+        platform.os_features,
+        platform.features,
+    )
 
 
 def serialize_observation_object(obj: ObservationObject) -> bytes:
     """§1's canonical minified form — the CAS-digested encoding.
 
-    `platforms` is sorted by `(architecture, os, os_version or "", variant or
-    "")` before serialization so registry-returned manifest-list ordering
-    never affects the digest, then dumped as
+    `platforms` is sorted by `platform_sort_key` (`(architecture, os,
+    os_version or "", variant or "", os_features, features)`, tuples
+    compared directly, never string-joined) before serialization so
+    registry-returned manifest-list ordering never affects the digest,
+    then dumped as
     `json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`.
     """
-    sorted_platforms = sorted(obj.platforms, key=_platform_sort_key)
+    sorted_platforms = sorted(obj.platforms, key=platform_sort_key)
     data = {"platforms": [_platform_entry_to_dict(e) for e in sorted_platforms]}
     text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return text.encode("utf-8")
