@@ -86,9 +86,10 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
     the PR added a brand-new `p/<ns>/<pkg>.json` (the path did not exist at
     the base ref — G-04). `before is None` -> always `"new-package"`.
     Otherwise `"human-review-required"` if `repository`, `owners`,
-    `status`, or `deprecated_message` differ, OR any tag present in both
-    `before.tags` and `after.tags` has a different `yanked` value (G-05's
-    expanded key set, ADR-4 disposition table) — else `"refresh"`.
+    `status`, `deprecated_message`, or `superseded_by` differ, OR any tag
+    present in both `before.tags` and `after.tags` has a different `yanked`
+    value (G-05's expanded key set, ADR-4 disposition table) — else
+    `"refresh"`.
     """
     if before is None:
         return "new-package"
@@ -97,6 +98,7 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
         or before.owners != after.owners
         or before.status != after.status
         or before.deprecated_message != after.deprecated_message
+        or before.superseded_by != after.superseded_by
     )
     if governance_changed:
         return "human-review-required"

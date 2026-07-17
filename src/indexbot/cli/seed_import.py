@@ -399,6 +399,7 @@ def run(
         created=clock.now_iso8601()[:10],
         desc=desc,
         upstream=upstream,
+        superseded_by=None,
         tags=tags,
     )
 

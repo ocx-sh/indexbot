@@ -39,6 +39,7 @@ def _minimal_root(**overrides: object) -> PackageRoot:
         "created": "2026-07-17",
         "desc": None,
         "upstream": None,
+        "superseded_by": None,
         "tags": {},
     }
     defaults.update(overrides)
@@ -59,6 +60,31 @@ def test_check_name_matches_path_mismatch_raises() -> None:
     root = _minimal_root(name="ocx.sh/astral-sh/uv")
     with pytest.raises(ValidationError, match="G-02"):
         validate_entry.check_name_matches_path(package_id, root)
+
+
+# --- check_superseded_by -----------------------------------------------------
+
+
+def test_check_superseded_by_none_is_a_noop() -> None:
+    root = _minimal_root(superseded_by=None)
+    validate_entry.check_superseded_by(root)  # no raise
+
+
+def test_check_superseded_by_valid_successor_ok() -> None:
+    root = _minimal_root(name="ocx.sh/kitware/cmake", superseded_by="kitware/cmake-ng")
+    validate_entry.check_superseded_by(root)  # no raise
+
+
+def test_check_superseded_by_bad_shape_raises() -> None:
+    root = _minimal_root(superseded_by="not-a-valid-id")
+    with pytest.raises(ValidationError, match="not a valid"):
+        validate_entry.check_superseded_by(root)
+
+
+def test_check_superseded_by_self_reference_raises() -> None:
+    root = _minimal_root(name="ocx.sh/kitware/cmake", superseded_by="kitware/cmake")
+    with pytest.raises(ValidationError, match="cannot reference its own package"):
+        validate_entry.check_superseded_by(root)
 
 
 # --- check_namespace_not_reserved -------------------------------------------
@@ -350,6 +376,7 @@ def test_serialize_package_root_full_shape_and_key_order() -> None:
         created="2026-07-17",
         desc=desc,
         upstream=upstream,
+        superseded_by="kitware/cmake-ng",
         tags={"3.28.1": tag},
     )
     raw = validate_entry.serialize_package_root(root)
@@ -364,6 +391,7 @@ def test_serialize_package_root_full_shape_and_key_order() -> None:
         "created",
         "desc",
         "upstream",
+        "superseded_by",
         "tags",
     ]
     assert parsed["upstream"] == {
@@ -371,6 +399,7 @@ def test_serialize_package_root_full_shape_and_key_order() -> None:
         "repository_url": "https://github.com/Kitware/CMake",
         "disclaimer": None,
     }
+    assert parsed["superseded_by"] == "kitware/cmake-ng"
 
 
 def test_serialize_package_root_omits_upstream_when_none() -> None:
@@ -387,6 +416,28 @@ def test_serialize_package_root_omits_upstream_when_none() -> None:
         "desc",
         "tags",
     ]
+
+
+def test_serialize_package_root_omits_superseded_by_when_none() -> None:
+    root = _minimal_root(superseded_by=None)
+    parsed = json.loads(validate_entry.serialize_package_root(root))
+    assert "superseded_by" not in parsed
+    assert list(parsed.keys()) == [
+        "name",
+        "repository",
+        "owners",
+        "status",
+        "deprecated_message",
+        "created",
+        "desc",
+        "tags",
+    ]
+
+
+def test_serialize_package_root_includes_superseded_by_when_set() -> None:
+    root = _minimal_root(superseded_by="kitware/cmake-ng")
+    parsed = json.loads(validate_entry.serialize_package_root(root))
+    assert parsed["superseded_by"] == "kitware/cmake-ng"
 
 
 def test_serialize_package_root_writes_desc_null_when_none() -> None:
@@ -461,6 +512,24 @@ def test_parse_package_root_round_trips_minimal_root_no_upstream_null_desc() -> 
     root = _minimal_root()
     raw = validate_entry.serialize_package_root(root)
     assert validate_entry.parse_package_root(raw) == root
+
+
+def test_parse_package_root_superseded_by_absent_key_defaults_to_none() -> None:
+    # Older wire payload predating this field entirely -- `.get` fallback,
+    # not just the round-trip of this module's own serializer output.
+    payload = json.dumps(
+        {
+            "name": "ocx.sh/kitware/cmake",
+            "repository": "oci://ghcr.io/ocx-contrib/cmake",
+            "owners": [{"github": "alice", "github_id": 1}],
+            "status": "active",
+            "deprecated_message": None,
+            "created": "2026-07-17",
+            "desc": None,
+            "tags": {},
+        }
+    ).encode("utf-8")
+    assert validate_entry.parse_package_root(payload).superseded_by is None
 
 
 def test_parse_package_root_malformed_json_raises() -> None:

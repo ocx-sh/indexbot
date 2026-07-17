@@ -25,6 +25,7 @@ def _root(
     *,
     status: Status = "active",
     repository: str = "oci://ghcr.io/ocx-contrib/cmake",
+    superseded_by: str | None = None,
 ) -> PackageRoot:
     return PackageRoot(
         name="ocx.sh/kitware/cmake",
@@ -34,6 +35,7 @@ def _root(
         deprecated_message=None,
         created="2026-07-17",
         desc=None,
+        superseded_by=superseded_by,
         tags=dict(tags),
     )
 
@@ -124,6 +126,12 @@ def test_classify_change_before_none_is_new_package() -> None:
 def test_classify_change_repository_diff_is_human_review() -> None:
     before = _root({}, repository="oci://ghcr.io/ocx-contrib/cmake")
     after = _root({}, repository="oci://ghcr.io/ocx-contrib/cmake2")
+    assert classify_change(before, after) == "human-review-required"
+
+
+def test_classify_change_superseded_by_diff_is_human_review() -> None:
+    before = _root({}, superseded_by=None)
+    after = _root({}, superseded_by="kitware/cmake-ng")
     assert classify_change(before, after) == "human-review-required"
 
 

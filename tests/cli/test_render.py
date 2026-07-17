@@ -105,6 +105,7 @@ def test_writes_only_dist_files_when_site_dist_omitted() -> None:
     assert result == ExitCode.OK
     assert set(files.files) - before == {
         "dist/config.json",
+        "dist/c/index.json",
         "dist/p/kitware/cmake.json",
         f"dist/p/kitware/cmake/o/sha256/{hex_digest}.json",
         "dist/data/catalog/packages.json",

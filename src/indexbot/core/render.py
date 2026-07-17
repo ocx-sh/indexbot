@@ -4,9 +4,10 @@ order:
 
 1. `wrapper_pages` — VitePress compile *input*, written to `site/src/**`
    *before* `bun run docs:build` runs.
-2. `dist_files` — `config.json`, the `/p/**` wire mirror, and `/data/catalog/
-   **` (catalog UI summary data, NOT wire contract — CONTRACTS.md §8), written
-   to `site/.vitepress/dist/**` *after* the VitePress build (`emptyOutDir`
+2. `dist_files` — `config.json`, the `/p/**` wire mirror, `/c/index.json`
+   (bare package listing, CONTRACTS.md §8), and `/data/catalog/**` (catalog
+   UI summary data, NOT wire contract — CONTRACTS.md §8), written to
+   `site/.vitepress/dist/**` *after* the VitePress build (`emptyOutDir`
    footgun; see ADR-3 Technical Details).
 
 `build_render_plan` is pure (CONTRACTS.md §0): no I/O, no ports. `cli/
@@ -21,6 +22,7 @@ wire contract, ADR-3) — the `site/` slice has not landed on this branch yet
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -156,6 +158,21 @@ def _catalog_entry(source: SourcePackage) -> dict[str, object]:
     }
 
 
+def _package_index(ordered: Sequence[SourcePackage], *, format_version: int) -> str:
+    """`c/index.json` — a bare package listing: every package id in
+    `ordered` mapped to its root's content digest (CONTRACTS.md §8). The
+    digest sources from `source.root_raw`'s exact committed bytes, never a
+    re-serialization through the dataclass — the same "root bytes are never
+    digested for wire-contract purposes, only referenced" rationale as
+    `validate_entry.serialize_package_root`; here it's simply hashed for a
+    listing digest, not a CAS content address."""
+    packages = {
+        str(source.package_id): f"sha256:{hashlib.sha256(source.root_raw).hexdigest()}"
+        for source in ordered
+    }
+    return json.dumps({"format_version": format_version, "packages": packages}, indent=2) + "\n"
+
+
 def build_render_plan(packages: Sequence[SourcePackage], *, format_version: int = 1) -> RenderPlan:
     """Pure (CONTRACTS.md §0) — no I/O. See module docstring for the two
     output trees and their write-order contract."""
@@ -177,6 +194,13 @@ def build_render_plan(packages: Sequence[SourcePackage], *, format_version: int 
     ]
     for source in ordered:
         dist_files.extend(_package_dist_files(source))
+
+    dist_files.append(
+        FileWrite(
+            path="c/index.json",
+            content=_package_index(ordered, format_version=format_version),
+        )
+    )
 
     dist_files.append(
         FileWrite(

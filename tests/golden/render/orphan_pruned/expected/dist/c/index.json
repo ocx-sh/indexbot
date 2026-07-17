@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "packages": {
+    "oven-sh/bun": "sha256:b535319a5cb149a79e42c2f0d821d8a8f4ed2307b80dc363ae4a9f013751d48e"
+  }
+}

@@ -26,6 +26,7 @@ import re
 from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
+from indexbot.core.validate_payload import parse_package_id
 from indexbot.errors import AnomalyError, ValidationError
 from indexbot.model import (
     Desc,
@@ -105,6 +106,43 @@ def check_name_matches_path(package_id: PackageId, root: PackageRoot) -> None:
     if root.name != expected:
         raise ValidationError(
             f"root name {root.name!r} does not match path-derived name {expected!r} (G-02)"
+        )
+
+
+def check_superseded_by(root: PackageRoot) -> None:
+    """`root.superseded_by`, when set, must be a shape-valid
+    `<namespace>/<package>` id (reused via `validate_payload.parse_package_id`
+    — never a second hand-rolled regex, ADR-4 BD-4) that does not name
+    `root` itself.
+
+    `root.superseded_by is None` is a no-op — a package that has not been
+    superseded carries no constraint here.
+
+    Deliberately **not** checked (do not silently add these — they are
+    scope decisions, not oversights):
+
+    - **No status coupling**: `superseded_by` is independent of
+      `root.status` — a package can name a successor while still `active`,
+      or be `deprecated`/`yanked` with no successor at all. `superseded ≠
+      deprecated`.
+    - **No existence/reserved-namespace check**: the named successor is not
+      required to already exist as a committed root, nor is it checked
+      against `RESERVED_NAMESPACE_SEGMENTS` — a dangling or not-yet-claimed
+      successor is allowed, the same free-text-pointer treatment
+      `deprecated_message` already gets.
+    """
+    if root.superseded_by is None:
+        return
+    try:
+        parse_package_id(root.superseded_by)
+    except ValidationError as exc:
+        raise ValidationError(
+            f"superseded_by {root.superseded_by!r} is not a valid <namespace>/<package> id: {exc}"
+        ) from exc
+    this_id = root.name.removeprefix("ocx.sh/")
+    if root.superseded_by == this_id:
+        raise ValidationError(
+            f"superseded_by {root.superseded_by!r} cannot reference its own package ({root.name!r})"
         )
 
 
@@ -297,6 +335,8 @@ def serialize_package_root(root: PackageRoot) -> bytes:
     }
     if root.upstream is not None:
         data["upstream"] = _upstream_to_dict(root.upstream)
+    if root.superseded_by is not None:
+        data["superseded_by"] = root.superseded_by
     data["tags"] = {tag: _tag_entry_to_dict(entry) for tag, entry in root.tags.items()}
     text = json.dumps(data, indent=2, sort_keys=False) + "\n"
     return text.encode("utf-8")
@@ -325,6 +365,7 @@ def parse_package_root(raw: bytes) -> PackageRoot:
         desc = None if desc_raw is None else _desc_from_dict(desc_raw)
         upstream_raw = data.get("upstream")
         upstream = None if upstream_raw is None else _upstream_from_dict(upstream_raw)
+        superseded_by = data.get("superseded_by")
         tags = {name: _tag_entry_from_dict(t) for name, t in data["tags"].items()}
         return PackageRoot(
             name=data["name"],
@@ -335,6 +376,7 @@ def parse_package_root(raw: bytes) -> PackageRoot:
             created=data["created"],
             desc=desc,
             upstream=upstream,
+            superseded_by=superseded_by,
             tags=tags,
         )
     except (KeyError, TypeError, AttributeError) as exc:

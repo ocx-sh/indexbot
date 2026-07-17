@@ -25,8 +25,9 @@ def regenerate(
     desc: Desc | None,
     clock: ClockPort,
 ) -> PackageRoot:
-    """Rebuild `current.tags` from `observations`; every other field is
-    carried over verbatim from `current` (human-governed, G-09).
+    """Rebuild `current.tags` from `observations`; every other field
+    (including `superseded_by`) is carried over verbatim from `current`
+    (human-governed, G-09).
 
     `desc`: pass `current.desc` unchanged when `core/desc.py` found no
     change, or the new `Desc` from a non-`None` `DescUpdate.desc` when it
@@ -62,5 +63,6 @@ def regenerate(
         created=current.created,
         desc=desc,
         upstream=current.upstream,
+        superseded_by=current.superseded_by,
         tags=new_tags,
     )

@@ -10,6 +10,7 @@ pruning is verified by absence, not just by what's present.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -326,6 +327,24 @@ def test_build_render_plan_respects_format_version_param() -> None:
     config = next(fw for fw in plan.dist_files if fw.path == "config.json")
     assert isinstance(config.content, str)
     assert json.loads(config.content) == {"format_version": 7}
+
+
+def test_build_render_plan_package_index_digest_matches_root_raw_sha256() -> None:
+    packages = _case_no_desc()
+    plan = build_render_plan(packages)
+    index_file = next(fw for fw in plan.dist_files if fw.path == "c/index.json")
+    assert isinstance(index_file.content, str)
+    index = json.loads(index_file.content)
+    assert index["format_version"] == 1
+    expected_digest = f"sha256:{hashlib.sha256(packages[0].root_raw).hexdigest()}"
+    assert index["packages"] == {"mvdan/shfmt": expected_digest}
+
+
+def test_build_render_plan_package_index_empty_for_no_packages() -> None:
+    plan = build_render_plan([])
+    index_file = next(fw for fw in plan.dist_files if fw.path == "c/index.json")
+    assert isinstance(index_file.content, str)
+    assert json.loads(index_file.content) == {"format_version": 1, "packages": {}}
 
 
 def test_build_render_plan_reachability_readme_without_logo() -> None:

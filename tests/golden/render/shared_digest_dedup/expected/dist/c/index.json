@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "packages": {
+    "ziglang/zig": "sha256:44c05a5d5f3d002dacb15f4eeff7fc6d7c98af4a1a0174c4e9bd67a5b36a900b"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "packages": {
+    "astral-sh/uv": "sha256:59522d2cfe5ecf5ac23d2f9c33f581f4c4a1b00a18a07572fa9ef7c92093854f"
+  }
+}

@@ -38,6 +38,7 @@ from indexbot.core.validate_entry import (
     check_no_dangling_references,
     check_repository_allowlisted,
     check_repository_shape,
+    check_superseded_by,
     parse_digest,
     parse_observation_object,
     parse_package_root,
@@ -146,6 +147,7 @@ def _validate_one(
         package_id = _package_id_from_root_path(path)
 
         check_name_matches_path(package_id, root)
+        check_superseded_by(root)
         if allow_reserved:
             print(
                 f"{path}: --allow-reserved-namespace used (brand-segment carve-out — "

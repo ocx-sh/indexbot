@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "packages": {
+    "kitware/cmake": "sha256:45b268eaae377007548640f5e408f86345839191430671e5d73777277f8f8cf9"
+  }
+}

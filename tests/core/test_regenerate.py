@@ -21,7 +21,7 @@ _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 
 
-def _root(tags: dict[str, TagEntry]) -> PackageRoot:
+def _root(tags: dict[str, TagEntry], *, superseded_by: str | None = None) -> PackageRoot:
     return PackageRoot(
         name="ocx.sh/kitware/cmake",
         repository="oci://ghcr.io/ocx-contrib/cmake",
@@ -31,6 +31,7 @@ def _root(tags: dict[str, TagEntry]) -> PackageRoot:
         created="2026-07-17",
         upstream=_UPSTREAM,
         desc=None,
+        superseded_by=superseded_by,
         tags=dict(tags),
     )
 
@@ -77,7 +78,7 @@ def test_regenerate_drops_tag_absent_from_observations() -> None:
 
 
 def test_regenerate_carries_over_governance_fields_verbatim() -> None:
-    current = _root({})
+    current = _root({}, superseded_by="kitware/cmake-ng")
     result = regenerate(current, (), None, FixedClock(fixed="T1"))
     assert result.name == current.name
     assert result.repository == current.repository
@@ -86,6 +87,7 @@ def test_regenerate_carries_over_governance_fields_verbatim() -> None:
     assert result.deprecated_message == current.deprecated_message
     assert result.created == current.created
     assert result.upstream == current.upstream
+    assert result.superseded_by == current.superseded_by
 
 
 def test_regenerate_uses_caller_supplied_desc() -> None:

@@ -194,6 +194,11 @@ class PackageRoot:
 
     `tags` defaults to an empty map for the not-yet-observed case (a
     freshly-claimed namespace before the first `announce`).
+
+    `superseded_by` defaults to `None` — omitted entirely for a package that
+    has not been superseded (schema forbids `null` there, mirroring
+    `upstream`'s omit-when-absent contract). When set, it names the
+    successor package's `<namespace>/<package>` id.
     """
 
     name: str
@@ -204,4 +209,5 @@ class PackageRoot:
     created: str
     desc: Desc | None
     upstream: Upstream | None = None
+    superseded_by: str | None = None
     tags: dict[str, TagEntry] = field(default_factory=_empty_tags)

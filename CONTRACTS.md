@@ -143,6 +143,14 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
 
 - `check_name_matches_path(package_id: PackageId, root: PackageRoot) -> None`
   — G-02: `root.name == f"ocx.sh/{package_id.namespace}/{package_id.package}"`.
+- `check_superseded_by(root: PackageRoot) -> None` — no-op when
+  `root.superseded_by is None`; otherwise the value must shape-validate as a
+  `<namespace>/<package>` id (reusing `validate_payload.parse_package_id` —
+  never a second hand-rolled regex) and must not name `root` itself.
+  Deliberately does **not** check `root.status` coupling (a package can name
+  a successor while still `active`) nor whether the named successor exists
+  or is reserved (a dangling/not-yet-claimed successor is allowed, like
+  `deprecated_message`'s free-text pointer).
 - `check_repository_allowlisted(repository: str) -> None` — G-03. Parses the
   `oci://<host>/<path>` URI (stdlib `urllib.parse`, no regex needed for the
   scheme/host split) and checks `host in REPOSITORY_HOST_ALLOWLIST`. **Must
@@ -182,8 +190,10 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
   only referenced by `TagEntry.content`, which points at an
   `ObservationObject`, not at the root itself). `upstream: None` -> the
   `"upstream"` key is **omitted** from the dict entirely (schema forbids
-  `null` there, ADR-2 ND-9); `desc: None` -> `"desc": null` is written
-  (schema requires the key, allows `null`, ADR-1 D6). `parse_package_root`
+  `null` there, ADR-2 ND-9); `superseded_by: None` -> the `"superseded_by"`
+  key is likewise **omitted** entirely (same omit-when-absent contract);
+  `desc: None` -> `"desc": null` is written (schema requires the key, allows
+  `null`, ADR-1 D6). `parse_package_root`
   raises `ValidationError` on any structurally malformed input (missing
   required key, wrong JSON type) — it does not re-validate shape-schema
   concerns already covered by `check-jsonschema` (regex patterns, enum
@@ -381,8 +391,8 @@ def regenerate(
   before the first `announce` ever runs — `regenerate` never synthesizes a
   root from scratch).
 - Human-governed fields (`name`, `repository`, `owners`, `status`,
-  `deprecated_message`, `created`, `upstream`) are carried over **verbatim**
-  from `current` — never regenerated (G-09).
+  `deprecated_message`, `created`, `upstream`, `superseded_by`) are carried
+  over **verbatim** from `current` — never regenerated (G-09).
 - `desc`: pass `current.desc` unchanged when `core/desc.py` found no change,
   or the new `Desc` from a non-`None` `DescUpdate.desc` when it did.
   `regenerate` does not call `core/desc.py` itself — the caller composes
@@ -434,9 +444,10 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
     the PR added a brand-new `p/<ns>/<pkg>.json` (the path did not exist at
     the base ref — G-04). `before is None` -> always `"new-package"`.
     Otherwise `"human-review-required"` if `repository`, `owners`,
-    `status`, or `deprecated_message` differ, OR any tag present in both
-    `before.tags` and `after.tags` has a different `yanked` value (G-05's
-    expanded key set, ADR-4 disposition table) — else `"refresh"`.
+    `status`, `deprecated_message`, or `superseded_by` differ, OR any tag
+    present in both `before.tags` and `after.tags` has a different `yanked`
+    value (G-05's expanded key set, ADR-4 disposition table) — else
+    `"refresh"`.
     """
 ```
 
@@ -521,6 +532,13 @@ too).
   verbatim (never re-serialize through the dataclass — see §5's rationale).
 - Every reachable `p/<namespace>/<package>/o/sha256/<hex>.<ext>` — copied
   verbatim from `content_by_digest`.
+- `c/index.json`: `{"format_version": format_version, "packages": {"<ns>/<pkg>": "sha256:<hex>", ...}}`
+  — one entry per package in `ordered`, keyed on the bare `<namespace>/<package>`
+  id (not the `ocx.sh/`-prefixed `name`). The digest is `sha256` of
+  `source.root_raw`'s **exact committed bytes** — explicitly **not** a
+  re-serialization through §1's canonical form (root bytes are never digested
+  for wire-contract purposes elsewhere either, same rationale as §5's
+  `serialize_package_root`).
 - `/data/catalog/**` — summary JSON the catalog UI reads, referencing blobs
   by their CAS URL (never duplicating blob bytes into `/data/catalog`, per
   ADR-3's explicit divergence from `ocx-sh/ocx`'s website). **Not** wire
