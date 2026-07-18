@@ -3,9 +3,10 @@
 Plain, frozen, slotted data only — no validation logic. Format validation
 against `schema/*.json` runs via `check-jsonschema` (never imported here);
 semantic checks (path<->name derivation, digest `fullmatch`, host allowlist,
-...) are `core/validate_entry.py` / `core/validate_payload.py` (Phase 2).
-Every type here is immutable by construction: the bot never mutates an
-observed value in place, it always computes a new one and rebinds.
+...) are `core/validate_entry.py` (Phase 2; `core/validate_payload.py`
+merged into it, fork-PR announce revamp). Every type here is immutable by
+construction: the bot never mutates an observed value in place, it always
+computes a new one and rebinds.
 """
 
 from __future__ import annotations
@@ -148,11 +149,11 @@ class ObservationObject:
 @dataclass(frozen=True, slots=True)
 class PackageId:
     """`<namespace>/<package>` — the logical id parsed from a
-    `p/<ns>/<pkg>.json` path or a `repository_dispatch` payload's `package`
-    field. Distinct from `PackageRoot.name`, which is the full
+    `p/<ns>/<pkg>.json` path or `cli/announce.py`'s `--package` argument.
+    Distinct from `PackageRoot.name`, which is the full
     `ocx.sh/<namespace>/<package>` form. Format validated by
-    `core/validate_payload.py`'s `PACKAGE_ID_RE` (Phase 2); this type only
-    carries the two already-validated parts.
+    `core/validate_entry.py`'s `PACKAGE_ID_RE`; this type only carries the
+    two already-validated parts.
     """
 
     namespace: str
@@ -170,12 +171,24 @@ class PullRequestInfo:
     a checkout (ADR-4 BD-5's `governance-gate` trust boundary: `changed_paths`
     is what G-04's "added `p/*.json` path" and G-05's human-review key-set
     checks key off).
+
+    `author_login`/`author_id` (fork-PR announce revamp, G-19): the PR
+    author's GitHub identity — `author_id` is the stable numeric id (survives
+    username rename/recycling, same rationale as `Owner.github_id`),
+    `author_login` the current login (self-review carve-out display /
+    reviewer-list filtering, `cli/governance_check.py`). `cli/classify_pr.py`
+    does not read either field; they exist for `governance_check.py`'s G-19
+    "PR author `github_id` in every touched package's `owners[]`" gate.
+    Defaulted (not required) so every existing `classify_pr`-only construction
+    site stays unchanged; a caller that needs G-19 always sets both.
     """
 
     number: int
     base_sha: str
     head_sha: str
     changed_paths: tuple[str, ...]
+    author_login: str = ""
+    author_id: int = 0
 
 
 def _empty_tags() -> dict[str, TagEntry]:

@@ -4,13 +4,15 @@ adapters (ADR-4 BD-1; WP2-M).
 `_DISPATCH` is seeded from `cli/_wiring.py`'s `DISPATCH` — the one module
 that constructs real `adapters/*` instances — so this file itself never
 imports `adapters/*` or `httpx`. `_ARG_POPULATORS` supplies each registered
-subcommand's CLI surface: `validate`, `classify-pr`, and `governance-check`
-reuse their own modules' `add_arguments` (that convention); `announce`,
-`reconcile`, `render`, and `seed-import` don't define an equivalent
-`add_arguments` of their own (CONTRACTS.md §12 documents each module's
-expected `args.*` attributes only in prose), so this file hand-rolls their
-argparse surfaces directly from those docstrings. See `open_questions` for
-the resulting convention gap.
+subcommand's CLI surface: `validate`, `classify-pr`, `governance-check`,
+`announce`, and `reconcile` reuse their own modules' `add_arguments` (fork-PR
+announce revamp widened that convention to cover both — their CLI surfaces
+are non-trivial enough, mutually-exclusive groups included, to live next to
+the module they belong to); `render` and `seed-import` don't define an
+equivalent `add_arguments` of their own (CONTRACTS.md §12 documents each
+module's expected `args.*` attributes only in prose), so this file
+hand-rolls their argparse surfaces directly from those docstrings. See
+`open_questions` for the resulting convention gap.
 
 Exit-code contract: argparse's own convention (missing/unknown subcommand,
 `--version`/`--help`) exits 2/0 unchanged, per argparse convention. A
@@ -28,8 +30,10 @@ from collections.abc import Callable, Sequence
 from typing import cast
 
 from indexbot import __version__
+from indexbot.cli import announce as _announce_cli
 from indexbot.cli import classify_pr as _classify_pr_cli
 from indexbot.cli import governance_check as _governance_check_cli
+from indexbot.cli import reconcile as _reconcile_cli
 from indexbot.cli import validate as _validate_cli
 from indexbot.cli._wiring import DISPATCH as _PRODUCTION_DISPATCH
 from indexbot.errors import IndexBotError
@@ -40,31 +44,6 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], ExitCode]] = dict(_PRODUCTIO
 `announce`, `reconcile`, `validate`, `render`, `seed-import`. A plain `dict`
 copy (not a re-exported reference) so tests may freely `monkeypatch.setitem`
 this module's own `_DISPATCH` without mutating `cli/_wiring.DISPATCH`."""
-
-
-def _add_announce_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--package",
-        default=None,
-        help=(
-            "<namespace>/<package> override for manual/local invocation — bypasses the "
-            "PACKAGE_ID env var entirely; the real announce.yml workflow never passes this"
-        ),
-    )
-    parser.add_argument(
-        "--validate-only",
-        action="store_true",
-        help="stop after payload-shape validation only (no network, no write scope)",
-    )
-
-
-def _add_reconcile_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--dry-run", action="store_true", help="report drift without committing or opening a PR"
-    )
-    parser.add_argument(
-        "--package", default=None, help="scope the sweep to one <namespace>/<package>"
-    )
 
 
 def _add_render_arguments(parser: argparse.ArgumentParser) -> None:
@@ -117,8 +96,8 @@ def _add_seed_import_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 _ARG_POPULATORS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
-    "announce": _add_announce_arguments,
-    "reconcile": _add_reconcile_arguments,
+    "announce": _announce_cli.add_arguments,
+    "reconcile": _reconcile_cli.add_arguments,
     "validate": _validate_cli.add_arguments,
     "render": _add_render_arguments,
     "seed-import": _add_seed_import_arguments,

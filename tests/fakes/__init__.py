@@ -123,8 +123,18 @@ class FakeGitHub:
     statuses: dict[str, list[tuple[str, CommitStatusState, str]]] = field(
         default_factory=dict[str, list[tuple[str, CommitStatusState, str]]]
     )
+    requested_reviewers: dict[int, list[str]] = field(default_factory=dict[int, list[str]])
+    comments: dict[int, dict[str, str]] = field(default_factory=dict[int, dict[str, str]])
+    """pr_number -> {marker: body} — mirrors `GitHubApi.create_comment`'s
+    one-comment-per-marker idempotency without modeling a full ordered
+    comment thread (no `core/`/`cli/` consumer needs anything beyond "what's
+    the current body under this marker")."""
+    issues: dict[str, tuple[int, str]] = field(default_factory=dict[str, tuple[int, str]])
+    """title -> (number, body), for `create_or_update_issue`'s
+    idempotent-per-exact-title fake."""
     _next_pr_number: int = field(default=1, init=False, repr=False)
     _next_commit_sha: int = field(default=1, init=False, repr=False)
+    _next_issue_number: int = field(default=1, init=False, repr=False)
 
     def get_file_contents(self, path: str, ref: str) -> bytes | None:
         return self.files.get((path, ref))
@@ -149,12 +159,15 @@ class FakeGitHub:
         self.refs[branch] = new_sha
         return new_sha
 
-    def open_or_update_pull_request(self, *, branch: str, base: str, title: str, body: str) -> int:
-        del base, title, body  # not modeled — fake tracks branch -> PR number only
-        if branch in self.pull_requests:
-            return self.pull_requests[branch]
+    def open_or_update_pull_request(
+        self, *, branch: str, base: str, title: str, body: str, head_owner: str | None = None
+    ) -> int:
+        del base, title, body  # not modeled — fake tracks head -> PR number only
+        head = branch if head_owner is None else f"{head_owner}:{branch}"
+        if head in self.pull_requests:
+            return self.pull_requests[head]
         number = self._next_pr_number
-        self.pull_requests[branch] = number
+        self.pull_requests[head] = number
         self._next_pr_number += 1
         return number
 
@@ -174,6 +187,23 @@ class FakeGitHub:
         self, sha: str, *, context: str, state: CommitStatusState, description: str
     ) -> None:
         self.statuses.setdefault(sha, []).append((context, state, description))
+
+    def request_reviewers(self, pr_number: int, logins: list[str]) -> None:
+        self.requested_reviewers.setdefault(pr_number, []).extend(logins)
+
+    def create_comment(self, pr_number: int, body: str, *, marker: str) -> None:
+        self.comments.setdefault(pr_number, {})[marker] = body
+
+    def create_or_update_issue(
+        self, *, title: str, body: str, labels: list[str] | None = None
+    ) -> int:
+        del labels  # not modeled — fake tracks title -> (number, body) only
+        existing = self.issues.get(title)
+        number = existing[0] if existing is not None else self._next_issue_number
+        if existing is None:
+            self._next_issue_number += 1
+        self.issues[title] = (number, body)
+        return number
 
 
 @dataclass

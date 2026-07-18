@@ -71,7 +71,8 @@ other module reuses; do not hand-roll a second encoder.
   (200/404/401-then-retry/429-with-Retry-After/5xx-exhausted/malformed-JSON).
   Assert on the *port-level* return/exception, not on respx call internals,
   so the test survives an adapter refactor.
-- **hypothesis** (`core/validate_payload.py`, WP2-A): `from_regex(PACKAGE_ID_RE,
+- **hypothesis** (`core/validate_entry.py`'s `parse_package_id`, re-homed
+  from the deleted `core/validate_payload.py`): `from_regex(PACKAGE_ID_RE,
   fullmatch=True)` for the acceptance property; a second strategy seeded with
   `..`, absolute paths (`/etc/passwd`), and shell/format-string injection
   tokens for the rejection property; a wall-clock-bounded test (`pytest-timeout`
@@ -97,43 +98,44 @@ New since scaffold: `OwnershipProbeResult`, `CommitStatusState`,
 contract (which raises `KeyError` vs `TransientError` vs `ValidationError`)
 and are not repeated here.
 
+Further additions, fork-PR announce revamp (2026-07-18): `PullRequestInfo`
+gains `author_login: str = ""`/`author_id: int = 0` (defaulted so every
+pre-existing `classify_pr`-only construction site stays unchanged — only
+`cli/governance_check.py`'s G-19 gate needs both set for real).
+`GitHubPort.open_or_update_pull_request` gains an optional
+`head_owner: str | None = None` keyword (cross-repo/fork-PR head,
+`f"{head_owner}:{branch}"`, vs. the same-repo plain `branch`).
+`GitHubPort` gains `request_reviewers(pr_number, logins)`,
+`create_comment(pr_number, body, *, marker)` (idempotent via a hidden HTML
+marker), and `create_or_update_issue(*, title, body, labels=None)` (promoted
+from an adapter-only capability — see §13 item 4). All three implemented in
+`adapters/github_api.py::GitHubApi` and `tests/fakes/__init__.py::FakeGitHub`.
+
 Types referenced below that are **not** in `model.py` (cross-`core/`-module
 data, deliberately kept out of the port-boundary file — see `ports.py`'s
 module docstring) must be defined by the owning module as a
 `@dataclass(frozen=True, slots=True)` exactly as shaped here.
 
-## 4. `core/validate_payload.py` (WP2-A)
+## 4. `core/validate_payload.py` — **removed** (fork-PR announce revamp, 2026-07-18)
 
-```python
-PACKAGE_ID_MAX_LENGTH: Final[int] = 140  # ADR-2 ND-3: 39 (namespace) + 1 ("/") + 100 (package)
-_NAMESPACE_MAX_LENGTH: Final[int] = 39
-_PACKAGE_MAX_LENGTH: Final[int] = 100
-
-_NAMESPACE_SHAPE = r"[a-z0-9](?:-?[a-z0-9])*"
-_PACKAGE_SHAPE = r"[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*"
-PACKAGE_ID_RE: Final[re.Pattern[str]] = re.compile(rf"^{_NAMESPACE_SHAPE}/{_PACKAGE_SHAPE}$")
-
-def parse_package_id(raw: str) -> PackageId: ...
-```
-
-`parse_package_id` is the concrete BD-4 length-cap-then-fullmatch algorithm,
-in three boring steps rather than one unreadable mega-regex:
-
-1. `len(raw) > PACKAGE_ID_MAX_LENGTH` -> `ValidationError`, checked *before*
-   any regex work (BD-4).
-2. `PACKAGE_ID_RE.fullmatch(raw) is None` -> `ValidationError` (shape only —
-   this regex is deliberately silent on per-segment length; a fullmatch
-   guarantees exactly one `/` in `raw`, which is what makes step 3 safe).
-3. `namespace, package = raw.split("/", 1)`; if
-   `len(namespace) > _NAMESPACE_MAX_LENGTH` or `len(package) > _PACKAGE_MAX_LENGTH`
-   -> `ValidationError` (catches e.g. a 1-char namespace + 138-char package,
-   which satisfies the combined 140-char budget but violates ADR-2 ND-3's
-   per-segment caps). Otherwise return `PackageId(namespace, package)`.
-
-This is the one and only place `PACKAGE_ID_RE` is used to validate a value —
-`cli/announce.py` calls it (via `cli/_common.py`'s `read_validated_env`,
-passing `PACKAGE_ID_RE` and `PACKAGE_ID_MAX_LENGTH` as arguments) on the raw
-`PACKAGE_ID` env var before anything else touches it.
+This module and its dedicated test file no longer exist. `PACKAGE_ID_MAX_LENGTH`,
+`_NAMESPACE_MAX_LENGTH`, `_PACKAGE_MAX_LENGTH`, `_NAMESPACE_SHAPE`,
+`_PACKAGE_SHAPE`, `PACKAGE_ID_RE`, and `parse_package_id` re-homed verbatim
+(zero behavior change) into `core/validate_entry.py` — see §5, which is now
+the single home for both the two-segment package-id grammar and the
+N-segment OCI repository grammar (BD-4's two-regex rule still holds: the two
+constants stay structurally distinct, only their *file* is shared now). The
+original rationale for a standalone module — `parse_package_id` was reached
+via `cli/_common.py`'s `read_validated_env`, the `repository_dispatch`
+`PACKAGE_ID` env-var-indirection reader (ADR-4 BD-4) — no longer applies:
+`cli/announce.py`'s doorbell pipeline (env var, `--validate-only`) retired
+entirely in the revamp (owner-confirmed decision set 2026-07-18,
+"Fork-PR announce": publishers open PRs from forks under their own GitHub
+identity, no index-side credentials, no doorbell). `read_validated_env`
+itself is deleted from `cli/_common.py` along with its tests — every
+remaining caller of `parse_package_id` (`cli/validate.py`,
+`cli/reconcile.py`, `cli/seed_import.py`) now imports it from
+`core/validate_entry.py` directly.
 
 ## 5. `core/validate_entry.py` (WP2-E)
 
@@ -154,7 +156,7 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
   — G-02: `root.name == f"ocx.sh/{package_id.namespace}/{package_id.package}"`.
 - `check_superseded_by(root: PackageRoot) -> None` — no-op when
   `root.superseded_by is None`; otherwise the value must shape-validate as a
-  `<namespace>/<package>` id (reusing `validate_payload.parse_package_id` —
+  `<namespace>/<package>` id (reusing this module's own `parse_package_id` —
   never a second hand-rolled regex) and must not name `root` itself.
   Deliberately does **not** check `root.status` coupling (a package can name
   a successor while still `active`) nor whether the named successor exists
@@ -173,12 +175,19 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
   `.logo`) is validated through this one function before it is ever used to
   build a filesystem path — digest-hex `fullmatch` before path join, no
   exceptions.
+- `check_digest_self_consistent(digest: str, object_bytes: bytes) -> None`
+  (fork-PR announce revamp, 2026-07-18) — the general form: recomputes sha256
+  of `object_bytes` (§1's canonical form — the object was already serialized
+  canonically when written, so this is a byte-equality check, not a
+  re-serialization) and compares to `digest`; mismatch is `AnomalyError`
+  (this is CAS integrity, not a routine validation failure — the file's name
+  lies about its own content). Any claimed digest string works here, not
+  only a `TagEntry`'s — `cli/validate.py`'s blanket per-file CAS scan and
+  `core/verify_claims.py`'s desc-blob hash check both need this, closing the
+  byte-exact-discipline gap where only tag digests were ever verified.
 - `check_content_digest_self_consistent(tag: TagEntry, object_bytes: bytes) -> None`
-  — recomputes sha256 of `object_bytes` (§1's canonical form — the object was
-  already serialized canonically when written, so this is a byte-equality
-  check, not a re-serialization) and compares to `tag.content`; mismatch is
-  `AnomalyError` (this is CAS integrity, not a routine validation failure —
-  the file's name lies about its own content).
+  — thin `TagEntry`-shaped wrapper over `check_digest_self_consistent(tag.content,
+  object_bytes)`, kept for its pre-existing callers/tests.
 - `check_no_dangling_references(root: PackageRoot, cas_digests: frozenset[str]) -> None`
   — every `TagEntry.content` and `Desc.readme`/`Desc.logo` (when `desc` is
   not `None`) must appear in `cas_digests` (the set of digests actually
@@ -313,19 +322,29 @@ class Observation:
     content_digest: str          # sha256:<hex>, §1 canonical form of `object`
     object: ObservationObject
 
+def observe_one_tag(repository: str, tag: str, registry: RegistryPort) -> Observation | None:
+    """One tag's freshly observed state, or `None` if `tag` no longer exists
+    on `repository` (a real 404). Same manifest-shape handling as `observe`
+    below, extracted (fork-PR announce revamp, 2026-07-18) so a caller that
+    already knows which *specific* tags it cares about — `core/verify_claims.py`
+    re-deriving one claimed tag, `cli/announce.py` observing only the
+    publisher's curated tag set — never has to call `registry.list_tags()`
+    first just to reach a single tag's manifest.
+    """
+
 def observe(repository: str, registry: RegistryPort) -> tuple[Observation, ...]:
-    """One `Observation` per `registry.list_tags(repository)` entry. For
-    each tag, `registry.get_manifest(repository, tag)` returns either an OCI
-    image manifest (single platform) or an image index (multi-platform) —
-    distinguish by the `mediaType`/`manifests` key per the OCI
-    image-spec; a bare manifest becomes a one-entry `platforms[]` (its own
+    """One `Observation` per `registry.list_tags(repository)` entry, via
+    `observe_one_tag` (zero behavior change from the pre-revamp inline
+    version). For each tag, `registry.get_manifest(repository, tag)` returns
+    either an OCI image manifest (single platform) or an image index
+    (multi-platform) — distinguish by the `mediaType`/`manifests` key per the
+    OCI image-spec; a bare manifest becomes a one-entry `platforms[]` (its own
     `platform`/`config.platform` field — image manifests carry platform
     info directly, not per the index shape); an index's `manifests[]`
     entries each become one `PlatformEntry`. `platforms[]` is sorted and
     digested per §1. A tag whose manifest fetch raises `KeyError` (fetched
     but vanished between `list_tags` and `get_manifest` — a real registry
-    race) is **skipped**, not fatal — `list_tags` and `get_manifest` are two
-    separate calls with no atomicity guarantee between them. A
+    race) is **skipped**, not fatal — `observe_one_tag` returning `None`. A
     `TransientError` from either call propagates uncaught (the whole
     `observe()` call fails transient, per BD-2 — no partial-tag
     silently-skipped-on-backoff-exhaustion semantics; that's different from
@@ -333,6 +352,56 @@ def observe(repository: str, registry: RegistryPort) -> tuple[Observation, ...]:
     backoff).
     """
 ```
+
+### `core/verify_claims.py` (fork-PR announce revamp, 2026-07-18 — new)
+
+```python
+FindingKind = Literal[
+    "tag-missing-upstream", "digest-mismatch",
+    "cas-object-missing", "cas-object-hash-mismatch",
+    "desc-blob-missing", "desc-blob-hash-mismatch",
+]
+
+@dataclass(frozen=True, slots=True)
+class ClaimFinding:
+    package_id: PackageId
+    kind: FindingKind
+    detail: str  # claimed tag name, or "desc.readme"/"desc.logo"
+
+def verify_claims(
+    package_id: PackageId,
+    root: PackageRoot,
+    cas_object_bytes: Mapping[str, bytes],
+    registry: RegistryPort,
+) -> tuple[ClaimFinding, ...]:
+```
+
+Re-derives every *claimed* tag/desc-blob digest in `root` individually from
+`registry` truth — **subset semantics**, never a full-set equality against
+`registry.list_tags()` (an owner's curated `tags` map may legitimately be a
+subset of what the registry carries; that is the entire point of owner
+curation — decision-set item 2, "announce is the only add/remove
+authority"). Per tag: `observe_one_tag(root.repository, tag, registry)`
+returning `None` -> `"tag-missing-upstream"`; a different `content_digest`
+-> `"digest-mismatch"`; the claimed digest missing from/not hashing to
+`cas_object_bytes` -> `"cas-object-missing"`/`"cas-object-hash-mismatch"`.
+`root.desc.readme`/`.logo`, when set, get the identical CAS-hash check
+(missing/mismatch -> `"desc-blob-missing"`/`"desc-blob-hash-mismatch"`) —
+closing the gap where only tag digests were ever byte-verified (byte-exact
+discipline). Pure — returns findings, **never raises**; the caller decides
+disposition. Two callers, two dispositions for the same taxonomy:
+`cli/validate.py`'s unprivileged PR gate treats any finding as a
+`ValidationError` (reject the PR — nothing was ever legitimately observed to
+mutate, the claim just isn't true right now); `cli/reconcile.py`'s
+verify-only nightly sweep escalates every finding kind to its `AnomalyError`
+exit-65 outcome **except** a `"digest-mismatch"` on a floating (non-pinned)
+tag and a `"tag-missing-upstream"` on a *yanked* tag (ADR-6 FP-2/FP-3 — yank
+is grace, an explicit owner-authorized exemption from the
+registry-existence check; everything else vanished-upstream is an anomaly,
+not a silent drop) — see §12's `cli/reconcile.py` entry for the full
+disposition table: floating-tag drift is expected cascade behavior, and a
+still-*pinned*-tag mutation is caught by the reused
+`core/anomaly.py::check_tag_mutations` instead, not by `verify_claims`.
 
 ### `core/desc.py`
 
@@ -452,11 +521,20 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
     """`cli/classify_pr.py`'s core. `before` is the base-ref root, `None` if
     the PR added a brand-new `p/<ns>/<pkg>.json` (the path did not exist at
     the base ref — G-04). `before is None` -> always `"new-package"`.
-    Otherwise `"human-review-required"` if `repository`, `owners`,
-    `status`, `deprecated_message`, or `superseded_by` differ, OR any tag
-    present in both `before.tags` and `after.tags` has a different `yanked`
-    value (G-05's expanded key set, ADR-4 disposition table) — else
-    `"refresh"`.
+
+    Otherwise the machine lane is narrow by design (fork-PR announce revamp,
+    2026-07-18): **any field outside `tags`/`desc` changing is
+    `"human-review-required"`** — every governance field
+    `product-context.md` lists is human-authored, never auto-mergeable.
+    Concretely: `repository`, `owners`, `status`, `deprecated_message`,
+    `created`, `upstream`, or `superseded_by` differing -> `"human-review-required"`,
+    OR any tag present in both `before.tags` and `after.tags` has a
+    different `yanked` value (G-05's expanded key set, ADR-4 disposition
+    table) — else `"refresh"`. `name` is not checked here (pinned by
+    `check_name_matches_path` instead — a structural invariant, not a
+    governance-vs-machine distinction); `desc` is not checked here either
+    (bot-derived from the registry's `__ocx.desc` tag, `core/desc.py` — not
+    human-authored, stays in the machine lane alongside `tags`).
     """
 ```
 
@@ -658,37 +736,79 @@ last, once every subcommand module exists — **do not** edit `cli/main.py`'s
 `_build_parser`/`_DISPATCH` from an individual WP2-H..L work package; land
 your module's `run` function and its own tests, leave wiring to WP2-M.
 
-- **`cli/announce.py`**: reads `PACKAGE_ID` via `cli/_common.read_validated_env`
-  + `validate_payload.PACKAGE_ID_RE`/`PACKAGE_ID_MAX_LENGTH` ->
-  `validate_payload.parse_package_id` -> read current root (`GitHubPort.get_file_contents`
-  at `main`, `validate_entry.parse_package_root`; missing -> `ValidationError`,
-  exit 1, "announce for an unclaimed namespace") -> `observe` -> `desc.check_desc_change`
-  -> `anomaly.check_tag_mutations` (any finding -> `AnomalyError`, exit 65,
-  **before** attempting any write) -> `regenerate` -> `diff` (`None` -> exit
-  0, `result=no-op`) -> `commit_files` + `open_or_update_pull_request` +
-  `add_labels` (via `diff.classify_change` against the current root — reuse,
-  don't reclassify by hand) + `enable_auto_merge` when refresh-class ->
-  `write_github_output("result", "applied")` + `pr_number`.
-- **`cli/reconcile.py`**: `FilePort.list_files("p/")` to enumerate every
-  `*.json` root (excluding CAS subtrees — filter on the glob shape, a root
-  is exactly two path segments under `p/`) -> same observe/desc/anomaly/
-  regenerate/diff pipeline per package, collected. Clean subset -> one PR
-  (all diffs batched into one `commit_files` call, one branch, one PR body
-  listing every `Patch.summary`). Any `AnomalyFinding`s across any package
-  -> open/update one issue (`GitHubPort` has no issue-creation method yet —
-  **flag as open_questions if WP2-D didn't add one**; do not silently reuse
-  `open_or_update_pull_request` for an issue) -> exit 65 regardless of
-  whether the clean-subset PR also succeeded (partial-success semantics,
-  plan Phase 2 WP-list).
-- **`cli/validate.py`**: takes changed-file paths as CLI positional args
-  (the workflow's `git diff` step passes them, not a `GitHubPort` call —
-  this runs in the unprivileged `schema-validate` job, no write-scoped
-  token). Runs every `validate_entry` check per changed root, plus
-  `check_ownership` (anonymous registry read, no secret needed).
-  `"mismatch"` or any `ValidationError` -> exit 1. `"unconfirmed"` -> print
-  a WARN to stderr, exit 0 (surfacing on the PR itself, e.g. as a job
-  annotation, is this module's job — do not fail the build for an
-  unconfirmed probe, ADR-4 Risk 2).
+- **`cli/announce.py`** (fully repurposed, fork-PR announce revamp,
+  2026-07-18 — no longer a `repository_dispatch` doorbell target): a
+  publisher reference tool. `--package` (required) + `--tags`/`--tags-file`
+  (mutually exclusive, one required) + `--out`/`--fork` (mutually exclusive,
+  one required) + `--index-repo` (default `ocx-sh/index`) +
+  `--yank`/`--unyank`/`--yank-reason`. Pipeline: resolve the curated tag set
+  -> read the current root from the index repo at `main`
+  (`GitHubPort.get_file_contents`, via a keyword-only `index_github` port —
+  unauthenticated is fine for `--out`; missing root -> `ValidationError`,
+  "unclaimed namespace — new packages go through the human lane") ->
+  `check_repository_allowlisted` (SSRF ordering) -> `observe_one_tag` once
+  per curated tag (a tag that does not resolve -> hard `ValidationError`,
+  never silently dropped — a publisher typo) -> `desc.check_desc_change` ->
+  `regenerate` (owner curation: the curated observed set *is* the new `tags`
+  map — `core/regenerate.py`'s existing "observations are the universe,
+  absent means removed" semantics already gives exactly this add/remove
+  authority, no core change needed) -> `--yank`/`--unyank` marker toggles ->
+  build root + CAS bytes -> `--out`: write via `FilePort` under the wire
+  paths; `--fork`: `commit_files` against a *second*, keyword-only
+  `fork_github` port scoped to `--fork`, then `open_or_update_pull_request`
+  on `index_github` with the new `head_owner` parameter (§3) set to the
+  fork's owner. No index-side credential is ever read by this module itself
+  — `cli/_wiring.py` decides token presence per port. Server-side privileged
+  verification (G-19 ownership, claim re-derivation) happens in CI, never
+  here — see `cli/governance_check.py` and `cli/validate.py` below.
+- **`cli/reconcile.py`** (rewritten verify-only, fork-PR announce revamp,
+  2026-07-18 — owner-confirmed decision set "Verify-only reconcile"):
+  `FilePort.list_files("p/")` to enumerate every `*.json` root (excluding
+  CAS subtrees, unchanged glob rule) -> per package,
+  `core/verify_claims.py::verify_claims` re-derives every claimed tag/desc
+  blob from registry truth, plus `core/anomaly.py::check_tag_mutations`
+  (reused verbatim) for pinned-tag mutation detection. **Never writes to
+  `p/` at all** — no regenerate, no diff, no commit, no PR; the `--dry-run`
+  flag this module used to carry is gone entirely (verify-only is always
+  "dry"). Escalation (which findings raise `AnomalyError`, exit 65):
+  `check_tag_mutations`'s pinned-tag mutations always escalate;
+  `verify_claims`'s `"cas-object-*"`/`"desc-blob-*"` findings always escalate
+  (structural CAS integrity, independent of tag semantics — the same
+  unconditional treatment `check_no_dangling_references`/
+  `check_digest_self_consistent` already give); `"digest-mismatch"` does
+  **not** escalate on its own (floating-tag drift is expected cascade
+  behavior, ADR-1 D2/D3, and that same digest mismatch on a *pinned* tag is
+  already caught by the reused `check_tag_mutations` — avoids
+  double-flagging one phenomenon two ways). `"tag-missing-upstream"` **does**
+  escalate (ADR-6 FP-2/FP-3 — a decided rule, no longer an open question)
+  *unless* the committed `TagEntry.yanked is not None` for that tag: yank is
+  grace, an explicit owner-authorized exemption from the registry-existence
+  check — `_PackageReport` carries the committed root's yanked-tag names
+  precisely so `_escalating_findings` can tell a yanked-and-vanished tag
+  apart from a plain silent drop. A non-empty escalating-finding set
+  opens/updates one anomaly issue via `GitHubPort.create_or_update_issue`
+  (promoted onto the port this stage, see §3/§10) before raising.
+- **`cli/validate.py`** (extended, fork-PR announce revamp — byte-exact
+  discipline): takes changed-file paths as CLI positional args (unchanged).
+  New, before the existing structural gauntlet: parse the committed root
+  bytes, re-serialize via `validate_entry.serialize_package_root`, and
+  byte-compare against the committed bytes — a mismatch is
+  `ValidationError`, "committed bytes are not the canonical root
+  serialization" (CI re-derives the PR's own claimed canonical form; a
+  publisher's tooling is expected to already emit exactly this form).
+  Also new: every committed CAS file under the package's `o/sha256/` tree
+  (tag objects **and** desc readme/logo blobs alike, not only the ones a
+  tag/desc field references) is hash-checked against its own filename-declared
+  digest via `validate_entry.check_digest_self_consistent` — closes the gap
+  where only referenced tag objects were ever byte-verified. Unless
+  `--offline`: in addition to the existing `check_digest_in_scope`/
+  `check_ownership` G-15 checks, wires `core/verify_claims.py::verify_claims`
+  — any finding -> `ValidationError` (a claim about registry content that
+  isn't true right now is this PR's problem, not an anomaly against
+  committed history; contrast `cli/reconcile.py`'s disposition for the
+  identical finding taxonomy). `"mismatch"` or any `ValidationError` -> exit
+  1. `"unconfirmed"` -> print a WARN to stderr, exit 0 (ADR-4 Risk 2,
+  unchanged).
 - **`cli/render.py`** (reshaped by `plan_site_redesign` WP-bot): `FilePort.list_files("p/")`
   under `--index-dir` -> parse every root + every CAS object into
   `SourcePackage` -> `render.build_render_plan` -> write the returned file
@@ -726,24 +846,41 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   roots wins (`"human-review-required"` > `"new-package"` > `"refresh"` —
   a PR touching two packages where one is a refresh and one needs human
   review is human-review-required overall) -> `add_labels`.
-- **`cli/governance_check.py`**: reads the classification label already
-  applied (or takes `--class` directly — simpler, avoids re-deriving from
-  labels; your call) -> `set_commit_status(head_sha, context="governance/review-required", state=..., description=...)`
-  per BD-5's green/red rule (green only for `refresh` AND `schema-validate`
-  already green — this module needs a way to know the sibling job's result;
-  simplest boring option is a workflow-level `needs:`/`if:` gate in
-  `validate.yml` itself rather than this module polling the Checks API —
-  flag in `open_questions` if that turns out insufficient).
+- **`cli/governance_check.py`** (extended, fork-PR announce revamp — G-19/
+  G-20): re-derives the classification via
+  `classify_pr.classify_pull_request` (unchanged single-source-of-truth
+  approach), then: **machine lane** (`refresh`) requires the PR author's
+  `github_id` (`PullRequestInfo.author_id`, §3) to appear in `owners[]` of
+  *every* touched package root, read from the **base** ref only (never the
+  PR head — the same `governance-gate` trust boundary
+  `cli/classify_pr.py` already documents) — pass -> `success`; fail ->
+  falls back to the human lane below. **Human lane** (`new-package`/
+  `human-review-required`, or a refresh PR that failed G-19): always
+  `pending` + reviewers assigned from committed `.github/maintainers.yml`
+  (parsed via `core/maintainers.py::parse_maintainers`, read from the base
+  ref) minus the PR author (self-review carve-out — GitHub's API itself
+  rejects assigning a PR's own author as their own reviewer) via
+  `GitHubPort.request_reviewers`, plus one idempotent comment via
+  `GitHubPort.create_comment` (hidden HTML marker
+  `<!-- indexbot:governance -->` — update-in-place on repeated runs, never
+  reposted). Never `failure` — nothing has actually gone wrong, the PR just
+  needs a human. (ADR-4 BD-5's fuller "green for refresh PRs once
+  `schema-validate` is also green" cross-job condition remains deferred, per
+  the original entry this replaces — unaffected by G-19/G-20.)
 
 ## 13. Consolidated open questions carried into Phase 2
 
 1. **Yank-on-republish** (`core/regenerate.py`, §7): does a re-published
    digest under a yanked tag name clear the yank? Default: no. Confirm
    before Phase 3.
-2. **Silent tag disappearance** (`core/regenerate.py`, §7): is a tag
-   vanishing from the registry (not digest-mutating, just gone) worth
-   flagging to reconcile's operators, or is silent drop correct? Not
-   decided by either ADR.
+2. **Silent tag disappearance** — **resolved, ADR-6 FP-2/FP-3 (fork-PR
+   announce revamp, 2026-07-18)**: a tag vanishing from the registry
+   (`core/verify_claims.py`'s `"tag-missing-upstream"` finding) escalates to
+   an anomaly in `cli/reconcile.py`'s verify-only sweep *unless* the
+   committed `TagEntry.yanked is not None` for that tag — yank is grace, an
+   explicit owner-authorized exemption; everything else vanished-upstream is
+   an anomaly, never a silent drop. No longer decided by `core/regenerate.py`
+   (which never runs in the verify-only sweep at all any more, §12).
 3. **Pinned-vs-floating anomaly predicate** (`core/anomaly.py`, §7): ADR-4
    delegates this to ADR-1, which does not actually state it. Default: exact
    `X.Y.Z` only is pinned. This is the highest-stakes open question in this
@@ -751,11 +888,12 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
    routine cascade pushes. ADR-4's own Validation checklist already flags
    it; treat as blocking before Phase 3's E2E gate, not before Phase 2 build
    (Phase 2 can build and test against the stated default).
-4. **Issue-creation on `GitHubPort`** (`cli/reconcile.py`, §12): no
-   `create_or_update_issue`-shaped method exists on `GitHubPort` as of this
-   stage — WP2-D should add one if WP2-U (`reconcile.yml`)'s "anomaly issue"
-   requirement needs it; flagged here so it isn't independently
-   rediscovered by two different WPs.
+4. **Issue-creation on `GitHubPort`** (`cli/reconcile.py`, §12) — **resolved,
+   fork-PR announce revamp 2026-07-18**: `create_or_update_issue` promoted
+   onto `ports.GitHubPort` (§3/§10), implemented in `GitHubApi` (unchanged
+   body — it already existed as an adapter-only capability) and `FakeGitHub`.
+   `cli/reconcile.py`'s verify-only sweep now calls it directly on a
+   non-empty escalating-finding set, before raising `AnomalyError`.
 5. **`mirror.yml` parsing** (`cli/seed_import.py`, §12): implies a YAML
    dependency not currently declared; this stage may not edit
    `pyproject.toml`.
@@ -763,3 +901,81 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
    (`cli/governance_check.py`, §12): default proposal is a workflow-level
    `needs:`/`if:` gate rather than an API poll from inside the CLI; confirm
    this is sufficient when WP2-S designs `validate.yml`'s actual job graph.
+
+## 14. Root serializer — client-facing byte-exact spec
+
+Added fork-PR announce revamp, 2026-07-18, to give the byte-exact discipline
+(§12's `cli/validate.py` entry) a single, precise, standalone reference —
+this is the spec **ocx#216** (the client-side port of this same
+serialization, for a publisher tool implemented outside this repo) ports
+against. Restates §5/§1 in one place rather than requiring a cross-reader to
+reassemble it from two sections; **not** a new rule — `validate_entry.py`'s
+`serialize_package_root`/`serialize_observation_object` remain the one
+authoritative implementation, this section documents their exact output byte
+-for-byte.
+
+**`p/<namespace>/<package>.json` (the package root — human-diffable, PR-review
+form, never digested itself):**
+
+- UTF-8 encoded, `ensure_ascii=True` (the `json.dumps` default, not passed
+  explicitly but never overridden either) — non-ASCII field values (e.g. a
+  non-ASCII `deprecated_message`, `desc.title`/`.description`, or
+  `upstream.disclaimer`) serialize as `\uXXXX` escapes, never raw UTF-8
+  bytes, identical to the observation-object form below. A `serde_json`
+  (or any other) port that defaults to `to_string_pretty`'s
+  UTF-8-passthrough behavior instead will byte-diverge on the first
+  non-ASCII value it serializes — required reading for **ocx#216**.
+- `json.dumps(data, indent=2, sort_keys=False)` — **2-space indent**,
+  **insertion-order preserved** (never alphabetized).
+- Key order is fixed and matches `model.PackageRoot`'s declared field order
+  exactly: `name`, `repository`, `owners`, `status`, `deprecated_message`,
+  `created`, `desc`, `upstream` (omitted entirely when `None` — schema
+  forbids `null` there), `superseded_by` (omitted entirely when `None`,
+  identical omit-when-absent contract), `tags`. Nested objects
+  (`owners[]`, `desc`, `tags[*]`, `tags[*].yanked`) use their own dataclass's
+  declared field order the same way — see `validate_entry.py`'s
+  `_*_to_dict` helpers for the exact per-type key list.
+- `desc: None` serializes as the JSON literal `null` (the key itself is
+  **never** omitted — this is the one field whose absence-vs-null semantics
+  differ from `upstream`/`superseded_by` above).
+- `upstream`'s own three fields are **mixed** optional semantics, not a
+  single rule applied uniformly: `org` is always present (required,
+  non-nullable); `repository_url` is **omitted entirely** when `None`
+  (schema forbids `null` there, matching `upstream` itself); `disclaimer`
+  is **always present**, serialized as the JSON literal `null` when `None`
+  (schema allows `null` there — the one sub-field of `upstream` that
+  behaves like `desc` above rather than like `repository_url`).
+- A single trailing `\n` — **always** present, exactly one byte, no more.
+- Byte-exact discipline (this revamp): CI re-derives this exact form from
+  the PR's own parsed root (`parse_package_root` -> `serialize_package_root`)
+  and byte-compares against the committed bytes. A root that parses
+  correctly but isn't already in this exact canonical form (different key
+  order, different indent, minified, missing/extra trailing newline, ...)
+  is rejected — `cli/validate.py`'s "committed bytes are not the canonical
+  root serialization" failure. A publisher's own tooling (`cli/announce.py`,
+  or a third-party port of this spec) must emit exactly this form, not
+  merely schema-equivalent JSON.
+
+**`p/<namespace>/<package>/o/sha256/<hex>.json` (the content-addressed
+observation object — §1's canonical minified form, the one that's actually
+digested):**
+
+- UTF-8 encoded, `ensure_ascii=True` — non-ASCII field values (e.g. a
+  variant string) serialize as `\uXXXX` escapes, never raw UTF-8 bytes; this
+  is dedup-load-bearing (ADR-1 D4), not a stylistic choice.
+- `json.dumps(data, sort_keys=True, separators=(",", ":"))` — **minified**
+  (no whitespace at all between tokens), keys **alphabetized** (the opposite
+  of the root's insertion-order rule above).
+- `platforms[]` sorted by `platform_sort_key` — the tuple
+  `(architecture, os, os_version or "", variant or "", os_features, features)`,
+  compared as tuples element-by-element, **never** `",".join(...)`-ed into a
+  string first (§1's own aliasing-prevention rationale). Registry
+  manifest-list order must never leak into this digest.
+- No trailing newline (unlike the root form above) — the digest is computed
+  over these exact bytes with nothing appended.
+- Desc blobs (`o/sha256/<hex>.md` — readme, `o/sha256/<hex>.{svg,png}` —
+  logo) are **not** re-serialized at all: copied verbatim from the physical
+  registry's `__ocx.desc` artifact layers, digest = `sha256` of those exact
+  bytes. This spec's byte-exact rules above apply only to the two JSON forms
+  (root, observation object); a desc blob's "canonical form" is simply
+  whatever bytes the registry served.

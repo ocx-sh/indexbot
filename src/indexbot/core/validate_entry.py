@@ -17,11 +17,16 @@ WP-bot — `core/validate_entry.py` is this repo's one shared foundation
 module, not `core/catalog_md.py`, whose only other export was VitePress
 wrapper-page markdown the site redesign's dynamic routes retire).
 
-`OCI_REPOSITORY_RE` here and `core/validate_payload.py`'s `PACKAGE_ID_RE` are
-two structurally distinct constants (ADR-4 BD-4's two-regex rule) — one
-governs the physical, N-segment OCI repository grammar; the other governs the
-logical, fixed-two-segment package id. Never shared, never guessed at
-runtime.
+`OCI_REPOSITORY_RE` and `PACKAGE_ID_RE` below are two structurally distinct
+constants (ADR-4 BD-4's two-regex rule) — one governs the physical,
+N-segment OCI repository grammar; the other governs the logical,
+fixed-two-segment package id. Never shared, never guessed at runtime.
+`parse_package_id`/`PACKAGE_ID_RE`/`PACKAGE_ID_MAX_LENGTH` re-home here
+(fork-PR announce revamp) from the now-deleted `core/validate_payload.py` —
+this module was already `PACKAGE_ID_RE`'s only in-tree consumer beyond the
+callers that import `parse_package_id` directly, so it is the sensible
+single home for both regexes rather than a standalone module for one
+function.
 """
 
 from __future__ import annotations
@@ -32,7 +37,6 @@ import re
 from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
-from indexbot.core.validate_payload import parse_package_id
 from indexbot.errors import AnomalyError, ValidationError
 from indexbot.model import (
     Desc,
@@ -48,7 +52,7 @@ from indexbot.model import (
 )
 
 # --- N-segment OCI repository grammar (BD-4's two-regex rule: never shared
-# with core/validate_payload.py's fixed-two-segment PACKAGE_ID_RE). ---------
+# with PACKAGE_ID_RE below, the fixed-two-segment package-id shape). --------
 _COMPONENT = r"[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*"
 OCI_REPOSITORY_RE: Final[re.Pattern[str]] = re.compile(rf"^{_COMPONENT}(?:/{_COMPONENT})*$")
 
@@ -56,6 +60,46 @@ REPOSITORY_HOST_ALLOWLIST: Final[frozenset[str]] = frozenset({"ghcr.io"})
 """Anti-squat/anti-exfil guard (G-03). Extend only via reviewed PR."""
 
 _DIGEST_RE: Final[re.Pattern[str]] = re.compile(r"sha256:[a-f0-9]{64}")
+
+# --- fixed-two-segment package-id grammar (BD-4's two-regex rule: never
+# shared with OCI_REPOSITORY_RE above). Re-homed from the deleted
+# core/validate_payload.py. ---------------------------------------------
+PACKAGE_ID_MAX_LENGTH: Final[int] = 140  # ADR-2 ND-3: 39 (namespace) + 1 ("/") + 100 (package)
+_NAMESPACE_MAX_LENGTH: Final[int] = 39
+_PACKAGE_MAX_LENGTH: Final[int] = 100
+
+_NAMESPACE_SHAPE = r"[a-z0-9](?:-?[a-z0-9])*"
+_PACKAGE_SHAPE = r"[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*"
+PACKAGE_ID_RE: Final[re.Pattern[str]] = re.compile(rf"^{_NAMESPACE_SHAPE}/{_PACKAGE_SHAPE}$")
+
+
+def parse_package_id(raw: str) -> PackageId:
+    """Validate and parse `raw` as an OCX `<namespace>/<package>` id.
+
+    Raises `ValidationError` if `raw` exceeds `PACKAGE_ID_MAX_LENGTH`
+    (checked first, before any regex evaluation — BD-4), does not
+    `fullmatch` `PACKAGE_ID_RE`, or (having matched the combined shape)
+    splits into a namespace or package segment exceeding its own
+    per-segment cap (ADR-2 ND-3).
+    """
+    if len(raw) > PACKAGE_ID_MAX_LENGTH:
+        raise ValidationError(f"package id exceeds max length {PACKAGE_ID_MAX_LENGTH} characters")
+    if PACKAGE_ID_RE.fullmatch(raw) is None:
+        raise ValidationError(f"package id {raw!r} does not match the expected shape")
+
+    # A `PACKAGE_ID_RE` fullmatch guarantees exactly one "/" in `raw`, which
+    # is what makes this split safe.
+    namespace, package = raw.split("/", 1)
+    if len(namespace) > _NAMESPACE_MAX_LENGTH:
+        raise ValidationError(
+            f"namespace {namespace!r} exceeds max length {_NAMESPACE_MAX_LENGTH} characters"
+        )
+    if len(package) > _PACKAGE_MAX_LENGTH:
+        raise ValidationError(
+            f"package {package!r} exceeds max length {_PACKAGE_MAX_LENGTH} characters"
+        )
+    return PackageId(namespace=namespace, package=package)
+
 
 RESERVED_NAMESPACE_SEGMENTS: Final[frozenset[str]] = frozenset(
     {
@@ -117,9 +161,9 @@ def check_name_matches_path(package_id: PackageId, root: PackageRoot) -> None:
 
 def check_superseded_by(root: PackageRoot) -> None:
     """`root.superseded_by`, when set, must be a shape-valid
-    `<namespace>/<package>` id (reused via `validate_payload.parse_package_id`
-    — never a second hand-rolled regex, ADR-4 BD-4) that does not name
-    `root` itself.
+    `<namespace>/<package>` id (reused via this module's own
+    `parse_package_id` — never a second hand-rolled regex, ADR-4 BD-4) that
+    does not name `root` itself.
 
     `root.superseded_by is None` is a no-op — a package that has not been
     superseded carries no constraint here.
@@ -286,17 +330,32 @@ def cas_relpath(namespace: str, package: str, digest: str, ext: str) -> str:
     return f"p/{namespace}/{package}/o/sha256/{hex_digest}.{ext}"
 
 
-def check_content_digest_self_consistent(tag: TagEntry, object_bytes: bytes) -> None:
+def check_digest_self_consistent(digest: str, object_bytes: bytes) -> None:
     """CAS integrity: `object_bytes` (already serialized canonically, §1)
-    must hash to `tag.content`. Mismatch is `AnomalyError` — the file's name
-    lies about its own content, not a routine validation failure.
+    must hash to `digest`. Mismatch is `AnomalyError` — the file's name (or
+    the field claiming this digest) lies about its own content, not a
+    routine validation failure.
+
+    Generalizes the original `TagEntry`-shaped check below to any claimed
+    digest string (fork-PR announce revamp: `Desc.readme`/`Desc.logo` blobs
+    need the identical self-consistency guarantee a tag's CAS object always
+    got — closing a real gap where only tag digests were ever byte-verified,
+    `core/verify_claims.py` and `cli/validate.py`'s blanket per-file scan).
     """
     computed = f"sha256:{hashlib.sha256(object_bytes).hexdigest()}"
-    if computed != tag.content:
+    if computed != digest:
         raise AnomalyError(
-            f"content digest self-consistency violated: tag claims {tag.content!r}, "
+            f"content digest self-consistency violated: claimed {digest!r}, "
             f"object bytes hash to {computed!r}"
         )
+
+
+def check_content_digest_self_consistent(tag: TagEntry, object_bytes: bytes) -> None:
+    """CAS integrity for one `TagEntry`: `object_bytes` must hash to
+    `tag.content`. Thin wrapper over `check_digest_self_consistent` — kept
+    for its existing callers/tests rather than churning every call site onto
+    the more general signature."""
+    check_digest_self_consistent(tag.content, object_bytes)
 
 
 def check_no_dangling_references(root: PackageRoot, cas_digests: frozenset[str]) -> None:

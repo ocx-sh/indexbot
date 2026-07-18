@@ -8,16 +8,15 @@ time. This matters because several `indexbot` subcommands run in CI jobs that
 deliberately hold no write-scoped credential at all — `validate.yml`'s
 `schema-validate-pr` job runs `indexbot validate` with "no network, no write
 scope" (no `GITHUB_TOKEN`/`GITHUB_REPOSITORY` in its env), and
-`announce.yml`'s unprivileged `validate-payload` job runs
-`indexbot announce --validate-only` the same way, before `regen-and-pr`'s
-privileged job ever starts. If `DISPATCH`'s values were already-constructed
-port instances (e.g. bound once at import time via `functools.partial`),
-merely importing this module would eagerly read `GITHUB_TOKEN` for every
-subcommand, including ones that need it not at all — crashing an
-unprivileged job that never sets it. Deferring construction to inside each
-`_run_*` function (only reached once `cli/main.py` has already resolved
-which single subcommand to dispatch to) keeps every subcommand's environment
-requirements independent of the others.
+`cli/announce.py`'s `--out` mode reads the index repo anonymously the same
+way (no `GITHUB_TOKEN` required at all, `_index_github`). If `DISPATCH`'s
+values were already-constructed port instances (e.g. bound once at import
+time via `functools.partial`), merely importing this module would eagerly
+read `GITHUB_TOKEN` for every subcommand, including ones that need it not at
+all — crashing an unprivileged job that never sets it. Deferring
+construction to inside each `_run_*` function (only reached once
+`cli/main.py` has already resolved which single subcommand to dispatch to)
+keeps every subcommand's environment requirements independent of the others.
 """
 
 from __future__ import annotations
@@ -98,29 +97,44 @@ def _github_api() -> GitHubApi:
     return GitHubApi(owner=owner, repo=repo, token=_require_env("GITHUB_TOKEN"))
 
 
+def _index_github(args: argparse.Namespace) -> GitHubApi:
+    """Read-only access to `--index-repo` at `main` — anonymous (no
+    `GITHUB_TOKEN` required) works fine for a public repo's Contents API,
+    matching `--out` mode's "unauthenticated read is fine" design call.
+    `--fork` mode also reads through this same instance (only opening the PR
+    against the index repo needs write scope here — the fork-side commit
+    goes through a *separate*, always-authenticated `GitHubApi`, see
+    `_run_announce`)."""
+    owner, _, repo = cast(str, args.index_repo).partition("/")
+    return GitHubApi(owner=owner, repo=repo, token=os.environ.get("GITHUB_TOKEN", ""))
+
+
 def _run_announce(args: argparse.Namespace) -> ExitCode:
-    """`--validate-only` runs in `announce.yml`'s unprivileged
-    `validate-payload` job, which holds no `GITHUB_TOKEN`/`GITHUB_REPOSITORY`
-    at all (ADR-4 BD-4/BD-5's privileged split). `announce.run` never
-    touches its `github` argument on that path (it returns immediately after
-    the payload-shape check, before any port call) — `cast("GitHubPort",
-    None)` documents that "never called on this path" contract and fails
-    loudly (a clear `AttributeError`, not a confusing real HTTP 401) if it
-    is ever violated, rather than eagerly reading env vars this job never
-    sets just to build a `GitHubApi` that would never be used.
-    """
-    validate_only = bool(getattr(args, "validate_only", False))
-    github = cast("GitHubPort", None) if validate_only else _github_api()
-    return announce.run(args, registry=GhcrRegistry(), github=github, clock=SystemClock())
+    """A local publisher tool (fork-PR announce revamp) — no index-side
+    credential, no `repository_dispatch` doorbell, no privileged/unprivileged
+    CI split any more. `--out` mode never touches `fork_github` (stays
+    `None`); `--fork` mode needs the publisher's own write-scoped
+    `GITHUB_TOKEN` to commit to their fork and open the PR."""
+    fork = cast("str | None", getattr(args, "fork", None))
+    fork_github: GitHubPort | None = None
+    if fork:
+        fork_owner, _, fork_repo = fork.partition("/")
+        fork_github = GitHubApi(
+            owner=fork_owner, repo=fork_repo, token=_require_env("GITHUB_TOKEN")
+        )
+    return announce.run(
+        args,
+        registry=GhcrRegistry(),
+        index_github=_index_github(args),
+        fork_github=fork_github,
+        files=LocalFiles(root=_repo_root()),
+        clock=SystemClock(),
+    )
 
 
 def _run_reconcile(args: argparse.Namespace) -> ExitCode:
     return reconcile.run(
-        args,
-        files=LocalFiles(root=_repo_root()),
-        registry=GhcrRegistry(),
-        github=_github_api(),
-        clock=SystemClock(),
+        args, files=LocalFiles(root=_repo_root()), registry=GhcrRegistry(), github=_github_api()
     )
 
 

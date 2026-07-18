@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, cast
 
 from indexbot.core.registry_checks import check_digest_in_scope, check_ownership
 from indexbot.core.validate_entry import (
-    check_content_digest_self_consistent,
+    check_digest_self_consistent,
     check_name_matches_path,
     check_namespace_not_reserved,
     check_no_dangling_references,
@@ -43,9 +43,11 @@ from indexbot.core.validate_entry import (
     check_upstream_repository_url_scheme,
     parse_digest,
     parse_observation_object,
+    parse_package_id,
     parse_package_root,
+    serialize_package_root,
 )
-from indexbot.core.validate_payload import parse_package_id
+from indexbot.core.verify_claims import verify_claims
 from indexbot.errors import AnomalyError, ValidationError
 from indexbot.exit_codes import ExitCode
 
@@ -95,7 +97,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 def _package_id_from_root_path(path: str) -> PackageId:
     """`p/<namespace>/<package>.json` -> a validated `PackageId`.
 
-    Reuses `validate_payload.parse_package_id` for the namespace/package
+    Reuses `validate_entry.parse_package_id` for the namespace/package
     shape check (length caps + `PACKAGE_ID_RE`) rather than hand-rolling a
     second regex — the two-regex rule (ADR-4 BD-4) forbids sharing a
     *pattern* between the namespace/package shape and the OCI repository
@@ -114,21 +116,18 @@ def _cas_prefix(namespace: str, package: str) -> str:
     return f"p/{namespace}/{package}/o/sha256/"
 
 
-def _cas_object_path(namespace: str, package: str, digest: str) -> str:
-    """`digest` must already be `parse_digest`-validated — digest-hex
-    `fullmatch` before path join, no exceptions (validate_entry.py's rule).
-    """
-    hex_part = digest.removeprefix("sha256:")
-    return f"{_cas_prefix(namespace, package)}{hex_part}.json"
-
-
-def _list_cas_digests(files: FilePort, namespace: str, package: str) -> frozenset[str]:
-    digests: set[str] = set()
-    for file_path in files.list_files(_cas_prefix(namespace, package)):
-        filename = file_path.rsplit("/", 1)[-1]
-        hex_part = filename.split(".", 1)[0]
-        digests.add(f"sha256:{hex_part}")
-    return frozenset(digests)
+def _cas_paths_by_digest(files: FilePort, namespace: str, package: str) -> dict[str, str]:
+    """digest string -> its CAS file path, for every file actually present
+    under this package's `o/sha256/` tree. Built once per validated root so
+    `desc.readme`/`desc.logo` byte lookups (extension unknown ahead of time,
+    unlike a tag's always-`.json` object) don't re-list the same prefix per
+    field, and so the byte-exact-discipline blanket hash-check below can walk
+    every present file exactly once."""
+    prefix = _cas_prefix(namespace, package)
+    return {
+        f"sha256:{file_path.rsplit('/', 1)[-1].split('.', 1)[0]}": file_path
+        for file_path in files.list_files(prefix)
+    }
 
 
 def _validate_one(
@@ -146,6 +145,16 @@ def _validate_one(
         if raw is None:
             raise ValidationError(f"{path!r} does not exist")
         root = parse_package_root(raw)
+        if serialize_package_root(root) != raw:
+            # Byte-exact discipline (fork-PR announce revamp): CI re-derives
+            # the canonical serialization of the PR's own parsed root and
+            # byte-compares against the committed bytes — a root that
+            # doesn't already sit in that exact canonical form is rejected
+            # rather than silently re-canonicalized on merge.
+            raise ValidationError(
+                f"{path!r}: committed bytes are not the canonical root serialization "
+                "(byte-exact discipline)"
+            )
         package_id = _package_id_from_root_path(path)
 
         check_name_matches_path(package_id, root)
@@ -173,19 +182,24 @@ def _validate_one(
             if root.desc.logo is not None:
                 parse_digest(root.desc.logo)
 
-        cas_digests = _list_cas_digests(files, package_id.namespace, package_id.package)
+        paths_by_digest = _cas_paths_by_digest(files, package_id.namespace, package_id.package)
+        cas_digests = frozenset(paths_by_digest)
         check_no_dangling_references(root, cas_digests)
 
-        object_bytes_by_tag: dict[str, bytes] = {}
-        for tag_name, entry in sorted(root.tags.items()):
-            object_path = _cas_object_path(package_id.namespace, package_id.package, entry.content)
-            # `check_no_dangling_references` above already guarantees this
-            # path resolves to a real CAS object for any FilePort honoring
-            # its own list_files/read_bytes contract — cast rather than a
-            # defensive branch that could never be exercised.
-            object_bytes = cast(bytes, files.read_bytes(object_path))
-            check_content_digest_self_consistent(entry, object_bytes)
-            object_bytes_by_tag[tag_name] = object_bytes
+        # Byte-exact discipline (fork-PR announce revamp): hash-check EVERY
+        # committed CAS file under this package's tree — tag objects and
+        # desc readme/logo blobs alike, not only the ones a tag/desc field
+        # happens to reference — so an orphaned or mislabeled CAS file is
+        # caught too. Closes a real gap: previously only referenced tag
+        # objects were ever byte-verified, desc blobs never were.
+        for digest, cas_path in paths_by_digest.items():
+            object_bytes = cast(bytes, files.read_bytes(cas_path))
+            check_digest_self_consistent(digest, object_bytes)
+
+        object_bytes_by_tag = {
+            tag_name: cast(bytes, files.read_bytes(paths_by_digest[entry.content]))
+            for tag_name, entry in root.tags.items()
+        }
 
         if offline:
             warnings.append("G-15 registry checks skipped (--offline)")
@@ -207,6 +221,33 @@ def _validate_one(
                 )
             if ownership == "unconfirmed":
                 warnings.append("ownership unconfirmed (G-15) — WARN, not blocking (ADR-4 Risk 2)")
+
+            # Fork-PR announce revamp: re-derive every claimed tag/desc-blob
+            # digest from registry truth (subset semantics — verifies each
+            # claim individually, never a full-set equality against the
+            # registry's actual tag list, since owner curation legitimately
+            # publishes a subset). A finding here means the PR's claim isn't
+            # actually true right now — a validation failure for THIS PR,
+            # not an anomaly against already-committed history (that's
+            # `cli/reconcile.py`'s nightly-sweep disposition for the exact
+            # same `verify_claims` findings).
+            cas_bytes_by_digest = {
+                entry.content: object_bytes_by_tag[tag_name]
+                for tag_name, entry in root.tags.items()
+            }
+            if root.desc is not None:
+                if root.desc.readme is not None:
+                    cas_bytes_by_digest[root.desc.readme] = cast(
+                        bytes, files.read_bytes(paths_by_digest[root.desc.readme])
+                    )
+                if root.desc.logo is not None:
+                    cas_bytes_by_digest[root.desc.logo] = cast(
+                        bytes, files.read_bytes(paths_by_digest[root.desc.logo])
+                    )
+            findings = verify_claims(package_id, root, cas_bytes_by_digest, registry)
+            if findings:
+                detail = "; ".join(f"{finding.kind}: {finding.detail}" for finding in findings)
+                raise ValidationError(f"claim verification failed for {package_id}: {detail}")
     except AnomalyError as exc:
         return FileReport(
             path=path, exit_code=ExitCode.ANOMALY, error=str(exc), warnings=tuple(warnings)

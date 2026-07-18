@@ -2,34 +2,40 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pytest
 
 from indexbot.cli import reconcile
-from indexbot.core.validate_entry import parse_package_root, serialize_package_root
+from indexbot.core.observe import observe_one_tag
+from indexbot.core.validate_entry import serialize_observation_object, serialize_package_root
 from indexbot.errors import AnomalyError, ValidationError
 from indexbot.exit_codes import ExitCode
-from indexbot.model import ManifestFetch, Owner, OwnershipProbeResult, PackageRoot, TagEntry
-from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles
+from indexbot.model import (
+    Desc,
+    ManifestFetch,
+    Owner,
+    OwnershipProbeResult,
+    PackageRoot,
+    TagEntry,
+    Yank,
+)
+from tests.fakes import FakeGitHub, FakeRegistry, InMemoryFiles
 
 _OWNER = Owner(github="alice", github_id=1)
 _CMAKE_REPO = "oci://ghcr.io/ocx-contrib/cmake"
 _WIDGET_REPO = "oci://ghcr.io/ocx-contrib/widget"
-_TITLE_KEY = "org.opencontainers.image.title"
-_DESCRIPTION_KEY = "org.opencontainers.image.description"
-_DESC_TAG = "__ocx.desc"
-_BRANCH = "indexbot/reconcile"
+_ISSUE_TITLE = "indexbot reconcile: anomalies detected"
 
 
-def _args(*, dry_run: bool = False, package: str | None = None) -> argparse.Namespace:
-    return argparse.Namespace(command="reconcile", dry_run=dry_run, package=package)
+def _args(*, package: str | None = None) -> argparse.Namespace:
+    return argparse.Namespace(command="reconcile", package=package)
 
 
 def _root(
     name: str = "ocx.sh/kitware/cmake",
     repository: str = _CMAKE_REPO,
     tags: dict[str, TagEntry] | None = None,
+    desc: Desc | None = None,
 ) -> PackageRoot:
     return PackageRoot(
         name=name,
@@ -38,7 +44,7 @@ def _root(
         status="active",
         deprecated_message=None,
         created="2026-07-17",
-        desc=None,
+        desc=desc,
         tags=dict(tags or {}),
     )
 
@@ -51,23 +57,38 @@ def _put_root(files: InMemoryFiles, namespace: str, package: str, root: PackageR
     files.write_bytes(f"p/{namespace}/{package}.json", serialize_package_root(root))
 
 
-def _committed(github: FakeGitHub, path: str) -> bytes:
-    return github.files[(path, _BRANCH)]
+def _committed_tag(
+    registry: FakeRegistry, repository: str, tag: str, *, architecture: str = "amd64"
+) -> tuple[TagEntry, bytes]:
+    """A `TagEntry` + its CAS object bytes that independently re-derive to
+    the exact same content digest from `registry` — the clean baseline every
+    test mutates one field of."""
+    registry.tags.setdefault(repository, []).append(tag)
+    registry.manifests[(repository, tag)] = _bare_manifest(architecture)
+    observation = observe_one_tag(repository, tag, registry)
+    assert observation is not None
+    object_bytes = serialize_observation_object(observation.object)
+    entry = TagEntry(content=observation.content_digest, observed="2026-07-17T00:00:00Z")
+    return entry, object_bytes
 
 
-def _github_output_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output.txt"))
+def _put_cas(
+    files: InMemoryFiles,
+    namespace: str,
+    package: str,
+    digest: str,
+    content: bytes,
+    *,
+    ext: str = "json",
+) -> None:
+    hex_part = digest.removeprefix("sha256:")
+    files.write_bytes(f"p/{namespace}/{package}/o/sha256/{hex_part}.{ext}", content)
 
 
 @dataclass
 class _GhostFiles:
     """`FilePort` double: `list_files` reports a root that `read_bytes` can
-    no longer find — the list-then-read race `_reconcile_one` tolerates.
-    Not `InMemoryFiles` (its single backing dict makes `list_files` and
-    `read_bytes` inherently consistent, so this race can't be expressed with
-    it alone) — same "standalone double, not a fake" precedent as
-    `tests/core/test_observe.py`'s `_RaisingRegistry`.
-    """
+    no longer find — the list-then-read race `_verify_one` tolerates."""
 
     listed: list[str] = field(default_factory=list[str])
 
@@ -91,10 +112,9 @@ class _GhostFiles:
 
 
 class _PoisonRegistry:
-    """A `RegistryPort` whose every method raises — proves `_reconcile_one`
+    """A `RegistryPort` whose every method raises — proves `_verify_one`
     never reaches the network for a committed root whose `repository` isn't
-    allowlisted (SSRF ordering, ADR-4 BD-1; mirrors
-    `tests/test_validate_entry.py`'s `_PoisonRegistry`)."""
+    allowlisted (SSRF ordering, ADR-4 BD-1)."""
 
     def list_tags(self, repository: str) -> list[str]:
         raise AssertionError("registry.list_tags must never be called (SSRF ordering)")
@@ -112,180 +132,72 @@ class _PoisonRegistry:
         raise AssertionError("registry.probe_ownership must never be called (SSRF ordering)")
 
 
-def test_unallowlisted_repository_raises_before_any_registry_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _github_output_env(tmp_path, monkeypatch)
+# --- add_arguments -----------------------------------------------------
+
+
+def test_add_arguments_registers_package_scope() -> None:
+    parser = argparse.ArgumentParser()
+    reconcile.add_arguments(parser)
+    parsed = parser.parse_args(["--package", "kitware/cmake"])
+    assert parsed.package == "kitware/cmake"
+
+
+def test_add_arguments_package_defaults_to_none() -> None:
+    parser = argparse.ArgumentParser()
+    reconcile.add_arguments(parser)
+    parsed = parser.parse_args([])
+    assert parsed.package is None
+
+
+# --- basic sweep behavior -------------------------------------------------
+
+
+def test_unallowlisted_repository_raises_before_any_registry_call() -> None:
     files = InMemoryFiles()
     _put_root(files, "kitware", "cmake", _root(repository="oci://evil.example.com/x/y"))
 
     with pytest.raises(ValidationError, match="G-03"):
-        reconcile.run(
-            _args(),
-            files=files,
-            registry=_PoisonRegistry(),
-            github=FakeGitHub(),
-            clock=FixedClock(),
-        )
+        reconcile.run(_args(), files=files, registry=_PoisonRegistry(), github=FakeGitHub())
 
 
-def test_empty_index_is_a_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _github_output_env(tmp_path, monkeypatch)
+def test_empty_index_is_a_noop() -> None:
+    result = reconcile.run(
+        _args(), files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub()
+    )
+    assert result == ExitCode.OK
+
+
+def test_missing_args_attributes_default_to_full_run() -> None:
+    bare_args = argparse.Namespace(command="reconcile")
+    result = reconcile.run(
+        bare_args, files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub()
+    )
+    assert result == ExitCode.OK
+
+
+def test_clean_package_is_a_noop_and_never_writes() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    entry, object_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": entry}))
+    _put_cas(files, "kitware", "cmake", entry.content, object_bytes)
     github = FakeGitHub()
 
-    result = reconcile.run(
-        _args(), files=InMemoryFiles(), registry=FakeRegistry(), github=github, clock=FixedClock()
-    )
+    result = reconcile.run(_args(), files=files, registry=registry, github=github)
 
     assert result == ExitCode.OK
-    assert github.pull_requests == {}
-    assert github.refs == {}
+    assert github.issues == {}
 
 
-def test_missing_args_attributes_default_to_full_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A bare `Namespace` without `dry_run`/`package` still works —
-    `getattr(..., default)` covers a caller that hasn't wired those argparse
-    flags yet."""
-    _github_output_env(tmp_path, monkeypatch)
-    bare_args = argparse.Namespace(command="reconcile")
-
-    result = reconcile.run(
-        bare_args,
-        files=InMemoryFiles(),
-        registry=FakeRegistry(),
-        github=FakeGitHub(),
-        clock=FixedClock(),
-    )
-
-    assert result == ExitCode.OK
-
-
-def test_clean_drift_opens_pr_and_excludes_cas_subtree_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _github_output_env(tmp_path, monkeypatch)
+def test_package_scope_filters_to_one_package() -> None:
     files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))
-    # A CAS object path under the same package — three segments under `p/`,
-    # must never be mistaken for a second root.
-    files.write_bytes(f"p/kitware/cmake/o/sha256/{'a' * 64}.json", b"{}")
-
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: ["3.28.1"]}, manifests={(_CMAKE_REPO, "3.28.1"): _bare_manifest()}
-    )
-    github = FakeGitHub(refs={"main": "sha-main-0"})
-
-    result = reconcile.run(
-        _args(), files=files, registry=registry, github=github, clock=FixedClock(fixed="T1")
-    )
-
-    assert result == ExitCode.OK
-    assert github.pull_requests == {_BRANCH: 1}
-    committed_root = parse_package_root(_committed(github, "p/kitware/cmake.json"))
-    assert committed_root.tags["3.28.1"].observed == "T1"
-    cas_paths = [
-        path for path, branch in github.files if branch == _BRANCH and "/o/sha256/" in path
-    ]
-    assert len(cas_paths) == 1  # exactly one new CAS object, not the pre-seeded decoy
-
-
-def test_dry_run_reports_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _github_output_env(tmp_path, monkeypatch)
-    files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: ["3.28.1"]}, manifests={(_CMAKE_REPO, "3.28.1"): _bare_manifest()}
-    )
-    github = FakeGitHub(refs={"main": "sha-main-0"})
-
-    result = reconcile.run(
-        _args(dry_run=True), files=files, registry=registry, github=github, clock=FixedClock()
-    )
-
-    assert result == ExitCode.OK
-    assert github.pull_requests == {}
-    assert github.refs == {"main": "sha-main-0"}  # unchanged — no branch created
-
-
-def test_second_run_with_no_registry_change_is_idempotent_noop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _github_output_env(tmp_path, monkeypatch)
-    files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: ["3.28.1"]}, manifests={(_CMAKE_REPO, "3.28.1"): _bare_manifest()}
-    )
-    github = FakeGitHub(refs={"main": "sha-main-0"})
-
-    reconcile.run(
-        _args(), files=files, registry=registry, github=github, clock=FixedClock(fixed="T1")
-    )
-    # Feed the just-committed root back in as the new "current" source tree —
-    # a real second `reconcile` run would read exactly this state.
-    _put_root(
-        files, "kitware", "cmake", parse_package_root(_committed(github, "p/kitware/cmake.json"))
-    )
-
-    result = reconcile.run(
-        _args(), files=files, registry=registry, github=github, clock=FixedClock(fixed="T2")
-    )
-
-    assert result == ExitCode.OK
-    assert github.pull_requests == {_BRANCH: 1}  # no second PR opened — nothing changed
-
-
-def test_package_scope_filters_to_one_package(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _github_output_env(tmp_path, monkeypatch)
-    files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))
-    _put_root(
-        files, "acme", "widget", _root(name="ocx.sh/acme/widget", repository=_WIDGET_REPO, tags={})
-    )
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: ["3.28.1"], _WIDGET_REPO: ["1.0.0"]},
-        manifests={
-            (_CMAKE_REPO, "3.28.1"): _bare_manifest(),
-            (_WIDGET_REPO, "1.0.0"): _bare_manifest(),
-        },
-    )
-    github = FakeGitHub(refs={"main": "sha-main-0"})
-
-    reconcile.run(
-        _args(package="kitware/cmake"),
-        files=files,
-        registry=registry,
-        github=github,
-        clock=FixedClock(),
-    )
-
-    assert ("p/kitware/cmake.json", _BRANCH) in github.files
-    assert ("p/acme/widget.json", _BRANCH) not in github.files
-
-
-def test_ghost_root_vanished_between_list_and_read_is_skipped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _github_output_env(tmp_path, monkeypatch)
-    files = _GhostFiles(listed=["p/kitware/cmake.json"])
-
-    result = reconcile.run(
-        _args(), files=files, registry=FakeRegistry(), github=FakeGitHub(), clock=FixedClock()
-    )
-
-    assert result == ExitCode.OK
-
-
-def test_anomaly_raises_after_committing_clean_subset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _github_output_env(tmp_path, monkeypatch)
-    files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))  # clean: gains a new tag
+    registry = FakeRegistry()
+    entry_a, bytes_a = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": entry_a}))
+    _put_cas(files, "kitware", "cmake", entry_a.content, bytes_a)
+    # A second package with a dangling CAS reference (would escalate) —
+    # proves scoping actually excludes it from the sweep, not just from the
+    # report text.
     stale_digest = "sha256:" + "0" * 64
     _put_root(
         files,
@@ -297,136 +209,194 @@ def test_anomaly_raises_after_committing_clean_subset(
             tags={"1.0.0": TagEntry(content=stale_digest, observed="T0")},
         ),
     )
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: ["3.28.1"], _WIDGET_REPO: ["1.0.0"]},
-        manifests={
-            (_CMAKE_REPO, "3.28.1"): _bare_manifest(),
-            (_WIDGET_REPO, "1.0.0"): _bare_manifest(architecture="arm64"),
-        },
-    )
-    github = FakeGitHub(refs={"main": "sha-main-0"})
-
-    with pytest.raises(AnomalyError, match="1 anomaly") as exc_info:
-        reconcile.run(_args(), files=files, registry=registry, github=github, clock=FixedClock())
-
-    # Partial-success: the clean package's PR was still opened before raising.
-    assert ("p/kitware/cmake.json", _BRANCH) in github.files
-    assert ("p/acme/widget.json", _BRANCH) not in github.files
-    assert "acme/widget 1.0.0" in str(exc_info.value)
-
-
-def test_base_branch_missing_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _github_output_env(tmp_path, monkeypatch)
-    files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: ["3.28.1"]}, manifests={(_CMAKE_REPO, "3.28.1"): _bare_manifest()}
-    )
-    github = FakeGitHub()  # no "main" ref configured at all
-
-    with pytest.raises(RuntimeError, match="does not exist"):
-        reconcile.run(_args(), files=files, registry=registry, github=github, clock=FixedClock())
-
-
-def test_reuses_already_open_reconcile_branch_as_base(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _github_output_env(tmp_path, monkeypatch)
-    files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: ["3.28.1"]}, manifests={(_CMAKE_REPO, "3.28.1"): _bare_manifest()}
-    )
-    github = FakeGitHub(refs={"main": "sha-main-0", _BRANCH: "sha-prev-open-pr"})
-    github.pull_requests[_BRANCH] = 7  # a PR from a previous nightly run is still open
 
     result = reconcile.run(
-        _args(), files=files, registry=registry, github=github, clock=FixedClock()
+        _args(package="kitware/cmake"), files=files, registry=registry, github=FakeGitHub()
     )
 
     assert result == ExitCode.OK
-    assert github.pull_requests[_BRANCH] == 7  # same PR reused, not a second one
 
 
-def test_desc_change_readme_only_no_logo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _github_output_env(tmp_path, monkeypatch)
-    files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))
-    readme_bytes = b"# CMake\n"
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: []},
-        desc_digests={_CMAKE_REPO: "sha256:" + "b" * 64},
-        manifests={
-            (_CMAKE_REPO, _DESC_TAG): {
-                "annotations": {_TITLE_KEY: "CMake", _DESCRIPTION_KEY: "Build tool"},
-                "layers": [{"mediaType": "application/markdown", "digest": "sha256:" + "c" * 64}],
-            }
-        },
-        blobs={(_CMAKE_REPO, "sha256:" + "c" * 64): readme_bytes},
-    )
-    github = FakeGitHub(refs={"main": "sha-main-0"})
-
-    result = reconcile.run(
-        _args(), files=files, registry=registry, github=github, clock=FixedClock()
-    )
-
+def test_ghost_root_vanished_between_list_and_read_is_skipped() -> None:
+    files = _GhostFiles(listed=["p/kitware/cmake.json"])
+    result = reconcile.run(_args(), files=files, registry=FakeRegistry(), github=FakeGitHub())
     assert result == ExitCode.OK
-    readme_paths = [
-        path for path, branch in github.files if branch == _BRANCH and path.endswith(".md")
-    ]
-    assert len(readme_paths) == 1
-    assert _committed(github, readme_paths[0]) == readme_bytes
 
 
-def test_desc_change_with_png_and_svg_logos(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _github_output_env(tmp_path, monkeypatch)
+# --- pinned-tag mutation (core/anomaly.py, reused verbatim) -> escalates --
+
+
+def test_pinned_tag_mutation_escalates_to_anomaly() -> None:
     files = InMemoryFiles()
-    _put_root(files, "kitware", "cmake", _root(tags={}))
+    registry = FakeRegistry()
+    committed_digest = "sha256:" + "a" * 64
     _put_root(
-        files, "acme", "widget", _root(name="ocx.sh/acme/widget", repository=_WIDGET_REPO, tags={})
+        files,
+        "kitware",
+        "cmake",
+        _root(tags={"3.28.1": TagEntry(content=committed_digest, observed="T0")}),
     )
+    _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
+    # Registry now resolves "3.28.1" to different content entirely.
+    _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    github = FakeGitHub()
 
-    png_bytes = b"\x89PNG\r\n\x1a\nrest-of-file"
-    svg_bytes = b"<svg></svg>"
-    registry = FakeRegistry(
-        tags={_CMAKE_REPO: [], _WIDGET_REPO: []},
-        desc_digests={_CMAKE_REPO: "sha256:" + "1" * 64, _WIDGET_REPO: "sha256:" + "2" * 64},
-        manifests={
-            (_CMAKE_REPO, _DESC_TAG): {
-                "annotations": {_TITLE_KEY: "CMake", _DESCRIPTION_KEY: "d"},
-                "layers": [
-                    {"mediaType": "application/markdown", "digest": "sha256:" + "3" * 64},
-                    {"mediaType": "image/png", "digest": "sha256:" + "4" * 64},
-                ],
-            },
-            (_WIDGET_REPO, _DESC_TAG): {
-                "annotations": {_TITLE_KEY: "Widget", _DESCRIPTION_KEY: "d"},
-                "layers": [
-                    {"mediaType": "application/markdown", "digest": "sha256:" + "5" * 64},
-                    {"mediaType": "image/svg+xml", "digest": "sha256:" + "6" * 64},
-                ],
-            },
-        },
-        blobs={
-            (_CMAKE_REPO, "sha256:" + "3" * 64): b"# CMake\n",
-            (_CMAKE_REPO, "sha256:" + "4" * 64): png_bytes,
-            (_WIDGET_REPO, "sha256:" + "5" * 64): b"# Widget\n",
-            (_WIDGET_REPO, "sha256:" + "6" * 64): svg_bytes,
-        },
+    with pytest.raises(AnomalyError, match="pinned-tag-mutation"):
+        reconcile.run(_args(), files=files, registry=registry, github=github)
+
+    assert "pinned-tag-mutation" in github.issues[_ISSUE_TITLE][1]
+
+
+# --- verify_claims findings: subset semantics + escalation disposition ----
+
+
+def test_floating_tag_drift_does_not_escalate() -> None:
+    # "latest" is not a pinned (full-release) version — a digest-mismatch
+    # here is the expected cascade-push behavior (ADR-1 D2/D3), never an
+    # anomaly.
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    committed_digest = "sha256:" + "a" * 64
+    _put_root(
+        files,
+        "kitware",
+        "cmake",
+        _root(tags={"latest": TagEntry(content=committed_digest, observed="T0")}),
     )
-    github = FakeGitHub(refs={"main": "sha-main-0"})
+    _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
+    registry.tags[_CMAKE_REPO] = ["latest"]
+    registry.manifests[(_CMAKE_REPO, "latest")] = _bare_manifest(architecture="arm64")
 
-    reconcile.run(_args(), files=files, registry=registry, github=github, clock=FixedClock())
+    result = reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
 
-    # CAS paths are keyed by a freshly computed content digest (of the raw
-    # readme/logo bytes), not by the registry blob digests used above to
-    # fetch them — assert on the resulting file *extensions* instead.
-    cas_exts = {
-        path.rsplit(".", 1)[-1]
-        for path, branch in github.files
-        if branch == _BRANCH and "/o/sha256/" in path
-    }
-    assert "png" in cas_exts
-    assert "svg" in cas_exts
+    assert result == ExitCode.OK
+
+
+def test_yanked_vanished_tag_does_not_escalate() -> None:
+    # ADR-6 FP-2/FP-3: yank is grace — an explicit owner-authorized exemption
+    # from the registry-existence check, so a yanked tag vanishing entirely
+    # is not itself an anomaly.
+    files = InMemoryFiles()
+    registry = FakeRegistry()  # no tags registered at all -> tag no longer resolves
+    committed_digest = "sha256:" + "a" * 64
+    yanked_entry = TagEntry(
+        content=committed_digest, observed="T0", yanked=Yank(reason="cve", at="T0")
+    )
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": yanked_entry}))
+    _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
+
+    result = reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+    assert result == ExitCode.OK
+
+
+def test_non_yanked_vanished_tag_escalates_to_anomaly() -> None:
+    # ADR-6 FP-2/FP-3: everything else vanished-upstream is an anomaly, not
+    # a silent drop.
+    files = InMemoryFiles()
+    registry = FakeRegistry()  # no tags registered at all -> tag no longer resolves
+    committed_digest = "sha256:" + "a" * 64
+    _put_root(
+        files,
+        "kitware",
+        "cmake",
+        _root(tags={"3.28.1": TagEntry(content=committed_digest, observed="T0")}),
+    )
+    _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
+    github = FakeGitHub()
+
+    with pytest.raises(AnomalyError, match="tag-missing-upstream"):
+        reconcile.run(_args(), files=files, registry=registry, github=github)
+
+    assert "tag-missing-upstream" in github.issues[_ISSUE_TITLE][1]
+
+
+def test_dangling_cas_reference_escalates() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    entry, _object_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": entry}))
+    # No CAS file written at all for entry.content.
+    github = FakeGitHub()
+
+    with pytest.raises(AnomalyError, match="cas-object-missing"):
+        reconcile.run(_args(), files=files, registry=registry, github=github)
+
+
+def test_tampered_cas_object_escalates() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    entry, _object_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": entry}))
+    _put_cas(files, "kitware", "cmake", entry.content, b"tampered bytes")
+
+    with pytest.raises(AnomalyError, match="cas-object-hash-mismatch"):
+        reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+
+def test_desc_blob_hash_mismatch_escalates() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    readme_digest = "sha256:" + "e" * 64
+    desc = Desc(digest="sha256:" + "d" * 64, title="CMake", description="x", readme=readme_digest)
+    _put_root(files, "kitware", "cmake", _root(tags={}, desc=desc))
+    _put_cas(files, "kitware", "cmake", readme_digest, b"tampered readme", ext="md")
+
+    with pytest.raises(AnomalyError, match="desc-blob-hash-mismatch"):
+        reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+
+def test_desc_blob_missing_escalates() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    readme_digest = "sha256:" + "e" * 64
+    desc = Desc(digest="sha256:" + "d" * 64, title="CMake", description="x", readme=readme_digest)
+    _put_root(files, "kitware", "cmake", _root(tags={}, desc=desc))
+    # No CAS file written for the readme digest at all.
+
+    with pytest.raises(AnomalyError, match="desc-blob-missing"):
+        reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+
+# --- partial-success: clean + anomalous packages together -----------------
+
+
+def test_clean_and_anomalous_packages_both_reported() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    clean_entry, clean_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": clean_entry}))
+    _put_cas(files, "kitware", "cmake", clean_entry.content, clean_bytes)
+
+    # Tag genuinely resolves upstream (so this isn't "tag-missing-upstream"),
+    # but its CAS object was never committed locally — a dangling reference.
+    dangling_entry, _dangling_bytes = _committed_tag(registry, _WIDGET_REPO, "1.0.0")
+    _put_root(
+        files,
+        "acme",
+        "widget",
+        _root(name="ocx.sh/acme/widget", repository=_WIDGET_REPO, tags={"1.0.0": dangling_entry}),
+    )
+    github = FakeGitHub()
+
+    with pytest.raises(AnomalyError) as exc_info:
+        reconcile.run(_args(), files=files, registry=registry, github=github)
+
+    assert "acme/widget" in str(exc_info.value)
+    assert "kitware/cmake" not in str(exc_info.value)
+    assert github.issues[_ISSUE_TITLE][0] == 1  # exactly one issue, not one per package
+
+
+def test_anomaly_issue_is_idempotent_across_repeated_runs() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    entry, _object_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": entry}))
+    github = FakeGitHub()
+
+    with pytest.raises(AnomalyError):
+        reconcile.run(_args(), files=files, registry=registry, github=github)
+    with pytest.raises(AnomalyError):
+        reconcile.run(_args(), files=files, registry=registry, github=github)
+
+    assert len(github.issues) == 1

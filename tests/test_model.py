@@ -203,6 +203,18 @@ def test_pull_request_info_is_frozen() -> None:
         info.number = 2  # type: ignore[misc]
 
 
+def test_pull_request_info_author_fields_default_and_settable() -> None:
+    defaulted = PullRequestInfo(number=1, base_sha="a", head_sha="b", changed_paths=())
+    assert defaulted.author_login == ""
+    assert defaulted.author_id == 0
+
+    info = PullRequestInfo(
+        number=1, base_sha="a", head_sha="b", changed_paths=(), author_login="alice", author_id=1
+    )
+    assert info.author_login == "alice"
+    assert info.author_id == 1
+
+
 def test_manifest_fetch_fields() -> None:
     fetch = ManifestFetch(raw=b'{"a":1}', digest="sha256:aaaa", parsed={"a": 1})
     assert fetch.raw == b'{"a":1}'

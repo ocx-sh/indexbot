@@ -30,7 +30,7 @@ class IndexBotError(Exception):
 
 
 class ValidationError(IndexBotError):
-    """A semantic check failed (`core/validate_entry.py`, `core/validate_payload.py`)."""
+    """A semantic check failed (`core/validate_entry.py`)."""
 
     _exit_code = ExitCode.VALIDATION_FAILURE
 

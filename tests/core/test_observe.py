@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from indexbot.core.observe import observe
+from indexbot.core.observe import observe, observe_one_tag
 from indexbot.errors import TransientError
 from indexbot.model import ManifestFetch, OwnershipProbeResult
 from tests.fakes import FakeRegistry
@@ -231,3 +231,43 @@ def test_observe_propagates_transient_error_uncaught() -> None:
 def test_observe_empty_tag_list_returns_empty_tuple() -> None:
     registry = FakeRegistry(tags={_REPO: []})
     assert observe(_REPO, registry) == ()
+
+
+# --- observe_one_tag (extracted for core/verify_claims.py + cli/announce.py) -
+
+
+def test_observe_one_tag_returns_the_single_tag_observation() -> None:
+    registry = FakeRegistry(
+        manifests={(_REPO, "3.28.1"): {"platform": {"architecture": "amd64", "os": "linux"}}}
+    )
+    observation = observe_one_tag(_REPO, "3.28.1", registry)
+    assert observation is not None
+    assert observation.tag == "3.28.1"
+    assert observation.object.platforms[0].platform.architecture == "amd64"
+
+
+def test_observe_one_tag_returns_none_for_a_missing_tag() -> None:
+    registry = FakeRegistry()
+    assert observe_one_tag(_REPO, "ghost", registry) is None
+
+
+def test_observe_one_tag_propagates_transient_error_uncaught() -> None:
+    @dataclass
+    class _RaisingOnGetManifest:
+        def list_tags(self, repository: str) -> list[str]:
+            raise AssertionError("should not be called")
+
+        def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
+            raise TransientError("registry unavailable")
+
+        def get_desc_tag_digest(self, repository: str) -> str | None:
+            raise AssertionError("should not be called")
+
+        def get_blob(self, repository: str, digest: str) -> bytes:
+            raise AssertionError("should not be called")
+
+        def probe_ownership(self, repository: str, expected_name: str) -> OwnershipProbeResult:
+            raise AssertionError("should not be called")
+
+    with pytest.raises(TransientError):
+        observe_one_tag(_REPO, "3.28.1", _RaisingOnGetManifest())

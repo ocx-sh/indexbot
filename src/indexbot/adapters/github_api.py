@@ -79,7 +79,7 @@ class GitHubApi:
 
     owner: str
     repo: str
-    token: str = field(repr=False)
+    token: str = field(default="", repr=False)
     timeout: float = 30.0
     base_url: str = "https://api.github.com"
     graphql_url: str = "https://api.github.com/graphql"
@@ -116,13 +116,16 @@ class GitHubApi:
             self._update_branch(client, branch, base_sha, new_commit_sha)
         return new_commit_sha
 
-    def open_or_update_pull_request(self, *, branch: str, base: str, title: str, body: str) -> int:
+    def open_or_update_pull_request(
+        self, *, branch: str, base: str, title: str, body: str, head_owner: str | None = None
+    ) -> int:
+        head = f"{head_owner or self.owner}:{branch}"
         with self._client() as client:
-            existing = self._find_open_pull_request(client, branch, base)
+            existing = self._find_open_pull_request(client, head, base)
             if existing is None:
                 response = client.post(
                     self._repo_url("pulls"),
-                    json={"title": title, "body": body, "head": branch, "base": base},
+                    json={"title": title, "body": body, "head": head, "base": base},
                 )
                 self._check_transient(response)
                 response.raise_for_status()
@@ -181,6 +184,8 @@ class GitHubApi:
             base_sha=payload["base"]["sha"],
             head_sha=payload["head"]["sha"],
             changed_paths=changed_paths,
+            author_login=payload["user"]["login"],
+            author_id=payload["user"]["id"],
         )
 
     def set_commit_status(
@@ -194,24 +199,42 @@ class GitHubApi:
         self._check_transient(response)
         response.raise_for_status()
 
-    # ---- extra capability, not on ports.GitHubPort -----------------------------
+    def request_reviewers(self, pr_number: int, logins: list[str]) -> None:
+        with self._client() as client:
+            response = client.post(
+                self._repo_url("pulls", str(pr_number), "requested_reviewers"),
+                json={"reviewers": logins},
+            )
+        self._check_transient(response)
+        response.raise_for_status()
+
+    def create_comment(self, pr_number: int, body: str, *, marker: str) -> None:
+        existing = self._find_marked_comment(pr_number, marker)
+        if existing is None:
+            with self._client() as client:
+                response = client.post(
+                    self._repo_url("issues", str(pr_number), "comments"), json={"body": body}
+                )
+            self._check_transient(response)
+            response.raise_for_status()
+            return
+
+        comment_id, existing_body = existing
+        if existing_body != body:
+            with self._client() as client:
+                response = client.patch(
+                    self._repo_url("issues", "comments", str(comment_id)), json={"body": body}
+                )
+            self._check_transient(response)
+            response.raise_for_status()
 
     def create_or_update_issue(
         self, *, title: str, body: str, labels: list[str] | None = None
     ) -> int:
         """Idempotent per exact `title` match among open, non-PR issues.
-
-        Not part of `ports.GitHubPort` as of this work package — CONTRACTS.md
-        §13 item 4 flags that no `create_or_update_issue`-shaped method
-        exists on the frozen Protocol yet. This adapter adds the capability
-        `cli/reconcile.py` (a different, later work package) needs for its
-        anomaly-report requirement, without editing `ports.py`/
-        `tests/fakes/__init__.py` out from under parallel builders — both
-        are out of this work package's assigned scope. See this work
-        package's `open_questions`: `ports.GitHubPort` should gain a
-        matching method (and `FakeGitHub` a matching fake) once an owning
-        work package is assigned.
-        """
+        `cli/reconcile.py`'s anomaly-report mechanism (promoted onto
+        `ports.GitHubPort`, fork-PR announce revamp — previously an
+        adapter-only capability, CONTRACTS.md §13 item 4's flagged gap)."""
         existing = self._find_open_issue(title)
         if existing is None:
             with self._client() as client:
@@ -234,11 +257,15 @@ class GitHubApi:
     # ---- construction / request helpers ----------------------------------------
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.token}",
-            "Accept": _ACCEPT,
-            "X-GitHub-Api-Version": _API_VERSION,
-        }
+        """`Authorization` is omitted entirely when `token` is empty —
+        `cli/announce.py`'s `--out` mode reads the index repo's committed
+        root anonymously (a public repo's Contents API works unauthenticated,
+        just at a lower rate limit); sending `Authorization: Bearer ` with an
+        empty token would itself be rejected as a malformed credential."""
+        headers = {"Accept": _ACCEPT, "X-GitHub-Api-Version": _API_VERSION}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def _client(self) -> httpx.Client:
         return httpx.Client(headers=self._headers(), timeout=self.timeout)
@@ -287,11 +314,13 @@ class GitHubApi:
         raise TransientError(f"GitHub API pagination exceeded {_MAX_PAGES} pages: {url}")
 
     def _find_open_pull_request(
-        self, client: httpx.Client, branch: str, base: str
+        self, client: httpx.Client, head: str, base: str
     ) -> dict[str, Any] | None:
+        """`head` is already the fully-qualified `owner:branch` query value —
+        `open_or_update_pull_request` resolves same-repo (`self.owner`) vs.
+        cross-repo (`head_owner`) before calling this."""
         response = client.get(
-            self._repo_url("pulls"),
-            params={"head": f"{self.owner}:{branch}", "base": base, "state": "open"},
+            self._repo_url("pulls"), params={"head": head, "base": base, "state": "open"}
         )
         self._check_transient(response)
         response.raise_for_status()
@@ -304,6 +333,17 @@ class GitHubApi:
                 continue  # /issues also returns PRs — exclude them
             if item["title"] == title:
                 return item
+        return None
+
+    def _find_marked_comment(self, pr_number: int, marker: str) -> tuple[int, str] | None:
+        """The first existing comment on `pr_number` whose body contains the
+        hidden HTML `marker` — `create_comment`'s idempotency mechanism (G-20:
+        one review-required comment per PR across repeated `governance-check`
+        runs, never a fresh comment every run)."""
+        for item in self._paginate(self._repo_url("issues", str(pr_number), "comments"), {}):
+            body = str(item.get("body", ""))
+            if marker in body:
+                return int(item["id"]), body
         return None
 
     def _get_base_tree_sha(self, client: httpx.Client, base_sha: str) -> str:

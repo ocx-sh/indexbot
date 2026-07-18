@@ -18,8 +18,7 @@ class ExitCode(IntEnum):
     """No-op (nothing to regenerate) or applied (diff computed and committed/PR'd)."""
 
     VALIDATION_FAILURE = 1
-    """A semantic check (`core/validate_entry.py`, `core/validate_payload.py`)
-    rejected the input."""
+    """A semantic check (`core/validate_entry.py`) rejected the input."""
 
     ANOMALY = 65
     """Integrity violation requiring a human — never auto-healed."""

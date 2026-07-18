@@ -103,37 +103,57 @@ def _content_digest(obj: ObservationObject) -> str:
     return f"sha256:{hashlib.sha256(serialize_observation_object(obj)).hexdigest()}"
 
 
+def observe_one_tag(repository: str, tag: str, registry: RegistryPort) -> Observation | None:
+    """One tag's freshly observed state, or `None` if `tag` no longer exists
+    on `repository` (a real 404 — fetched but vanished, or never existed at
+    all).
+
+    `registry.get_manifest(repository, tag)` returns a `ManifestFetch` whose
+    `.parsed` body is either an OCI image index (multi-platform,
+    distinguished by a `"manifests"` key) or a bare image manifest (single
+    platform, its own `platform`/`config.platform` field). A bare manifest's
+    one `PlatformEntry.digest` is `ManifestFetch.digest` itself — the
+    adapter-computed, content-derived registry digest (ADR-1 D5's
+    verifiability chain; `ports.py`'s digest doctrine), never a locally
+    synthesized stand-in. `platforms[]` is sorted and digested per §1.
+
+    Extracted from `observe()`'s per-tag body (fork-PR announce revamp) so
+    `core/verify_claims.py` (re-derive one *claimed* tag from registry truth)
+    and `cli/announce.py` (observe only the publisher's curated tag set) can
+    reuse this exact per-tag logic without looping over
+    `registry.list_tags()` first — `observe()` below is now a thin loop over
+    this function, zero behavior change.
+    """
+    try:
+        fetch = registry.get_manifest(repository, tag)
+    except KeyError:
+        return None
+    raw = fetch.parsed
+    platforms = (
+        _platforms_from_index(raw)
+        if "manifests" in raw
+        else _platforms_from_bare(raw, fetch.digest)
+    )
+    obj = ObservationObject(platforms=tuple(sorted(platforms, key=platform_sort_key)))
+    return Observation(tag=tag, content_digest=_content_digest(obj), object=obj)
+
+
 def observe(repository: str, registry: RegistryPort) -> tuple[Observation, ...]:
     """One `Observation` per `registry.list_tags(repository)` entry
-    (excluding the internal `__ocx.desc` tag, see `_DESC_TAG`).
+    (excluding the internal `__ocx.desc` tag, see `_DESC_TAG`), via
+    `observe_one_tag`.
 
-    For each tag, `registry.get_manifest(repository, tag)` returns a
-    `ManifestFetch` whose `.parsed` body is either an OCI image index
-    (multi-platform, distinguished by a `"manifests"` key) or a bare image
-    manifest (single platform, its own `platform`/`config.platform` field).
-    A bare manifest's one `PlatformEntry.digest` is `ManifestFetch.digest`
-    itself — the adapter-computed, content-derived registry digest (ADR-1
-    D5's verifiability chain; `ports.py`'s digest doctrine), never a locally
-    synthesized stand-in. `platforms[]` is sorted and digested per §1. A tag
-    whose manifest fetch raises `KeyError` (fetched but vanished between
-    `list_tags` and `get_manifest` — a real registry race) is skipped, not
-    fatal. A `TransientError` from either call propagates uncaught (BD-2 —
-    the whole call fails transient, no partial-tag silent-skip).
+    A tag whose manifest fetch raises `KeyError` (fetched but vanished
+    between `list_tags` and `get_manifest` — a real registry race) is
+    skipped, not fatal — `observe_one_tag` returning `None`. A
+    `TransientError` from either call propagates uncaught (BD-2 — the whole
+    call fails transient, no partial-tag silent-skip).
     """
     observations: list[Observation] = []
     for tag in registry.list_tags(repository):
         if tag == _DESC_TAG:
             continue
-        try:
-            fetch = registry.get_manifest(repository, tag)
-        except KeyError:
-            continue
-        raw = fetch.parsed
-        platforms = (
-            _platforms_from_index(raw)
-            if "manifests" in raw
-            else _platforms_from_bare(raw, fetch.digest)
-        )
-        obj = ObservationObject(platforms=tuple(sorted(platforms, key=platform_sort_key)))
-        observations.append(Observation(tag=tag, content_digest=_content_digest(obj), object=obj))
+        observation = observe_one_tag(repository, tag, registry)
+        if observation is not None:
+            observations.append(observation)
     return tuple(observations)

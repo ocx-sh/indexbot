@@ -8,6 +8,7 @@ internals, so this suite survives an adapter refactor (CONTRACTS.md §2).
 from __future__ import annotations
 
 import base64
+import json
 
 import httpx
 import pytest
@@ -48,6 +49,23 @@ def test_get_file_contents_missing_returns_none() -> None:
     ).mock(return_value=httpx.Response(404, json={"message": "Not Found"}))
 
     assert _client().get_file_contents("p/nobody/nothing.json", "main") is None
+
+
+@respx.mock
+def test_get_file_contents_anonymous_client_omits_authorization_header() -> None:
+    # `cli/announce.py`'s `--out` mode reads the index repo anonymously —
+    # an empty `token` must never produce a malformed `Authorization: Bearer `
+    # header.
+    encoded = base64.b64encode(b'{"format_version":1}').decode("ascii")
+    route = respx.get(
+        "https://api.github.com/repos/ocx-sh/index/contents/config.json",
+        params={"ref": "main"},
+    ).mock(return_value=httpx.Response(200, json={"content": encoded, "encoding": "base64"}))
+
+    anonymous = GitHubApi(owner="ocx-sh", repo="index")
+    anonymous.get_file_contents("config.json", "main")
+
+    assert "Authorization" not in route.calls.last.request.headers
 
 
 # ---- get_ref_sha ------------------------------------------------------------
@@ -302,6 +320,31 @@ def test_open_or_update_pull_request_no_op_when_unchanged() -> None:
     assert result == 7
 
 
+@respx.mock
+def test_open_or_update_pull_request_cross_repo_head_owner() -> None:
+    # `cli/announce.py`'s `--fork` mode: the PR is opened against the index
+    # repo (`_client()`'s own owner/repo) with a fork-owner-qualified head —
+    # never `self.owner`.
+    respx.get(
+        "https://api.github.com/repos/ocx-sh/index/pulls",
+        params={"head": "alice:announce-ns-pkg", "base": "main", "state": "open"},
+    ).mock(return_value=httpx.Response(200, json=[]))
+    create_route = respx.post("https://api.github.com/repos/ocx-sh/index/pulls").mock(
+        return_value=httpx.Response(201, json={"number": 42})
+    )
+
+    result = _client().open_or_update_pull_request(
+        branch="announce-ns-pkg",
+        base="main",
+        title="regen ns/pkg",
+        body="body",
+        head_owner="alice",
+    )
+
+    assert result == 42
+    assert json.loads(create_route.calls.last.request.content)["head"] == "alice:announce-ns-pkg"
+
+
 # ---- add_labels ---------------------------------------------------------------
 
 
@@ -358,7 +401,11 @@ def test_get_pull_request_info_success() -> None:
     respx.get("https://api.github.com/repos/ocx-sh/index/pulls/7").mock(
         return_value=httpx.Response(
             200,
-            json={"base": {"sha": "base-sha"}, "head": {"sha": "head-sha"}},
+            json={
+                "base": {"sha": "base-sha"},
+                "head": {"sha": "head-sha"},
+                "user": {"login": "alice", "id": 1},
+            },
         )
     )
     respx.get(
@@ -369,7 +416,12 @@ def test_get_pull_request_info_success() -> None:
     result = _client().get_pull_request_info(7)
 
     assert result == PullRequestInfo(
-        number=7, base_sha="base-sha", head_sha="head-sha", changed_paths=("p/ns/pkg.json",)
+        number=7,
+        base_sha="base-sha",
+        head_sha="head-sha",
+        changed_paths=("p/ns/pkg.json",),
+        author_login="alice",
+        author_id=1,
     )
 
 
@@ -388,7 +440,11 @@ def test_get_pull_request_info_paginates_changed_files() -> None:
     respx.get("https://api.github.com/repos/ocx-sh/index/pulls/7").mock(
         return_value=httpx.Response(
             200,
-            json={"base": {"sha": "base-sha"}, "head": {"sha": "head-sha"}},
+            json={
+                "base": {"sha": "base-sha"},
+                "head": {"sha": "head-sha"},
+                "user": {"login": "alice", "id": 1},
+            },
         )
     )
     page_1_url = "https://api.github.com/repos/ocx-sh/index/pulls/7/files"
@@ -424,7 +480,85 @@ def test_set_commit_status_success() -> None:
     )
 
 
-# ---- create_or_update_issue (extra capability, not on GitHubPort) --------------
+# ---- request_reviewers (G-20) --------------------------------------------------
+
+
+@respx.mock
+def test_request_reviewers_success() -> None:
+    route = respx.post(
+        "https://api.github.com/repos/ocx-sh/index/pulls/7/requested_reviewers"
+    ).mock(return_value=httpx.Response(201, json={"number": 7}))
+
+    _client().request_reviewers(7, ["alice", "bob"])
+
+    assert json.loads(route.calls.last.request.content) == {"reviewers": ["alice", "bob"]}
+
+
+# ---- create_comment (G-20, idempotent via hidden marker) -----------------------
+
+_MARKER = "<!-- indexbot:governance -->"
+
+
+@respx.mock
+def test_create_comment_creates_when_no_marked_comment_exists() -> None:
+    respx.get(
+        "https://api.github.com/repos/ocx-sh/index/issues/7/comments",
+        params={"per_page": "100"},
+    ).mock(return_value=httpx.Response(200, json=[]))
+    create_route = respx.post("https://api.github.com/repos/ocx-sh/index/issues/7/comments").mock(
+        return_value=httpx.Response(201, json={"id": 99})
+    )
+
+    _client().create_comment(7, f"{_MARKER}\nreview required", marker=_MARKER)
+
+    assert create_route.called
+
+
+@respx.mock
+def test_create_comment_creates_when_comments_exist_but_none_marked() -> None:
+    # A comment list with entries, none carrying the marker, exercises the
+    # "keep scanning past a non-matching comment" loop path before falling
+    # through to "create a new one".
+    respx.get(
+        "https://api.github.com/repos/ocx-sh/index/issues/7/comments",
+        params={"per_page": "100"},
+    ).mock(return_value=httpx.Response(200, json=[{"id": 1, "body": "unrelated comment"}]))
+    create_route = respx.post("https://api.github.com/repos/ocx-sh/index/issues/7/comments").mock(
+        return_value=httpx.Response(201, json={"id": 99})
+    )
+
+    _client().create_comment(7, f"{_MARKER}\nreview required", marker=_MARKER)
+
+    assert create_route.called
+
+
+@respx.mock
+def test_create_comment_updates_when_marked_comment_differs() -> None:
+    respx.get(
+        "https://api.github.com/repos/ocx-sh/index/issues/7/comments",
+        params={"per_page": "100"},
+    ).mock(return_value=httpx.Response(200, json=[{"id": 99, "body": f"{_MARKER}\nold state"}]))
+    update_route = respx.patch("https://api.github.com/repos/ocx-sh/index/issues/comments/99").mock(
+        return_value=httpx.Response(200, json={"id": 99})
+    )
+
+    _client().create_comment(7, f"{_MARKER}\nnew state", marker=_MARKER)
+
+    assert update_route.called
+
+
+@respx.mock
+def test_create_comment_no_op_when_marked_comment_unchanged() -> None:
+    # No PATCH route registered — a PATCH attempt would fail as unmocked.
+    respx.get(
+        "https://api.github.com/repos/ocx-sh/index/issues/7/comments",
+        params={"per_page": "100"},
+    ).mock(return_value=httpx.Response(200, json=[{"id": 99, "body": f"{_MARKER}\nsame state"}]))
+
+    _client().create_comment(7, f"{_MARKER}\nsame state", marker=_MARKER)
+
+
+# ---- create_or_update_issue (promoted onto GitHubPort) -------------------------
 
 
 @respx.mock

@@ -230,6 +230,40 @@ def test_fake_github_enable_auto_merge() -> None:
     assert pr in github.auto_merge_enabled
 
 
+def test_fake_github_open_pull_request_cross_repo_head_is_a_distinct_key() -> None:
+    github = FakeGitHub()
+    same_repo = github.open_or_update_pull_request(branch="b", base="main", title="t", body="b")
+    fork = github.open_or_update_pull_request(
+        branch="b", base="main", title="t", body="b", head_owner="alice"
+    )
+    assert same_repo != fork
+    assert github.pull_requests == {"b": same_repo, "alice:b": fork}
+
+
+def test_fake_github_request_reviewers_accumulates() -> None:
+    github = FakeGitHub()
+    github.request_reviewers(7, ["alice"])
+    github.request_reviewers(7, ["bob"])
+    assert github.requested_reviewers[7] == ["alice", "bob"]
+
+
+def test_fake_github_create_comment_idempotent_per_marker() -> None:
+    github = FakeGitHub()
+    github.create_comment(7, "first body", marker="<!-- m -->")
+    github.create_comment(7, "second body", marker="<!-- m -->")
+    assert github.comments[7]["<!-- m -->"] == "second body"
+
+
+def test_fake_github_create_or_update_issue_assigns_and_reuses_number() -> None:
+    github = FakeGitHub()
+    first = github.create_or_update_issue(title="Anomaly: ns/pkg", body="v1")
+    second = github.create_or_update_issue(title="Anomaly: ns/pkg", body="v2")
+    other = github.create_or_update_issue(title="Anomaly: other/pkg", body="v1")
+    assert first == second
+    assert other != first
+    assert github.issues["Anomaly: ns/pkg"] == (first, "v2")
+
+
 def test_in_memory_files_round_trip() -> None:
     files = InMemoryFiles()
     assert files.exists("p/kitware/cmake.json") is False

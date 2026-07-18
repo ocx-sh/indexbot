@@ -1,55 +1,55 @@
-"""`indexbot reconcile` — full-index nightly sweep (ADR-4 BD-1/BD-2;
-CONTRACTS.md §12).
+"""`indexbot reconcile` — verify-only nightly sweep (fork-PR announce revamp,
+owner-confirmed decision set 2026-07-18: "Verify-only reconcile").
 
-For every committed `p/<namespace>/<package>.json`: re-observe the physical
-registry, recompute `desc`, check pinned-tag anomalies, regenerate, and diff
-against the committed root. Packages with a clean diff are batched into one
-commit + one PR (or, under `--dry-run`, only reported — no `GitHubPort` write
-call is made at all). Packages with an anomaly finding are excluded from that
-PR and their findings are collected instead.
+Never writes to `p/` — no regenerate, no diff, no commit, no PR. For every
+committed `p/<namespace>/<package>.json`: re-derive each *claimed* tag/desc
+blob from registry truth (`core/verify_claims.py`) plus `core/anomaly.py`'s
+existing pinned-tag mutation check (reused verbatim, not reinvented — a
+still-resolving pinned tag whose content changed is exactly what
+`check_tag_mutations` already detects, given each committed tag's freshly
+re-observed state).
 
-Partial-success semantics (CONTRACTS.md §12, plan Phase 2 WP-list): the clean
-subset's PR (if any) is opened *before* this module raises. A non-empty
-finding set always raises `AnomalyError` (exit 65) after the sweep completes,
-regardless of whether the clean-subset PR also succeeded — both outcomes are
-visible to the caller.
+Disposition (which findings actually escalate to the exit-65 anomaly
+outcome): `core/anomaly.py`'s pinned-tag mutations always escalate.
+`core/verify_claims.py`'s `"cas-object-missing"`/`"cas-object-hash-mismatch"`/
+`"desc-blob-missing"`/`"desc-blob-hash-mismatch"` findings always escalate too
+— structural CAS-integrity concerns, independent of tag semantics (the exact
+same unconditional treatment `core/validate_entry.py`'s
+`check_no_dangling_references`/`check_digest_self_consistent` already give
+them). `verify_claims`'s `"digest-mismatch"` does **not** escalate on its
+own: a floating tag (`latest`, partial versions, variant-prefixed) drifting
+is the expected cascade-push behavior (ADR-1 D2/D3) — that exact same
+digest-mismatch, on a *pinned* tag, is already caught by the reused
+`check_tag_mutations` check above, so this avoids double-flagging one
+underlying phenomenon through two different finding shapes.
 
-Issue-creation on anomaly (CONTRACTS.md §13 item 4) happens at the *workflow*
-layer, not here: `reconcile.yml`'s "Open or update anomaly issue" step reads
-this module's exit code (65) and stderr/log output via `gh issue`, matching
-`adapters/github_api.py`'s `GitHubApi.create_or_update_issue` docstring, which
-notes that capability is deliberately not on `ports.GitHubPort` yet. This
-module never needs an issue-creation port method — see `open_questions`.
+`"tag-missing-upstream"` (ADR-6 FP-2/FP-3 — a decided rule, not an open
+question) **does** escalate, unless the committed `TagEntry.yanked is not
+None` for that tag: yank is grace, an explicit owner-authorized exemption
+from the registry-existence check; a tag vanishing from the registry with
+no yank marker at all is an anomaly, not a silent drop (`_PackageReport`
+carries the committed root's yanked-tag names so `_escalating_findings` can
+tell the two apart).
 
-A `TransientError`/`ValidationError` raised mid-sweep (registry backoff
-exhausted, or a committed root somehow fails to parse) propagates uncaught
-and aborts the *entire* sweep immediately — no partial commit of
-already-collected clean patches. This extends `core/observe.py`'s per-call
-"no partial-tag silent-skip" framing (BD-2) to the full-index sweep; neither
-ADR states the sweep-level granularity explicitly, so this is flagged in
-`open_questions` rather than silently assumed.
+A non-empty escalating-finding set opens/updates one anomaly issue
+(`GitHubPort.create_or_update_issue`, promoted onto the port this stage) and
+then raises `AnomalyError` (exit 65) once the full sweep completes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
-from indexbot.cli._common import write_github_output
 from indexbot.core.anomaly import check_tag_mutations
-from indexbot.core.desc import check_desc_change
-from indexbot.core.diff import diff
-from indexbot.core.observe import observe
-from indexbot.core.regenerate import regenerate
+from indexbot.core.observe import observe_one_tag
 from indexbot.core.validate_entry import (
-    cas_relpath,
     check_repository_allowlisted,
     check_repository_shape,
+    parse_package_id,
     parse_package_root,
-    serialize_observation_object,
-    serialize_package_root,
 )
-from indexbot.core.validate_payload import parse_package_id
+from indexbot.core.verify_claims import verify_claims
 from indexbot.errors import AnomalyError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import PackageId
@@ -58,23 +58,40 @@ if TYPE_CHECKING:
     import argparse
 
     from indexbot.core.anomaly import AnomalyFinding
-    from indexbot.core.desc import DescUpdate
-    from indexbot.core.diff import Patch
-    from indexbot.ports import ClockPort, FilePort, GitHubPort, RegistryPort
+    from indexbot.core.observe import Observation
+    from indexbot.core.verify_claims import ClaimFinding
+    from indexbot.ports import FilePort, GitHubPort, RegistryPort
 
-_ROOT_PREFIX = "p/"
-_BASE_BRANCH = "main"
-_RECONCILE_BRANCH = "indexbot/reconcile"
-_PNG_MAGIC = b"\x89PNG"
+_ROOT_PREFIX: Final[str] = "p/"
+_ISSUE_TITLE: Final[str] = "indexbot reconcile: anomalies detected"
+_ESCALATING_CLAIM_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "cas-object-missing",
+        "cas-object-hash-mismatch",
+        "desc-blob-missing",
+        "desc-blob-hash-mismatch",
+    }
+)
+
+
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Populate `parser` with `reconcile`'s CLI surface. `--dry-run` is gone
+    — verify-only reconcile never writes at all, so there is nothing left
+    for a dry run to skip."""
+    parser.add_argument(
+        "--package", default=None, help="scope the sweep to one <namespace>/<package>"
+    )
 
 
 @dataclass(frozen=True, slots=True)
-class _PackageOutcome:
-    """One package's sweep result — `None` fields mean "nothing to do"."""
-
-    findings: tuple[AnomalyFinding, ...]
-    patch: Patch | None
-    cas_writes: dict[str, bytes]
+class _PackageReport:
+    package_id: PackageId
+    pinned_mutations: tuple[AnomalyFinding, ...]
+    claim_findings: tuple[ClaimFinding, ...]
+    yanked_tags: frozenset[str]
+    """Committed tag names with a non-`None` `TagEntry.yanked` marker — the
+    grace exemption `_escalating_findings` checks a `"tag-missing-upstream"`
+    finding's tag name against (ADR-6 FP-2/FP-3)."""
 
 
 def _root_path(package_id: PackageId) -> str:
@@ -85,8 +102,8 @@ def _discover_package_ids(files: FilePort, *, scope: PackageId | None) -> tuple[
     """Every `p/<namespace>/<package>.json` root, excluding CAS subtrees.
 
     A root is exactly two path segments under `p/` whose second segment ends
-    in `.json` (CONTRACTS.md §12); a CAS object lives three-plus segments
-    deep (`p/<ns>/<pkg>/o/sha256/<hex>.<ext>`) and is filtered out by the
+    in `.json`; a CAS object lives three-plus segments deep
+    (`p/<ns>/<pkg>/o/sha256/<hex>.<ext>`) and is filtered out by the
     segment-count check alone.
     """
     ids: list[PackageId] = []
@@ -108,168 +125,121 @@ def _resolve_scope(args: argparse.Namespace) -> PackageId | None:
     return parse_package_id(raw)
 
 
-def _desc_cas_writes(package_id: PackageId, update: DescUpdate) -> dict[str, bytes]:
-    """CAS writes for a `DescUpdate`.
-
-    `readme_bytes`/`desc.readme` are always both set on any `DescUpdate`
-    `core/desc.py`'s `check_desc_change` returns (it raises `ValueError`
-    itself rather than ever return one without a markdown layer) — narrowed
-    with `cast` rather than an `if`, since that guard's false arm is
-    unreachable given that contract and would otherwise be an uncoverable
-    branch under this project's 100%-branch gate. `logo_bytes`/`desc.logo`
-    are genuinely optional (no logo layer published) and get a real `if`.
-
-    `DescUpdate` carries no layer media type (CONTRACTS.md §7's frozen shape
-    does not expose one), so the logo extension is recovered by sniffing the
-    PNG magic bytes — `core/desc.py` only ever populates `logo_bytes` for
-    `image/png` or `image/svg+xml` layers, so "not PNG" -> "svg" is exhaustive
-    for this module's input, not a heuristic guess. Flagged in
-    `open_questions`: the robust fix is threading the media type through
-    `DescUpdate` itself, out of this work package's scope (`core/desc.py` is
-    WP2-B's file).
-    """
-    namespace, package = package_id.namespace, package_id.package
-    readme_path = cas_relpath(namespace, package, cast(str, update.desc.readme), "md")
-    writes: dict[str, bytes] = {readme_path: cast(bytes, update.readme_bytes)}
-    if update.logo_bytes is not None:
-        ext = "png" if update.logo_bytes.startswith(_PNG_MAGIC) else "svg"
-        logo_path = cas_relpath(namespace, package, cast(str, update.desc.logo), ext)
-        writes[logo_path] = update.logo_bytes
-    return writes
+def _cas_bytes_by_digest(
+    files: FilePort, package_id: PackageId, wanted_digests: frozenset[str]
+) -> dict[str, bytes]:
+    """`wanted_digests` resolved to their already-committed bytes. A digest
+    named by `root` with no matching CAS file at all is simply absent from
+    the returned map — `verify_claims` reports that as
+    `cas-object-missing`/`desc-blob-missing`, never a `KeyError` here."""
+    prefix = f"{_ROOT_PREFIX}{package_id.namespace}/{package_id.package}/o/sha256/"
+    paths_by_digest = {
+        f"sha256:{path.rsplit('/', 1)[-1].split('.', 1)[0]}": path
+        for path in files.list_files(prefix)
+    }
+    return {
+        digest: cast(bytes, files.read_bytes(path))
+        for digest, path in paths_by_digest.items()
+        if digest in wanted_digests
+    }
 
 
-def _reconcile_one(
-    package_id: PackageId, *, files: FilePort, registry: RegistryPort, clock: ClockPort
-) -> _PackageOutcome | None:
-    """One package's sweep step. `None` if the root vanished between
-    `list_files` and this read — the same race `core/observe.py` tolerates
-    for an individual tag, extended to a whole root (not fatal)."""
+def _verify_one(
+    package_id: PackageId, *, files: FilePort, registry: RegistryPort
+) -> _PackageReport | None:
+    """One package's verify-only sweep step. `None` if the root vanished
+    between `list_files` and this read (the same race the previous
+    regenerate-based design tolerated for an individual root — not fatal)."""
     raw = files.read_bytes(_root_path(package_id))
     if raw is None:
         return None
-    current = parse_package_root(raw)
+    root = parse_package_root(raw)
 
     # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
-    # call below — matches announce.py/validate.py's identical re-check of
-    # this same trust boundary on a `PackageRoot` read back from the repo.
-    check_repository_allowlisted(current.repository)
-    check_repository_shape(current.repository)
+    # call below.
+    check_repository_allowlisted(root.repository)
+    check_repository_shape(root.repository)
 
-    observations = observe(current.repository, registry)
-    findings = check_tag_mutations(package_id, current, observations)
-    if findings:
-        return _PackageOutcome(findings=findings, patch=None, cas_writes={})
+    observations: list[Observation] = []
+    for tag in root.tags:
+        observation = observe_one_tag(root.repository, tag, registry)
+        if observation is not None:
+            observations.append(observation)
+    pinned_mutations = check_tag_mutations(package_id, root, tuple(observations))
 
-    desc_update = check_desc_change(current.repository, current.desc, registry)
-    new_desc = current.desc if desc_update is None else desc_update.desc
-    cas_writes = {} if desc_update is None else _desc_cas_writes(package_id, desc_update)
-
-    target = regenerate(current, observations, new_desc, clock)
-    patch = diff(package_id, current, target, observations)
-    if patch is not None:
-        for digest, obj in patch.new_objects:
-            path = cas_relpath(package_id.namespace, package_id.package, digest, "json")
-            cas_writes[path] = serialize_observation_object(obj)
-    return _PackageOutcome(findings=(), patch=patch, cas_writes=cas_writes)
-
-
-def _open_pr(patches: list[Patch], cas_writes: dict[str, bytes], github: GitHubPort) -> int:
-    """Batch every clean-subset patch into one commit + one PR on the shared,
-    idempotently-reused `_RECONCILE_BRANCH` (CONTRACTS.md §12)."""
-    files: dict[str, bytes | None] = dict(cas_writes)
-    for patch in patches:
-        namespace, package = patch.package_id.namespace, patch.package_id.package
-        files[f"{_ROOT_PREFIX}{namespace}/{package}.json"] = serialize_package_root(patch.root)
-
-    base_sha = github.get_ref_sha(_RECONCILE_BRANCH) or github.get_ref_sha(_BASE_BRANCH)
-    if base_sha is None:
-        raise RuntimeError(f"base branch {_BASE_BRANCH!r} does not exist")
-
-    github.commit_files(
-        branch=_RECONCILE_BRANCH,
-        base_sha=base_sha,
-        message="indexbot reconcile: refresh from registry truth",
-        files=files,
+    desc_digests: frozenset[str] = (
+        frozenset(digest for digest in (root.desc.readme, root.desc.logo) if digest is not None)
+        if root.desc is not None
+        else frozenset()
     )
-    body = "\n".join(f"- {patch.package_id}: {patch.summary}" for patch in patches)
-    return github.open_or_update_pull_request(
-        branch=_RECONCILE_BRANCH,
-        base=_BASE_BRANCH,
-        title="indexbot reconcile: refresh from registry truth",
-        body=body,
+    wanted_digests: frozenset[str] = (
+        frozenset(entry.content for entry in root.tags.values()) | desc_digests
+    )
+    cas_bytes = _cas_bytes_by_digest(files, package_id, wanted_digests)
+    claim_findings = verify_claims(package_id, root, cas_bytes, registry)
+    yanked_tags = frozenset(tag for tag, entry in root.tags.items() if entry.yanked is not None)
+    return _PackageReport(
+        package_id=package_id,
+        pinned_mutations=pinned_mutations,
+        claim_findings=claim_findings,
+        yanked_tags=yanked_tags,
     )
 
 
-def _build_summary(
-    *,
-    patch_count: int,
-    finding_count: int,
-    dry_run: bool,
-    pr_number: int | None,
-) -> str:
-    if patch_count == 0:
-        clean = "no-op: 0 packages changed"
-    elif dry_run:
-        clean = f"dry-run: {patch_count} package(s) would update"
-    else:
-        clean = f"applied: {patch_count} package(s) updated (PR #{pr_number})"
-    noun = "anomaly" if finding_count == 1 else "anomalies"
-    return f"{clean}; {finding_count} {noun}"
+def _escalates(finding: ClaimFinding, *, yanked_tags: frozenset[str]) -> bool:
+    """ADR-6 FP-2/FP-3: `"tag-missing-upstream"` escalates unless the
+    claimed tag is yanked (yank = grace, an explicit exemption from the
+    registry-existence check) — every other escalating kind is
+    unconditional."""
+    if finding.kind == "tag-missing-upstream":
+        return finding.detail not in yanked_tags
+    return finding.kind in _ESCALATING_CLAIM_KINDS
+
+
+def _escalating_findings(report: _PackageReport) -> tuple[str, ...]:
+    lines = [
+        f"{report.package_id} {finding.tag}: pinned-tag-mutation "
+        f"committed={finding.committed_content} fresh={finding.fresh_content}"
+        for finding in report.pinned_mutations
+    ]
+    lines.extend(
+        f"{report.package_id} {finding.kind}: {finding.detail}"
+        for finding in report.claim_findings
+        if _escalates(finding, yanked_tags=report.yanked_tags)
+    )
+    return tuple(lines)
 
 
 def run(
-    args: argparse.Namespace,
-    *,
-    files: FilePort,
-    registry: RegistryPort,
-    github: GitHubPort,
-    clock: ClockPort,
+    args: argparse.Namespace, *, files: FilePort, registry: RegistryPort, github: GitHubPort
 ) -> ExitCode:
-    """Full-index sweep. `args.dry_run` (bool) and `args.package` (optional
-    `<namespace>/<package>` scope string) are read if present; both default
-    to their "do everything, for real" values when absent, so callers that
-    don't set up an `--package`/`--dry-run` argparse option still work.
+    """Full-index verify-only sweep. `args.package` (optional
+    `<namespace>/<package>` scope string) is read if present, defaulting to
+    "verify everything" when absent.
 
     Ports are explicit keyword arguments rather than constructed inside this
-    module (functional core / imperative shell, CONTRACTS.md §0) — WP2-M's
-    `cli/main.py` wiring supplies the real adapters; tests supply
-    `tests/fakes`.
+    module (functional core / imperative shell) — `cli/_wiring.py` supplies
+    the real adapters; tests supply `tests/fakes`.
     """
-    dry_run = bool(getattr(args, "dry_run", False))
     scope = _resolve_scope(args)
     package_ids = _discover_package_ids(files, scope=scope)
 
-    patches: list[Patch] = []
-    cas_writes: dict[str, bytes] = {}
-    findings: list[AnomalyFinding] = []
-
+    findings: list[str] = []
+    checked = 0
     for package_id in package_ids:
-        outcome = _reconcile_one(package_id, files=files, registry=registry, clock=clock)
-        if outcome is None:
+        report = _verify_one(package_id, files=files, registry=registry)
+        if report is None:
             continue
-        if outcome.findings:
-            findings.extend(outcome.findings)
-            continue
-        if outcome.patch is not None:
-            patches.append(outcome.patch)
-            cas_writes.update(outcome.cas_writes)
-
-    pr_number: int | None = None
-    if patches and not dry_run:
-        pr_number = _open_pr(patches, cas_writes, github)
-
-    summary = _build_summary(
-        patch_count=len(patches), finding_count=len(findings), dry_run=dry_run, pr_number=pr_number
-    )
-    # Captured by reconcile.yml's `tee reconcile.log` -> becomes the anomaly issue body.
-    print(summary)
-    write_github_output("result", summary)
+        checked += 1
+        findings.extend(_escalating_findings(report))
 
     if findings:
-        detail = "; ".join(
-            f"{finding.package_id} {finding.tag}: committed={finding.committed_content} "
-            f"fresh={finding.fresh_content}"
-            for finding in findings
-        )
-        raise AnomalyError(f"{summary} -- {detail}")
+        detail = "; ".join(findings)
+        summary = f"verified {checked} package(s); {len(findings)} anomaly(ies): {detail}"
+        github.create_or_update_issue(title=_ISSUE_TITLE, body=summary, labels=["anomaly"])
+        print(summary)
+        raise AnomalyError(summary)
+
+    summary = f"verified {checked} package(s); 0 anomalies"
+    print(summary)
     return ExitCode.OK

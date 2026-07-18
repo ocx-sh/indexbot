@@ -136,9 +136,19 @@ class GitHubPort(Protocol):
         """
         ...
 
-    def open_or_update_pull_request(self, *, branch: str, base: str, title: str, body: str) -> int:
+    def open_or_update_pull_request(
+        self, *, branch: str, base: str, title: str, body: str, head_owner: str | None = None
+    ) -> int:
         """Open a PR for `branch` against `base`, or update the existing one
-        for that branch. Returns the PR number either way (idempotent)."""
+        for that branch. Returns the PR number either way (idempotent).
+
+        `head_owner` (fork-PR announce revamp): when given, the PR's head is
+        the cross-repo/cross-fork form GitHub's own REST API expects,
+        `f"{head_owner}:{branch}"`, rather than the plain same-repo `branch`
+        — `cli/announce.py`'s `--fork` mode opens the PR against the index
+        repo with `head_owner` set to the fork's owner, from a `GitHubPort`
+        instance scoped to the index repo (never the fork).
+        """
         ...
 
     def add_labels(self, pr_number: int, labels: list[str]) -> None:
@@ -150,10 +160,13 @@ class GitHubPort(Protocol):
         ...
 
     def get_pull_request_info(self, pr_number: int) -> PullRequestInfo:
-        """Base/head SHAs and changed file paths for `pr_number`, read via
-        the GitHub API diff only. `cli/classify_pr.py` never checks out the
-        PR head (BD-5's `governance-gate` trust boundary) — this is the one
-        call it needs instead. Raises `KeyError` if `pr_number` does not
+        """Base/head SHAs, changed file paths, and author identity for
+        `pr_number`, read via the GitHub API diff only. `cli/classify_pr.py`
+        never checks out the PR head (BD-5's `governance-gate` trust
+        boundary) — this is the one call it needs instead.
+        `PullRequestInfo.author_login`/`.author_id` (G-19) are
+        `cli/governance_check.py`'s only reason to need this beyond
+        `classify_pr.py`'s own use. Raises `KeyError` if `pr_number` does not
         exist.
         """
         ...
@@ -164,6 +177,36 @@ class GitHubPort(Protocol):
         """Set a Commit Status API entry on `sha` — `cli/governance_check.py`'s
         mechanism for the `governance/review-required` required status check
         (BD-5)."""
+        ...
+
+    def request_reviewers(self, pr_number: int, logins: list[str]) -> None:
+        """Assign `logins` as reviewers on `pr_number` (G-20 — non-owner/
+        human-lane PRs get reviewers from `.github/maintainers.yml`).
+        `cli/governance_check.py` filters the PR author out of `logins`
+        before calling this — assigning a PR's own author as their own
+        reviewer is a GitHub API error, never this port's job to guard
+        against."""
+        ...
+
+    def create_comment(self, pr_number: int, body: str, *, marker: str) -> None:
+        """Post `body` as an issue/PR comment on `pr_number`, idempotently:
+        update the existing comment in place if one already contains the
+        hidden HTML `marker` (e.g. `<!-- indexbot:governance -->`), skip
+        entirely if that comment's body is already exactly `body`, else
+        create a new one. `cli/governance_check.py`'s G-20 mechanism for a
+        single, non-spamming review-required comment across repeated runs."""
+        ...
+
+    def create_or_update_issue(
+        self, *, title: str, body: str, labels: list[str] | None = None
+    ) -> int:
+        """Idempotent per exact `title` match among open, non-PR issues:
+        create one if none exists, else update its body (only if it
+        actually differs) and return the existing number unchanged.
+        `cli/reconcile.py`'s anomaly-report mechanism — promoted onto this
+        Protocol (fork-PR announce revamp; previously an
+        `adapters/github_api.py`-only capability, flagged as a
+        `ports.GitHubPort` gap in CONTRACTS.md §13 item 4)."""
         ...
 
 

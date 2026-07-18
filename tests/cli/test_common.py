@@ -1,56 +1,10 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
 
 from indexbot.cli import _common
-from indexbot.errors import ValidationError
-
-_LOWER_ALPHA = re.compile(r"[a-z]+")
-
-
-def test_read_validated_env_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PACKAGE_ID", "cmake")
-    value = _common.read_validated_env("PACKAGE_ID", pattern=_LOWER_ALPHA, max_length=10)
-    assert value == "cmake"
-
-
-def test_read_validated_env_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PACKAGE_ID", raising=False)
-    with pytest.raises(ValidationError, match="is not set"):
-        _common.read_validated_env("PACKAGE_ID", pattern=_LOWER_ALPHA, max_length=10)
-
-
-def test_read_validated_env_empty_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PACKAGE_ID", "")
-    with pytest.raises(ValidationError, match="is not set"):
-        _common.read_validated_env("PACKAGE_ID", pattern=_LOWER_ALPHA, max_length=10)
-
-
-def test_read_validated_env_over_length_raises_before_regex(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # "abcdef" fullmatches _LOWER_ALPHA but exceeds max_length=3 — length is
-    # checked first (ADR-4 BD-4), so this must fail on length, not pattern.
-    monkeypatch.setenv("PACKAGE_ID", "abcdef")
-    with pytest.raises(ValidationError, match="exceeds max length"):
-        _common.read_validated_env("PACKAGE_ID", pattern=_LOWER_ALPHA, max_length=3)
-
-
-def test_read_validated_env_pattern_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PACKAGE_ID", "CMake")
-    with pytest.raises(ValidationError, match="does not match"):
-        _common.read_validated_env("PACKAGE_ID", pattern=_LOWER_ALPHA, max_length=10)
-
-
-def test_read_validated_env_uses_fullmatch_not_search(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A valid prefix followed by injected garbage must be rejected — proves
-    # fullmatch (not match/search) is used.
-    monkeypatch.setenv("PACKAGE_ID", "cmake; rm -rf /")
-    with pytest.raises(ValidationError, match="does not match"):
-        _common.read_validated_env("PACKAGE_ID", pattern=_LOWER_ALPHA, max_length=64)
 
 
 def test_write_github_output_single_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

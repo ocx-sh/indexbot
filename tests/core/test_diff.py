@@ -11,6 +11,7 @@ from indexbot.model import (
     PlatformEntry,
     Status,
     TagEntry,
+    Upstream,
     Yank,
 )
 
@@ -26,6 +27,8 @@ def _root(
     status: Status = "active",
     repository: str = "oci://ghcr.io/ocx-contrib/cmake",
     superseded_by: str | None = None,
+    created: str = "2026-07-17",
+    upstream: Upstream | None = None,
 ) -> PackageRoot:
     return PackageRoot(
         name="ocx.sh/kitware/cmake",
@@ -33,8 +36,9 @@ def _root(
         owners=(_OWNER,),
         status=status,
         deprecated_message=None,
-        created="2026-07-17",
+        created=created,
         desc=None,
+        upstream=upstream,
         superseded_by=superseded_by,
         tags=dict(tags),
     )
@@ -132,6 +136,32 @@ def test_classify_change_repository_diff_is_human_review() -> None:
 def test_classify_change_superseded_by_diff_is_human_review() -> None:
     before = _root({}, superseded_by=None)
     after = _root({}, superseded_by="kitware/cmake-ng")
+    assert classify_change(before, after) == "human-review-required"
+
+
+def test_classify_change_created_diff_is_human_review() -> None:
+    before = _root({}, created="2026-07-17")
+    after = _root({}, created="2026-07-18")
+    assert classify_change(before, after) == "human-review-required"
+
+
+def test_classify_change_upstream_diff_is_human_review() -> None:
+    before = _root({}, upstream=None)
+    after = _root({}, upstream=Upstream(org="Kitware"))
+    assert classify_change(before, after) == "human-review-required"
+
+
+def test_classify_change_refresh_plus_upstream_edit_is_human_review() -> None:
+    # A tag-content change alone would be "refresh" — an upstream edit
+    # riding along in the same PR must still force human-review-required,
+    # never silently auto-merge through the machine lane.
+    before = _root(
+        {"3.28.1": TagEntry(content=_DIGEST_A, observed="T0")}, upstream=Upstream(org="Kitware")
+    )
+    after = _root(
+        {"3.28.1": TagEntry(content=_DIGEST_B, observed="T1")},
+        upstream=Upstream(org="Kitware", repository_url="https://github.com/Kitware/CMake"),
+    )
     assert classify_change(before, after) == "human-review-required"
 
 

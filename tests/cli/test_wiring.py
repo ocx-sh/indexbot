@@ -158,74 +158,76 @@ def _patch_adapters(
     """Swap real `adapters/*` constructors for `tests/fakes/` doubles at the
     wiring seam — `cli/_wiring.py`'s module-global names, the exact objects
     every `_run_*` function calls at dispatch time (CONTRACTS.md §0's "the
-    ONLY module that constructs adapters" boundary)."""
+    ONLY module that constructs adapters" boundary). Both `_github_api`
+    (`reconcile`/`classify-pr`/`governance-check`, which also require
+    `GITHUB_REPOSITORY`/`GITHUB_TOKEN` env presence via `_require_env`) and
+    the bare `GitHubApi` class (`_run_announce`'s `_index_github`/fork-mode
+    construction, which never goes through `_github_api` at all — fork-PR
+    announce revamp) are patched, so no test here needs a real env var."""
     files_double = files if files is not None else InMemoryFiles()
+    github_double = github or FakeGitHub()
 
     def _local_files(**_: object) -> InMemoryFiles:
         return files_double
 
+    def _github_api_double(**_: object) -> FakeGitHub:
+        return github_double
+
     monkeypatch.setattr(_wiring, "GhcrRegistry", lambda: registry or FakeRegistry())
-    monkeypatch.setattr(_wiring, "_github_api", lambda: github or FakeGitHub())
+    monkeypatch.setattr(_wiring, "_github_api", lambda: github_double)
+    monkeypatch.setattr(_wiring, "GitHubApi", _github_api_double)
     monkeypatch.setattr(_wiring, "LocalFiles", _local_files)
     monkeypatch.setattr(_wiring, "SystemClock", lambda: clock or FixedClock())
-
-
-def _read_outputs(path: Path) -> dict[str, str]:
-    """Parse `$GITHUB_OUTPUT`'s multiline delimiter form back into a dict —
-    matches `tests/cli/test_announce.py`'s helper of the same name."""
-    outputs: dict[str, str] = {}
-    lines = path.read_text(encoding="utf-8").splitlines()
-    index = 0
-    while index < len(lines):
-        name, delimiter = lines[index].split("<<", 1)
-        index += 1
-        value_lines: list[str] = []
-        while lines[index] != delimiter:
-            value_lines.append(lines[index])
-            index += 1
-        outputs[name] = "\n".join(value_lines)
-        index += 1
-    return outputs
 
 
 # --- end-to-end happy paths, one per subcommand (exit 0) -----------------------
 
 
-def test_announce_no_op_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    output_file = tmp_path / "out"
-    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
-
+def test_announce_out_mode_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     tag = "1.0.0"
-    tag_content = _observed_content_digest(tag)
-    committed = _root({tag: TagEntry(content=tag_content, observed="2026-07-17T00:00:00Z")})
+    committed = _root({})
     registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _manifest()})
     github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(committed)})
-    _patch_adapters(monkeypatch, registry=registry, github=github)
+    files = InMemoryFiles()
+    _patch_adapters(monkeypatch, registry=registry, github=github, files=files)
 
-    assert main_module.main(["announce", "--package", f"{_NS}/{_PKG}"]) == ExitCode.OK
-    assert _read_outputs(output_file)["result"] == "no-op"
-
-
-def test_announce_validate_only_never_touches_github(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    output_file = tmp_path / "out"
-    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
-    _patch_adapters(monkeypatch)
-
-    result = main_module.main(["announce", "--package", f"{_NS}/{_PKG}", "--validate-only"])
+    result = main_module.main(
+        ["announce", "--package", f"{_NS}/{_PKG}", "--tags", tag, "--out", "dist"]
+    )
 
     assert result == ExitCode.OK
-    assert _read_outputs(output_file)["result"] == "validated"
+    assert files.exists(f"dist/{_ROOT_PATH}")
 
 
-def test_reconcile_empty_index_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    output_file = tmp_path / "out"
-    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+def test_announce_fork_mode_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "publisher-token")
+    tag = "1.0.0"
+    committed = _root({})
+    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _manifest()})
+    github = FakeGitHub(
+        files={(_ROOT_PATH, "main"): serialize_package_root(committed)}, refs={"main": "sha"}
+    )
+    _patch_adapters(monkeypatch, registry=registry, github=github)
+
+    result = main_module.main(
+        [
+            "announce",
+            "--package",
+            f"{_NS}/{_PKG}",
+            "--tags",
+            tag,
+            "--fork",
+            "alice/index",
+        ]
+    )
+
+    assert result == ExitCode.OK
+
+
+def test_reconcile_empty_index_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_adapters(monkeypatch, files=InMemoryFiles())
 
     assert main_module.main(["reconcile"]) == ExitCode.OK
-    assert "no-op" in _read_outputs(output_file)["result"]
 
 
 def test_validate_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -324,7 +326,12 @@ def test_governance_check_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     committed = _root({"1.0.0": TagEntry(content=tag_content, observed="T0")})
     refreshed = _root({"1.0.0": TagEntry(content=tag_content, observed="T1")})
     info = PullRequestInfo(
-        number=1, base_sha="base-sha", head_sha="head-sha", changed_paths=(_ROOT_PATH,)
+        number=1,
+        base_sha="base-sha",
+        head_sha="head-sha",
+        changed_paths=(_ROOT_PATH,),
+        author_login=_OWNER.github,
+        author_id=_OWNER.github_id,
     )
     github = FakeGitHub(
         files={
@@ -339,7 +346,11 @@ def test_governance_check_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result == ExitCode.OK
     assert github.statuses["head-sha"] == [
-        ("governance/review-required", "success", "refresh: no governance review required")
+        (
+            "governance/review-required",
+            "success",
+            "refresh: PR author owns every touched package, no review required",
+        )
     ]
 
 
@@ -354,19 +365,17 @@ def test_validate_missing_path_exits_validation_failure(monkeypatch: pytest.Monk
     assert result == ExitCode.VALIDATION_FAILURE
 
 
-def test_announce_anomaly_exits_65(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
-
-    tag = "1.2.3"
-    stale_digest = "sha256:" + "b" * 64
-    committed = _root({tag: TagEntry(content=stale_digest, observed="2026-07-17T00:00:00Z")})
-    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _manifest()})
+def test_announce_typo_tag_exits_validation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    committed = _root({})
     github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(committed)})
+    registry = FakeRegistry()  # no tags/manifests registered at all
     _patch_adapters(monkeypatch, registry=registry, github=github)
 
-    result = main_module.main(["announce", "--package", f"{_NS}/{_PKG}"])
+    result = main_module.main(
+        ["announce", "--package", f"{_NS}/{_PKG}", "--tags", "9.9.9-typo", "--out", "dist"]
+    )
 
-    assert result == ExitCode.ANOMALY
+    assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_reconcile_transient_backoff_exhaustion_exits_75(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -374,12 +383,12 @@ def test_reconcile_transient_backoff_exhaustion_exits_75(monkeypatch: pytest.Mon
     committed = _root({"1.0.0": TagEntry(content=tag_content, observed="2026-07-17T00:00:00Z")})
     files = InMemoryFiles(files={_ROOT_PATH: serialize_package_root(committed)})
 
-    def _raise_transient(repository: str) -> list[str]:
+    def _raise_transient(repository: str, reference: str) -> object:
         raise TransientError("registry backoff exhausted (test double)")
 
-    registry = FakeRegistry()
-    monkeypatch.setattr(registry, "list_tags", _raise_transient)
-    _patch_adapters(monkeypatch, files=files, registry=registry)
+    registry = FakeRegistry(tags={_REPO: ["1.0.0"]})
+    monkeypatch.setattr(registry, "get_manifest", _raise_transient)
+    _patch_adapters(monkeypatch, files=files, registry=registry, github=FakeGitHub())
 
     result = main_module.main(["reconcile"])
 

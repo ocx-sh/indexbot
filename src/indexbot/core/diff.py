@@ -85,11 +85,22 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
     """`cli/classify_pr.py`'s core. `before` is the base-ref root, `None` if
     the PR added a brand-new `p/<ns>/<pkg>.json` (the path did not exist at
     the base ref — G-04). `before is None` -> always `"new-package"`.
-    Otherwise `"human-review-required"` if `repository`, `owners`,
-    `status`, `deprecated_message`, or `superseded_by` differ, OR any tag
-    present in both `before.tags` and `after.tags` has a different `yanked`
-    value (G-05's expanded key set, ADR-4 disposition table) — else
-    `"refresh"`.
+
+    Otherwise the machine lane is narrow by design: `"refresh"` only when
+    the sole change is to `tags` (membership or content) plus the yanked-marker
+    rule below. **Any other field changing is `"human-review-required"`** —
+    every governance field `product-context.md` lists is human-authored, so
+    an owner-authored refresh PR must never silently carry a governance edit
+    through auto-merge. Concretely: `repository`, `owners`, `status`,
+    `deprecated_message`, `created`, `upstream`, or `superseded_by` differing
+    -> `"human-review-required"`, OR any tag present in both `before.tags`
+    and `after.tags` has a different `yanked` value (G-05's expanded key set,
+    ADR-4 disposition table) — else `"refresh"`. `name` is deliberately not
+    checked here — it's pinned by `check_name_matches_path` instead, a
+    structural invariant, not a governance-vs-machine distinction. `desc` is
+    deliberately not checked here either — it's bot-derived from the
+    registry's `__ocx.desc` tag (`core/desc.py`), not human-authored, so it
+    stays in the machine lane alongside `tags`.
     """
     if before is None:
         return "new-package"
@@ -98,6 +109,8 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
         or before.owners != after.owners
         or before.status != after.status
         or before.deprecated_message != after.deprecated_message
+        or before.created != after.created
+        or before.upstream != after.upstream
         or before.superseded_by != after.superseded_by
     )
     if governance_changed:

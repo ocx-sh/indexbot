@@ -59,10 +59,10 @@ from indexbot.core.validate_entry import (
     check_repository_shape,
     check_upstream_repository_url_scheme,
     parse_digest,
+    parse_package_id,
     serialize_observation_object,
     serialize_package_root,
 )
-from indexbot.core.validate_payload import parse_package_id
 from indexbot.errors import ValidationError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import Desc, Owner, PackageRoot, TagEntry, Upstream
