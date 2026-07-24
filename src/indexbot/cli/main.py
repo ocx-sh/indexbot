@@ -35,6 +35,7 @@ from indexbot.cli import classify_pr as _classify_pr_cli
 from indexbot.cli import governance_check as _governance_check_cli
 from indexbot.cli import reconcile as _reconcile_cli
 from indexbot.cli import validate as _validate_cli
+from indexbot.cli._common import write_github_step_summary
 from indexbot.cli._wiring import DISPATCH as _PRODUCTION_DISPATCH
 from indexbot.errors import IndexBotError
 from indexbot.exit_codes import ExitCode
@@ -137,7 +138,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return int(handler(args))
     except IndexBotError as exc:
+        # Observability floor (register §5, BCR #176): every publisher-visible
+        # failure surfaces a structured reason on the workflow run's job
+        # summary in addition to its stderr line — the single chokepoint, so
+        # no subcommand can regress to a bare error exit. The BD-2 exit-code
+        # mapping (`exc.exit_code`) is unchanged — this only ADDS the emit.
         print(str(exc), file=sys.stderr)
+        write_github_step_summary(f"indexbot {command} failed", str(exc))
         return int(exc.exit_code)
 
 

@@ -80,7 +80,14 @@ def _is_package_root_path(path: str) -> bool:
 def _author_owns_every_touched_package(info: PullRequestInfo, github: GitHubPort) -> bool:
     """G-19: the PR author's `github_id` must appear in `owners[]` of every
     touched `p/<namespace>/<package>.json` root, read from the base ref
-    (never the PR head)."""
+    (never the PR head).
+
+    Filtering `changed_paths` down to roots is safe *here* only because this
+    runs behind `classify_pull_request`, which already returned `"refresh"` —
+    and that classification fails closed on any changed path outside those
+    roots' refresh scope (ADR-6 FP-5). Do not reuse this filter anywhere that
+    is not downstream of that gate.
+    """
     root_paths = [path for path in info.changed_paths if _is_package_root_path(path)]
     for path in root_paths:
         base_raw = github.get_file_contents(path, info.base_sha)

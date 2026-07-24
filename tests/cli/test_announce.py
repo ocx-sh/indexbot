@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import pytest
@@ -40,6 +41,30 @@ class _RaisingRegistry:
 
     def probe_ownership(self, repository: str, expected_name: str) -> OwnershipProbeResult:
         raise AssertionError("should not be called")
+
+
+class _NoWriteGitHub(FakeGitHub):
+    """`FakeGitHub` whose write methods fail — proves the unchanged
+    short-circuit reaches neither commit nor PR open, while reads
+    (`get_file_contents`, `get_ref_sha`) still work via the parent."""
+
+    def commit_files(
+        self, *, branch: str, base_sha: str, message: str, files: Mapping[str, bytes | None]
+    ) -> str:
+        raise AssertionError("short-circuit must skip commit_files")
+
+    def open_or_update_pull_request(
+        self, *, branch: str, base: str, title: str, body: str, head_owner: str | None = None
+    ) -> int:
+        raise AssertionError("short-circuit must skip PR open")
+
+
+class _NoWriteFiles(InMemoryFiles):
+    """`InMemoryFiles` whose `write_bytes` fails — proves the unchanged
+    short-circuit writes nothing under `--out` (reads inherited)."""
+
+    def write_bytes(self, path: str, content: bytes) -> None:
+        raise AssertionError("short-circuit must skip write_bytes")
 
 
 def _args(
@@ -680,3 +705,135 @@ def test_fork_mode_never_writes_to_index_repo_files() -> None:
     )
 
     assert set(index_github.files) == {(_ROOT_PATH, "main")}
+
+
+# --- unchanged ⇒ no-op short-circuit (register C6, spec §5) ----------------
+
+
+def test_unchanged_out_mode_short_circuits_without_writing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Committed root already reflects the curated tag set at the same
+    # observed content, and no desc change -> the serialized target root is
+    # byte-identical to `current_raw`, so `--out` must write nothing.
+    manifest_digest = "sha256:" + "1" * 64
+    content_digest = _observed_content_digest("3.28.1", manifest_digest)
+    current = _root({"3.28.1": TagEntry(content=content_digest, observed="T0")})
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+    )
+    files = _NoWriteFiles()  # write_bytes raises if the short-circuit fails to fire
+
+    # A fresh clock instant that must NOT churn the carried-over observed ts.
+    result = announce.run(
+        _args(tags="3.28.1", out="dist"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=None,
+        files=files,
+        clock=FixedClock(fixed="T1"),
+    )
+
+    assert result == ExitCode.OK
+    assert "unchanged, nothing to announce" in capsys.readouterr().out
+    assert files.files == {}  # nothing written locally
+
+
+def test_unchanged_fork_mode_short_circuits_without_pr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest_digest = "sha256:" + "1" * 64
+    content_digest = _observed_content_digest("3.28.1", manifest_digest)
+    current = _root({"3.28.1": TagEntry(content=content_digest, observed="T0")})
+    index_github = _NoWriteGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    fork_github = _NoWriteGitHub(refs={"main": "fork-main-sha"})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+    )
+
+    result = announce.run(
+        _args(tags="3.28.1", out=None, fork="alice/index"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=fork_github,
+        files=InMemoryFiles(),
+        clock=FixedClock(fixed="T1"),
+    )
+
+    assert result == ExitCode.OK
+    assert "unchanged, nothing to announce" in capsys.readouterr().out
+    assert index_github.pull_requests == {}  # no PR opened
+
+
+def test_changed_tag_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None:
+    # A genuinely changed tag (same name, new manifest -> new content digest)
+    # -> `target_raw != current_raw`, so the short-circuit is skipped and the
+    # commit + PR happen as before.
+    old_content = _observed_content_digest("3.28.1", "sha256:" + "1" * 64)
+    current = _root({"3.28.1": TagEntry(content=old_content, observed="T0")})
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
+    new_manifest = "sha256:" + "2" * 64
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(new_manifest)}
+    )
+
+    result = announce.run(
+        _args(tags="3.28.1", out=None, fork="alice/index"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=fork_github,
+        files=InMemoryFiles(),
+        clock=FixedClock(fixed="T1"),
+    )
+
+    assert result == ExitCode.OK
+    assert "unchanged, nothing to announce" not in capsys.readouterr().out
+    assert index_github.pull_requests == {f"alice:{_BRANCH}": 1}
+    committed_root = parse_package_root(fork_github.files[(_ROOT_PATH, _BRANCH)])
+    assert committed_root.tags["3.28.1"].content == _observed_content_digest("3.28.1", new_manifest)
+    assert committed_root.tags["3.28.1"].observed == "T1"  # content churn re-stamped observed
+
+
+def test_changed_desc_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None:
+    # Tag set is byte-unchanged, but a desc change flips `target_raw !=
+    # current_raw` (desc is embedded in the root) — so the short-circuit must
+    # NOT fire: the readme CAS + updated root are written and a PR opens
+    # (covers the `desc_update is None` == False guard).
+    readme_bytes = b"# CMake\n"
+    manifest_digest = "sha256:" + "1" * 64
+    content_digest = _observed_content_digest("3.28.1", manifest_digest)
+    current = _root({"3.28.1": TagEntry(content=content_digest, observed="T0")})  # desc None
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]},
+        manifests={
+            (_REPO, "3.28.1"): _manifest(manifest_digest),
+            (_REPO, "__ocx.desc"): {
+                "annotations": {
+                    "org.opencontainers.image.title": "CMake",
+                    "org.opencontainers.image.description": "Build tool",
+                },
+                "layers": [{"mediaType": "application/markdown", "digest": "sha256:" + "e" * 64}],
+            },
+        },
+        desc_digests={_REPO: "sha256:" + "d" * 64},
+        blobs={(_REPO, "sha256:" + "e" * 64): readme_bytes},
+    )
+
+    result = announce.run(
+        _args(tags="3.28.1", out=None, fork="alice/index"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=fork_github,
+        files=InMemoryFiles(),
+        clock=FixedClock(fixed="T1"),
+    )
+
+    assert result == ExitCode.OK
+    assert "unchanged, nothing to announce" not in capsys.readouterr().out
+    assert index_github.pull_requests == {f"alice:{_BRANCH}": 1}
+    committed_root = parse_package_root(fork_github.files[(_ROOT_PATH, _BRANCH)])
+    assert committed_root.desc is not None  # desc change wrote through despite unchanged tag set

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -74,4 +75,27 @@ def test_dispatch_translates_index_bot_error_to_its_exit_code(
     _register(monkeypatch, "noop", handler)
 
     assert main_module.main(["noop"]) == ExitCode.VALIDATION_FAILURE
+    assert "bad package id" in capsys.readouterr().err
+
+
+def test_dispatch_error_surfaces_structured_reason_to_step_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Observability floor (register §5, BCR #176): a dispatched
+    `IndexBotError` writes a structured reason to `$GITHUB_STEP_SUMMARY`,
+    keeps its stderr line, and still returns the BD-2 mapped exit code — all
+    at the single `main()` chokepoint, not per-subcommand.
+    """
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+    def handler(_args: argparse.Namespace) -> ExitCode:
+        raise ValidationError("bad package id")
+
+    _register(monkeypatch, "noop", handler)
+
+    assert main_module.main(["noop"]) == ExitCode.VALIDATION_FAILURE
+
+    summary = summary_file.read_text(encoding="utf-8")
+    assert summary == "## indexbot noop failed\n\nbad package id\n"
     assert "bad package id" in capsys.readouterr().err

@@ -233,6 +233,22 @@ def run(
                 _cas_path(package_id, logo_digest, _logo_extension(desc_update.logo_bytes))
             ] = desc_update.logo_bytes
 
+    # Unchanged => no-op: a byte-identical root already implies no new
+    # observation CAS (any tag-map/digest change would change the root
+    # bytes), and `desc_update is None` rules out any new desc/readme/logo
+    # CAS — so byte-equality plus no desc change means there is nothing to
+    # write. Skip before either the `--out` or `--fork` write branch. Reuse
+    # the already-serialized root bytes; do not serialize twice.
+    # ponytail: compares against the index-repo `main` root only. This
+    # reference tool deliberately does NOT implement the Rust client's C6
+    # amendment F1 (fork-mode ensure-open-PR when the fork branch is ahead of
+    # base) — a bounded, documented divergence (register FP-9 pattern); Track A
+    # stays the reference for F1.
+    target_raw = files_by_path[root_path]
+    if target_raw == current_raw and desc_update is None:
+        print("unchanged, nothing to announce")
+        return ExitCode.OK
+
     out_dir = cast("str | None", args.out)
     if out_dir is not None:
         for path, content in files_by_path.items():

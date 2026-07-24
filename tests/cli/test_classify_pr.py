@@ -150,6 +150,58 @@ def test_cas_object_path_is_excluded_from_root_shape() -> None:
     assert classify_pr.classify_pull_request(info, github) == "human-review-required"
 
 
+# --- refresh-scope path allowlist (ADR-6 FP-5) ------------------------------
+
+
+def _refresh_pr(changed_paths: tuple[str, ...]) -> FakeGitHub:
+    """A PR whose only root change is refresh-shaped (one tag's content), with
+    `changed_paths` under test — everything hinges on which *other* paths ride
+    along."""
+    before = _root(tags={"1.0.0": TagEntry(content="sha256:" + "a" * 64, observed="T0")})
+    after = _root(tags={"1.0.0": TagEntry(content="sha256:" + "b" * 64, observed="T1")})
+    return _github(
+        changed_paths=changed_paths,
+        base_files={_ROOT_PATH: before},
+        head_files={_ROOT_PATH: after},
+    )
+
+
+_OWN_CAS_PATHS = (
+    f"p/kitware/cmake/o/sha256/{'b' * 64}.json",
+    f"p/kitware/cmake/o/sha256/{'c' * 64}.md",
+    f"p/kitware/cmake/o/sha256/{'d' * 64}.svg",
+    f"p/kitware/cmake/o/sha256/{'e' * 64}.png",
+)
+
+
+def test_refresh_survives_its_own_packages_cas_objects() -> None:
+    github = _refresh_pr((_ROOT_PATH, *_OWN_CAS_PATHS))
+    info = github.get_pull_request_info(1)
+    assert classify_pr.classify_pull_request(info, github) == "refresh"
+
+
+_OUT_OF_SCOPE_EXTRAS = [
+    ".github/workflows/validate.yml",
+    "bot/src/indexbot/cli/classify_pr.py",
+    "README.md",
+    # A CAS object under a package whose root is NOT in this diff.
+    f"p/acme/widget/o/sha256/{'a' * 64}.json",
+    # CAS-shaped but not a CAS object: unknown extension, non-hex digest,
+    # traversal in the digest position, and a path past the length cap.
+    "p/kitware/cmake/o/sha256/notes.txt",
+    f"p/kitware/cmake/o/sha256/{'z' * 64}.json",
+    "p/kitware/cmake/o/sha256/../../../../etc/passwd.json",
+    f"p/kitware/cmake/o/sha256/{'a' * 300}.json",
+]
+
+
+@pytest.mark.parametrize("extra_path", _OUT_OF_SCOPE_EXTRAS)
+def test_out_of_scope_path_forces_human_review(extra_path: str) -> None:
+    github = _refresh_pr((_ROOT_PATH, extra_path))
+    info = github.get_pull_request_info(1)
+    assert classify_pr.classify_pull_request(info, github) == "human-review-required"
+
+
 # --- worst-classification-wins aggregation ----------------------------------
 
 

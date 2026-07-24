@@ -79,3 +79,57 @@ def test_write_github_output_raises_when_delimiters_exhausted(
 
     with pytest.raises(RuntimeError, match="could not find a collision-free delimiter"):
         _common.write_github_output("body", "contains ALWAYS_COLLIDES always")
+
+
+def test_write_github_step_summary_appends_markdown_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+    _common.write_github_step_summary("indexbot validate failed", "bad package id")
+
+    assert summary_file.read_text(encoding="utf-8") == (
+        "## indexbot validate failed\n\nbad package id\n"
+    )
+
+
+def test_write_github_step_summary_appends_across_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+    _common.write_github_step_summary("first heading", "one")
+    _common.write_github_step_summary("second heading", "two")
+
+    assert summary_file.read_text(encoding="utf-8") == (
+        "## first heading\n\none\n## second heading\n\ntwo\n"
+    )
+
+
+def test_write_github_step_summary_unset_env_writes_one_stderr_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    _common.write_github_step_summary("indexbot reconcile failed", "anomaly detected")
+
+    captured = capsys.readouterr()
+    assert "indexbot reconcile failed" in captured.err
+    assert "anomaly detected" in captured.err
+    assert captured.err.count("\n") == 1  # exactly one line, nothing on stdout
+    assert captured.out == ""
+
+
+def test_write_github_step_summary_empty_env_writes_stderr_not_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An empty (set-but-blank) value is treated identically to unset — the
+    # `if not summary_path` guard covers both, so a blank path never becomes a
+    # spurious file write at the filesystem root.
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", "")
+
+    _common.write_github_step_summary("indexbot render failed", "drift detected")
+
+    assert "indexbot render failed" in capsys.readouterr().err

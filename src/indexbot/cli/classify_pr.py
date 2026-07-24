@@ -19,6 +19,7 @@ function is the boring, single-source-of-truth option (CONTRACTS.md §13 item
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Final, cast
 
 from indexbot.core.diff import ChangeClass, classify_change
@@ -41,6 +42,20 @@ _SEVERITY: Final[dict[ChangeClass, int]] = {
 """Worst-wins ordering (CONTRACTS.md §12): a PR touching two package roots,
 one refresh-class and one new-package-class, classifies as `new-package`
 overall — the most conservative disposition among every changed root wins."""
+
+_CAS_PATH_MAX_LENGTH: Final[int] = 256
+"""Length cap applied before the hex `fullmatch` below (BD-4's untrusted-input
+order: cap first, then regex). The longest legitimate CAS path is 221 chars —
+`p/` + a 39-char namespace + `/` + a 100-char package + `/o/sha256/` + 64 hex
++ `.` + a 4-char extension (ADR-2 ND-3's segment caps)."""
+
+_CAS_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[a-f0-9]{64}")
+
+_CAS_EXTENSIONS: Final[frozenset[str]] = frozenset({"json", "md", "svg", "png"})
+"""Every extension `cli/announce.py` writes under a package's `o/sha256/`
+tree: `.json` observation objects plus the `.md` readme and `.svg`/`.png`
+logo desc blobs (`announce._cas_path`/`_logo_extension`; CONTRACTS.md §7
+`core/desc.py`, ADR-6 FP-4)."""
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -67,6 +82,45 @@ def _is_package_root_path(path: str) -> bool:
     return len(parts) == 3 and parts[0] == "p" and parts[2].endswith(".json")
 
 
+def _cas_owner_root_path(path: str) -> str | None:
+    """The `p/<ns>/<pkg>.json` root that owns `path`, if `path` is a
+    `p/<ns>/<pkg>/o/sha256/<64-hex>.<ext>` package-local CAS object — else
+    `None`.
+
+    Hand-rolled shape check, same per-module convention as
+    `_is_package_root_path` above. Total by construction: a malformed
+    CAS-shaped path returns `None` rather than raising, so an unparseable
+    diff entry lands on the caller's conservative branch instead of crashing
+    the classifier.
+    """
+    if len(path) > _CAS_PATH_MAX_LENGTH:
+        return None
+    parts = path.split("/")
+    if len(parts) != 6 or parts[0] != "p" or parts[3] != "o" or parts[4] != "sha256":
+        return None
+    hex_digest, _, extension = parts[5].partition(".")
+    if extension not in _CAS_EXTENSIONS or _CAS_HEX_RE.fullmatch(hex_digest) is None:
+        return None
+    return f"p/{parts[1]}/{parts[2]}.json"
+
+
+def _every_path_in_refresh_scope(
+    changed_paths: tuple[str, ...], root_paths: frozenset[str]
+) -> bool:
+    """True iff every changed path is one of `root_paths` itself or a CAS
+    object belonging to one of those exact packages — i.e. the diff contains
+    nothing beyond what `cli/announce.py` writes for those roots (its
+    `files_by_path`: the root, the tags' observation objects, the readme/logo
+    desc blobs).
+
+    A CAS path under a package whose root is *not* in `root_paths` is out of
+    scope — package-local CAS is only in scope alongside its own root.
+    """
+    return all(
+        path in root_paths or _cas_owner_root_path(path) in root_paths for path in changed_paths
+    )
+
+
 def _classify_one_root(github: GitHubPort, path: str, info: PullRequestInfo) -> ChangeClass:
     base_raw = github.get_file_contents(path, info.base_sha)
     head_raw = github.get_file_contents(path, info.head_sha)
@@ -90,9 +144,20 @@ def classify_pull_request(info: PullRequestInfo, github: GitHubPort) -> ChangeCl
     is conservatively `"human-review-required"` — the indexbot automation
     lane exists for registry-truth refreshes, never for auto-merging a PR
     that happens not to touch any `p/**` root.
+
+    The root filter selects which files get *classified*; it does not decide
+    which files are *allowed*. Any changed path outside the refresh scope of
+    the roots it selected (a workflow edit, `bot/**` source, another
+    package's files, an unrelated deletion) is `"human-review-required"` on
+    its own — ADR-6 FP-5: machine-lane content consists only of authorized
+    package refreshes. Ignoring the rest of the diff instead would let an
+    owner of one package attach arbitrary repository content to a
+    refresh-classified PR and ride `validate.yml`'s `gh pr merge --auto`.
     """
     root_paths = [path for path in info.changed_paths if _is_package_root_path(path)]
     if not root_paths:
+        return "human-review-required"
+    if not _every_path_in_refresh_scope(info.changed_paths, frozenset(root_paths)):
         return "human-review-required"
     worst: ChangeClass = "refresh"
     for path in root_paths:
