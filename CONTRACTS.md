@@ -984,3 +984,9 @@ digested):**
   bytes. This spec's byte-exact rules above apply only to the two JSON forms
   (root, observation object); a desc blob's "canonical form" is simply
   whatever bytes the registry served.
+
+`tests/golden/serializer/` (WP-P0-P1, 2026-07-24) holds this section's
+committed byte vectors — real `serialize_package_root`/
+`serialize_observation_object` output, never hand-typed — and
+`tests/core/test_serializer_golden.py` is the round-trip gate that rides
+`task bot:test`.
