@@ -31,6 +31,14 @@ assigning a PR's own author as one of their own reviewers). The comment uses
 a hidden HTML marker (`<!-- indexbot:governance -->`) so a later
 `governance-check` run on the same PR updates the existing comment in place
 rather than reposting on every re-run.
+
+Writes the resulting commit-status state (`"success"` or `"pending"`) to
+`$GITHUB_OUTPUT` as `disposition` — `.github/workflows/validate.yml`'s
+`governance-gate` job reads this back (`steps.governance_check.outputs.
+disposition`) to decide whether to arm auto-merge, rather than re-reading the
+label `indexbot classify-pr` applied (G-19 requires the *ownership-checked*
+disposition, not just the raw `refresh`/`new-package`/`human-review-required`
+classification).
 """
 
 from __future__ import annotations
@@ -43,6 +51,8 @@ from indexbot.core.maintainers import parse_maintainers
 from indexbot.core.validate_entry import parse_package_root
 from indexbot.errors import ValidationError
 from indexbot.exit_codes import ExitCode
+
+from ._common import write_github_output
 
 if TYPE_CHECKING:
     import argparse
@@ -144,4 +154,5 @@ def run(args: argparse.Namespace, *, github: GitHubPort) -> ExitCode:
     )
     if state != "success":
         _assign_reviewers_and_comment(github, info, reason=description)
+    write_github_output("disposition", state)
     return ExitCode.OK

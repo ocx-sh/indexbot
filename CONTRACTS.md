@@ -866,7 +866,12 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   reposted). Never `failure` — nothing has actually gone wrong, the PR just
   needs a human. (ADR-4 BD-5's fuller "green for refresh PRs once
   `schema-validate` is also green" cross-job condition remains deferred, per
-  the original entry this replaces — unaffected by G-19/G-20.)
+  the original entry this replaces — unaffected by G-19/G-20.) Writes the
+  resulting commit-status state (`"success"`/`"pending"`) to `$GITHUB_OUTPUT`
+  as `disposition` — `.github/workflows/validate.yml`'s `governance-gate` job
+  arms auto-merge strictly on `steps.governance_check.outputs.disposition ==
+  'success'`, never on the raw `classify-pr` label (announce-revamp
+  Phase 3 — a label-based check cannot see the G-19 ownership result).
 
 ## 13. Consolidated open questions carried into Phase 2
 

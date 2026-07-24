@@ -83,15 +83,18 @@ def _repo_root() -> Path:
 
 
 def _github_api() -> GitHubApi:
-    """`GITHUB_REPOSITORY` (runner-set, `<owner>/<repo>`) + `GITHUB_TOKEN`
-    (the write-scoped credential).
+    """`GITHUB_REPOSITORY` (runner-set, `<owner>/<repo>`) + `GITHUB_TOKEN`.
 
-    All three privileged-job workflows (`announce.yml`'s `regen-and-pr`,
-    `reconcile.yml`, `validate.yml`'s `governance-gate`) expose the
-    `index-write` Environment's secret to the process as `$GITHUB_TOKEN` —
-    the underlying GitHub secret itself is still named `INDEX_WRITE_TOKEN`
-    (ADR-4 BD-6), only the `env:` key each workflow maps it to is
-    standardized on `GITHUB_TOKEN` to match this function.
+    Fork-PR announce revamp (ADR-6): there is no index-side write credential
+    in the announce path any more (`announce.yml`/its `index-write`
+    Environment/`INDEX_WRITE_TOKEN` are all retired — FP-7). The three
+    privileged-job workflows that still call this (`reconcile.yml`,
+    `validate.yml`'s `governance-gate` running `classify-pr`/
+    `governance-check`) all expose the ambient, per-run default
+    `GITHUB_TOKEN` (`github.token`) to the process under the same
+    `$GITHUB_TOKEN` env var name this function reads — labels/status/
+    comments/reviewer-requests/issue-filing scope only, never a repo-write
+    credential.
     """
     owner, _, repo = _require_env("GITHUB_REPOSITORY").partition("/")
     return GitHubApi(owner=owner, repo=repo, token=_require_env("GITHUB_TOKEN"))

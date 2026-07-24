@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,18 @@ _STATUS_CONTEXT = "governance/review-required"
 _MAINTAINERS_PATH = ".github/maintainers.yml"
 _MAINTAINERS_YML = b"maintainers:\n  - github: carol\n    github_id: 99\n"
 _COMMENT_MARKER = "<!-- indexbot:governance -->"
+
+
+@pytest.fixture(autouse=True)
+def _github_output(  # pyright: ignore[reportUnusedFunction]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """`run()` unconditionally writes the `disposition` `$GITHUB_OUTPUT` entry
+    (see module docstring) — every test needs a target file for that write,
+    not just the ones asserting on its contents."""
+    output_file = tmp_path / "github_output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    return output_file
 
 
 def _args(pr_number: int = 1) -> argparse.Namespace:
@@ -77,7 +90,9 @@ def test_add_arguments_registers_pr_number() -> None:
 # --- G-19: refresh + author owns every touched package -> success ----------
 
 
-def test_refresh_and_author_owns_package_sets_success_status() -> None:
+def test_refresh_and_author_owns_package_sets_success_status(
+    _github_output: Path,
+) -> None:
     before = _root(tags={"1.0.0": TagEntry(content="sha256:" + "a" * 64, observed="T0")})
     after = _root(tags={"1.0.0": TagEntry(content="sha256:" + "b" * 64, observed="T1")})
     github = _github(pr_number=1, base=before, head=after, author_login="alice", author_id=1)
@@ -95,9 +110,15 @@ def test_refresh_and_author_owns_package_sets_success_status() -> None:
     # Green -> no reviewers assigned, no comment posted.
     assert github.requested_reviewers == {}
     assert github.comments == {}
+    # G-19 machine-lane pass: validate.yml's auto-merge step reads this output.
+    outputs = _github_output.read_text(encoding="utf-8")
+    assert "disposition" in outputs
+    assert "success" in outputs
 
 
-def test_refresh_but_author_not_owner_falls_back_to_pending_with_reviewers() -> None:
+def test_refresh_but_author_not_owner_falls_back_to_pending_with_reviewers(
+    _github_output: Path,
+) -> None:
     before = _root(tags={"1.0.0": TagEntry(content="sha256:" + "a" * 64, observed="T0")})
     after = _root(tags={"1.0.0": TagEntry(content="sha256:" + "b" * 64, observed="T1")})
     github = _github(pr_number=1, base=before, head=after, author_login="mallory", author_id=999)
@@ -111,6 +132,8 @@ def test_refresh_but_author_not_owner_falls_back_to_pending_with_reviewers() -> 
     assert "G-19" in description
     assert github.requested_reviewers[1] == ["carol"]
     assert _COMMENT_MARKER in github.comments[1][_COMMENT_MARKER]
+    # Not machine-lane -> auto-merge must not be armed.
+    assert "pending" in _github_output.read_text(encoding="utf-8")
 
 
 def test_refresh_author_owns_one_of_two_touched_packages_falls_back_to_pending() -> None:

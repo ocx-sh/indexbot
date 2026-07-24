@@ -321,7 +321,8 @@ def test_classify_pr_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert github.labels[1] == ["new-package"]
 
 
-def test_governance_check_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_governance_check_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
     tag_content = _observed_content_digest("1.0.0")
     committed = _root({"1.0.0": TagEntry(content=tag_content, observed="T0")})
     refreshed = _root({"1.0.0": TagEntry(content=tag_content, observed="T1")})
