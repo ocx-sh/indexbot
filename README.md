@@ -12,6 +12,19 @@ Write path for the OCX public index. Subcommands `announce`, `reconcile`,
 - `src/indexbot/cli/` — argparse entrypoint + subcommands
 - `tests/fakes/` — in-memory `Protocol` implementations used across tests
 
+## Deployment policy
+
+`.github/index-policy.json` (repo root, not `bot/`) is this index's
+registry-host allowlist — G-03's input, one file per index copy:
+
+```json
+{ "registry_hosts": ["ghcr.io"] }
+```
+
+A committed file rather than an environment/Actions variable, so widening
+registry trust stays a reviewed PR. A host no `RegistryPort` adapter can
+serve is refused at wiring time. Details: `CONTRACTS.md` §15.
+
 ## Commands
 
 ```

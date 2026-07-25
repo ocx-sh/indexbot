@@ -13,11 +13,13 @@ from pathlib import Path
 
 import pytest
 
+from indexbot.adapters.ghcr import GHCR_HOST
 from indexbot.cli import _wiring
 from indexbot.cli import main as main_module
 from indexbot.core.observe import observe
+from indexbot.core.policy import INDEX_POLICY_PATH
 from indexbot.core.validate_entry import serialize_observation_object, serialize_package_root
-from indexbot.errors import TransientError
+from indexbot.errors import TransientError, ValidationError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import (
     ObservationObject,
@@ -35,6 +37,7 @@ _PKG = "cmake"
 _REPO = "oci://ghcr.io/kitware/cmake"
 _ROOT_PATH = f"p/{_NS}/{_PKG}.json"
 _OWNER = Owner(github="alice", github_id=1)
+_POLICY_BYTES = b'{"registry_hosts": ["ghcr.io"]}\n'
 
 
 # --- `_require_env` -----------------------------------------------------------
@@ -115,6 +118,66 @@ def test_main_dispatch_is_seeded_from_wiring_dispatch() -> None:
     assert set(main_module._DISPATCH) == set(_wiring.DISPATCH)  # pyright: ignore[reportPrivateUsage]
 
 
+# --- `_registry_hosts` (deployment policy + no-adapter guard) ------------------
+
+
+def test_registry_hosts_returns_the_committed_policy() -> None:
+    assert _wiring._registry_hosts(_POLICY_BYTES) == frozenset({"ghcr.io"})  # pyright: ignore[reportPrivateUsage]
+
+
+def test_registry_hosts_missing_policy_file_fails_closed() -> None:
+    """No policy file is a hard stop, not a silent fall back to the public
+    index's `ghcr.io` — an index copy that never stated a policy says so."""
+    with pytest.raises(ValidationError, match="no registry-host policy"):
+        _wiring._registry_hosts(None)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_registry_hosts_rejects_a_host_no_adapter_can_serve() -> None:
+    """The trap this guard exists to close: allowlisting a host with no
+    `RegistryPort` would produce roots that validate and then cannot be
+    fetched. Refused at wiring time, naming the missing adapter."""
+    policy = b'{"registry_hosts": ["harbor.corp.internal"]}'
+    with pytest.raises(ValidationError, match="no registry adapter can serve"):
+        _wiring._registry_hosts(policy)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_registry_hosts_rejects_an_unservable_host_alongside_a_servable_one() -> None:
+    """Partial coverage is still a trap — one bad host poisons the whole
+    policy, it is not silently filtered down to the servable subset."""
+    policy = b'{"registry_hosts": ["ghcr.io", "harbor.corp.internal"]}'
+    with pytest.raises(ValidationError, match=r"harbor\.corp\.internal"):
+        _wiring._registry_hosts(policy)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_adapter_hosts_matches_the_registry_adapters_that_exist() -> None:
+    """One adapter (`adapters/ghcr.py`), one servable host. This asserts the
+    set stays honest: growing it without shipping an adapter re-opens the gap
+    the guard closes."""
+    assert frozenset({GHCR_HOST}) == _wiring.REGISTRY_ADAPTER_HOSTS
+
+
+def test_local_policy_hosts_reads_the_checkout_copy() -> None:
+    files = InMemoryFiles(files={INDEX_POLICY_PATH: _POLICY_BYTES})
+    assert _wiring._local_policy_hosts(files) == frozenset({"ghcr.io"})  # pyright: ignore[reportPrivateUsage]
+
+
+def test_validate_without_a_policy_file_exits_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end through the real dispatch: the guard fires before the
+    subcommand does any work, so the run fails on the policy, not later."""
+
+    def _empty_checkout(**_: object) -> InMemoryFiles:
+        """A checkout with no policy file at all — `_patch_adapters` seeds one
+        into its own double, so this replaces it after the fact."""
+        return InMemoryFiles()
+
+    _patch_adapters(monkeypatch, files=InMemoryFiles())
+    monkeypatch.setattr(_wiring, "LocalFiles", _empty_checkout)
+
+    assert main_module.main(["validate", _ROOT_PATH, "--offline"]) == ExitCode.VALIDATION_FAILURE
+
+
 # --- fixture helpers (DAMP within this file, per CONTRACTS.md §2) --------------
 
 
@@ -166,6 +229,12 @@ def _patch_adapters(
     announce revamp) are patched, so no test here needs a real env var."""
     files_double = files if files is not None else InMemoryFiles()
     github_double = github or FakeGitHub()
+    # Every real checkout carries the deployment's registry-host policy, and
+    # `announce` reads the index repo's copy over the API — seed both so the
+    # `_run_*` functions under test see what production sees (a test asserting
+    # the ABSENT-policy failure seeds neither; see `_registry_hosts` below).
+    files_double.write_bytes(INDEX_POLICY_PATH, _POLICY_BYTES)
+    github_double.files[(INDEX_POLICY_PATH, "main")] = _POLICY_BYTES
 
     def _local_files(**_: object) -> InMemoryFiles:
         return files_double

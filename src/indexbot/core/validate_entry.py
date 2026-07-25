@@ -4,7 +4,9 @@ Everything JSON Schema *can* express (`schema/root.schema.json`,
 `schema/observation-object.schema.json`) runs via `check-jsonschema`, never
 imported here (ADR-4 BD-1). This module owns the checks a schema cannot
 express: path<->name derivation (G-02), repository host allowlisting (G-03,
-checked before any network intent — SSRF ordering), reserved-namespace
+checked before any network intent — SSRF ordering; the allowlist itself is
+this deployment's committed policy, `core/policy.py`, passed in by
+`cli/_wiring.py` rather than hardcoded here), reserved-namespace
 rejection (ADR-2 ND-4), digest-hex `fullmatch` before any path join,
 content-digest self-consistency (CAS integrity), dangling-reference
 detection, the `PackageRoot`/`ObservationObject` <-> `dict` codec every
@@ -37,6 +39,7 @@ import re
 from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
+from indexbot.core.policy import INDEX_POLICY_PATH
 from indexbot.errors import AnomalyError, ValidationError
 from indexbot.model import (
     Desc,
@@ -55,9 +58,6 @@ from indexbot.model import (
 # with PACKAGE_ID_RE below, the fixed-two-segment package-id shape). --------
 _COMPONENT = r"[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*"
 OCI_REPOSITORY_RE: Final[re.Pattern[str]] = re.compile(rf"^{_COMPONENT}(?:/{_COMPONENT})*$")
-
-REPOSITORY_HOST_ALLOWLIST: Final[frozenset[str]] = frozenset({"ghcr.io"})
-"""Anti-squat/anti-exfil guard (G-03). Extend only via reviewed PR."""
 
 _DIGEST_RE: Final[re.Pattern[str]] = re.compile(r"sha256:[a-f0-9]{64}")
 
@@ -281,8 +281,16 @@ def check_namespace_not_reserved(package_id: PackageId, *, allow_reserved: bool 
         raise ValidationError(f"package {package_id.package!r} is reserved (ADR-2 ND-4)")
 
 
-def check_repository_allowlisted(repository: str) -> None:
-    """G-03: `repository`'s host must be on `REPOSITORY_HOST_ALLOWLIST`.
+def check_repository_allowlisted(repository: str, allowed_hosts: frozenset[str]) -> None:
+    """G-03: `repository`'s host must be one of `allowed_hosts`.
+
+    `allowed_hosts` is this deployment's committed registry-host policy
+    (`core/policy.py`, `.github/index-policy.json`), loaded once by
+    `cli/_wiring.py` and passed down — deliberately a required argument with
+    no default rather than a constant compiled in here, so no caller can
+    silently run G-03 against a policy nobody stated (OCX's index is one
+    format, many copies; the public index's `ghcr.io` is not a corporate
+    copy's Harbor/Artifactory host).
 
     Pure string parsing only (`urllib.parse`, no regex needed for the
     scheme/host split) — this function never touches a `RegistryPort`, so it
@@ -293,8 +301,11 @@ def check_repository_allowlisted(repository: str) -> None:
     if parsed.scheme != "oci" or not parsed.netloc:
         raise ValidationError(f"repository {repository!r} is not a valid oci://<host>/<path> URI")
     host = parsed.hostname
-    if host is None or host not in REPOSITORY_HOST_ALLOWLIST:
-        raise ValidationError(f"repository host {host!r} is not allowlisted (G-03)")
+    if host is None or host not in allowed_hosts:
+        raise ValidationError(
+            f"repository host {host!r} is not on this index's registry-host allowlist "
+            f"{sorted(allowed_hosts)} (G-03; policy: {INDEX_POLICY_PATH})"
+        )
 
 
 def check_repository_shape(repository: str) -> None:

@@ -143,7 +143,10 @@ remaining caller of `parse_package_id` (`cli/validate.py`,
 _COMPONENT = r"[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*"
 OCI_REPOSITORY_RE: Final[re.Pattern[str]] = re.compile(rf"^{_COMPONENT}(?:/{_COMPONENT})*$")
 
-REPOSITORY_HOST_ALLOWLIST: Final[frozenset[str]] = frozenset({"ghcr.io"})  # extend only via reviewed PR
+# G-03's allowlist is NOT a constant here — it is this deployment's committed
+# policy (§15, `.github/index-policy.json`), loaded by `cli/_wiring.py` and
+# passed in. Still "extend only via reviewed PR": the policy is a committed
+# file, never an environment or Actions variable.
 ```
 
 `OCI_REPOSITORY_RE` is a **structurally distinct constant** from
@@ -162,10 +165,14 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
   a successor while still `active`) nor whether the named successor exists
   or is reserved (a dangling/not-yet-claimed successor is allowed, like
   `deprecated_message`'s free-text pointer).
-- `check_repository_allowlisted(repository: str) -> None` — G-03. Parses the
-  `oci://<host>/<path>` URI (stdlib `urllib.parse`, no regex needed for the
-  scheme/host split) and checks `host in REPOSITORY_HOST_ALLOWLIST`. **Must
-  run before any `RegistryPort` call** — SSRF ordering, BD-1.
+- `check_repository_allowlisted(repository: str, allowed_hosts: frozenset[str]) -> None`
+  — G-03. Parses the `oci://<host>/<path>` URI (stdlib `urllib.parse`, no
+  regex needed for the scheme/host split) and checks
+  `host in allowed_hosts`. `allowed_hosts` is this deployment's committed
+  registry-host policy (§15), a **required argument with no default** — no
+  caller can run G-03 against a policy nobody stated, and the public index's
+  `ghcr.io` is not a corporate copy's Harbor host. **Must run before any
+  `RegistryPort` call** — SSRF ordering, BD-1.
 - `check_repository_shape(repository: str) -> None` — validates the
   `<path>` portion of `oci://<host>/<path>` against `OCI_REPOSITORY_RE`
   (N-segment grammar — never `PACKAGE_ID_RE`).
@@ -746,7 +753,11 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   (`GitHubPort.get_file_contents`, via a keyword-only `index_github` port —
   unauthenticated is fine for `--out`; missing root -> `ValidationError`,
   "unclaimed namespace — new packages go through the human lane") ->
-  `check_repository_allowlisted` (SSRF ordering) -> `observe_one_tag` once
+  `check_repository_allowlisted` (SSRF ordering; `allowed_hosts` comes from
+  the *index repo's* own `.github/index-policy.json` at `main`, read through
+  the same `index_github` port — a publisher runs this from their own working
+  directory and cannot widen the target index's policy locally, §15) ->
+  `observe_one_tag` once
   per curated tag (a tag that does not resolve -> hard `ValidationError`,
   never silently dropped — a publisher typo) -> `desc.check_desc_change` ->
   `regenerate` (owner curation: the curated observed set *is* the new `tags`
@@ -990,3 +1001,94 @@ committed byte vectors — real `serialize_package_root`/
 `serialize_observation_object` output, never hand-typed — and
 `tests/core/test_serializer_golden.py` is the round-trip gate that rides
 `task bot:test`.
+
+## 15. `core/policy.py` — deployment policy (`.github/index-policy.json`)
+
+G-03's registry-host allowlist is a **per-deployment input**, not a constant.
+OCX's index is one format, many copies: the public `ocx-sh/index` serves
+bytes from `ghcr.io`, a corporate copy from its own Harbor/Artifactory/ECR.
+Each index repo commits its own policy:
+
+```json
+{
+  "registry_hosts": ["ghcr.io"]
+}
+```
+
+`parse_index_policy(raw: bytes) -> frozenset[str]` is that file's whole
+grammar. `ValidationError` on anything else: malformed JSON, a non-object
+document, an unknown key (a typo'd `registry_host` would otherwise leave a
+deployment with no policy while looking like it had one), a missing or
+non-array `registry_hosts`, an empty array, or an entry that is not a bare
+lowercase host. The host shape is strict *because* the alternative is silent:
+`check_repository_allowlisted` matches against `urlsplit().hostname`, which is
+always lowercased and never carries a port, so `https://harbor.corp`,
+`Harbor.Corp` and `harbor.corp:5000` would each parse fine and then match
+nothing. A registry on a non-default port is allowlisted by its bare host
+(`harbor.corp` admits `oci://harbor.corp:5000/team/tool`).
+
+**A committed file, never an environment or Actions variable.** "Extend only
+via reviewed PR" *is* G-03's control — `repository` is the pointer every ocx
+client follows to fetch bytes, so widening the allowlist is a supply-chain
+trust decision. A repo/Actions variable can be changed by anyone with settings
+access, silently, with no diff and no reviewer; a committed file under
+`.github/**` keeps widening mechanically equal to a reviewed PR, on the same
+surface branch protection and CODEOWNERS already guard, next to this repo's
+other bot-read governance data (`maintainers.yml`, G-20).
+
+**No JSON Schema of its own.** `schema/*.schema.json` is the *served* wire
+contract (`$id: https://index.ocx.sh/schema/...`), sealed by
+`adr_locked_observation_index_format.md` D7; this file is never served and is
+not part of the index format. `parse_index_policy` is its single source of
+truth, runs in CI on every `indexbot` invocation that needs a policy, and
+`tests/security/test_governance_contracts.py` parses the committed file
+itself (`test_g03_shipped_policy_is_exactly_ghcr_io` — the public index's
+effective policy stays exactly `{"ghcr.io"}`, and a PR that widens the shipped
+file fails there).
+
+### Where it is loaded, and the no-adapter guard
+
+`cli/_wiring.py` — the composition root, the only module that constructs
+adapters — loads the policy at wiring time, before the subcommand does any
+work, and passes the resulting `frozenset[str]` into `announce.run`,
+`reconcile.run`, `validate.run` and `seed_import.run` as a keyword-only
+`allowed_hosts`. `render`/`classify-pr`/`governance-check` never resolve a
+`repository` and deliberately need no policy file at all (the same
+per-subcommand independence that already governs env-var requirements there).
+Source of the bytes: the local checkout via `FilePort` for
+`validate`/`reconcile`/`seed-import`; the index repo at `main` via
+`GitHubPort` for `announce`, whose publisher runs outside any checkout.
+
+Two failures are raised there, both loud and both early:
+
+1. **No policy file** — fail closed. An index copy that never stated a policy
+   says so, rather than silently inheriting the public index's `ghcr.io`.
+2. **A host no `RegistryPort` adapter can serve** — the important one.
+   `adapters/ghcr.py` is the only implementation and `_run_*` constructs it
+   unconditionally: there is no dispatch-by-host. Allowlisting
+   `harbor.corp.internal` today would therefore produce a root that passes
+   every validation check and then cannot be fetched — strictly worse than
+   the honest refusal it replaces. `_wiring.REGISTRY_ADAPTER_HOSTS` is the
+   honest statement of what is implementable, `_registry_hosts` refuses any
+   policy that exceeds it, and the error names the missing piece (implement a
+   `RegistryPort`, add its host, dispatch it). Multi-registry adapter dispatch
+   is out of scope — per-registry auth and a test matrix are its own work; the
+   guard exists so the gap is loud instead of latent.
+
+### Why PR-head validation is not a bypass
+
+`validate.yml`'s unprivileged `schema-validate` job runs `indexbot validate`
+against PR-head content by design — it checks the PR's own claims, and holds
+no credential. It therefore also loads the PR's own `.github/index-policy.json`.
+That is not a self-authorization hole:
+
+- The policy path is outside every root's refresh scope, so a PR touching it
+  is classified human-lane by `cli/classify_pr.py` and can never auto-merge
+  (ADR-6 FP-5 — asserted in `_OUT_OF_SCOPE_PATHS`). Merging a widened policy
+  requires a human, which is precisely the control.
+- Today the no-adapter guard closes it outright anyway: the only servable host
+  is `ghcr.io`, so a PR-head policy naming anything else fails the run.
+
+`announce` is the one flow that deliberately does *not* read a local policy:
+its publisher runs outside any index checkout, so it reads the target index's
+committed policy at `main` over the API instead (§12).

@@ -38,7 +38,7 @@ import hashlib
 import random
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -51,6 +51,15 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from indexbot.model import OwnershipProbeResult
+
+GHCR_HOST: Final[str] = "ghcr.io"
+"""The one registry host this adapter can serve.
+
+`cli/_wiring.py` builds its servable-host set from this: a deployment policy
+(`.github/index-policy.json`) that allowlists a host no adapter implements is
+refused at wiring time rather than producing roots that validate and then
+cannot be fetched. Keep it the single source of the literal — `base_url` and
+the token endpoint's `service` parameter both derive from it."""
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 _DEFAULT_MAX_PAGES = 10_000
@@ -172,7 +181,7 @@ class GhcrRegistry:
     caches one anonymous pull token per repository path for this instance's
     lifetime (CONTRACTS.md §9)."""
 
-    base_url: str = "https://ghcr.io"
+    base_url: str = f"https://{GHCR_HOST}"
     timeout: float = _DEFAULT_TIMEOUT_SECONDS
     policy: BackoffPolicy = field(default_factory=BackoffPolicy)
     max_pages: int = _DEFAULT_MAX_PAGES
@@ -297,7 +306,7 @@ class GhcrRegistry:
     def _fetch_token(self, repo_path: str) -> str:
         response = self.client.get(
             f"{self.base_url}/token",
-            params={"service": "ghcr.io", "scope": f"repository:{repo_path}:pull"},
+            params={"service": GHCR_HOST, "scope": f"repository:{repo_path}:pull"},
             timeout=self.timeout,
         )
         if response.status_code == 403:

@@ -145,6 +145,7 @@ def test_threat_ssrf_allowlist_before_registry() -> None:
             fork_github=None,
             files=InMemoryFiles(),
             clock=FixedClock(),
+            allowed_hosts=frozenset({"ghcr.io"}),
         )
 
 

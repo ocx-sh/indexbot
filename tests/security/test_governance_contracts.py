@@ -34,12 +34,13 @@ from typing import Any
 
 import pytest
 
-from indexbot.cli import announce, governance_check, reconcile
+from indexbot.cli import _wiring, announce, governance_check, reconcile
 from indexbot.cli import render as cli_render
 from indexbot.core.anomaly import AnomalyFinding, check_tag_mutations
 from indexbot.core.backoff import BackoffPolicy, delay_seconds, is_retryable_status
 from indexbot.core.diff import classify_change, diff
 from indexbot.core.observe import Observation, observe_one_tag
+from indexbot.core.policy import INDEX_POLICY_PATH, parse_index_policy
 from indexbot.core.regenerate import regenerate
 from indexbot.core.registry_checks import check_ownership
 from indexbot.core.render import SourcePackage, build_render_plan
@@ -72,6 +73,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ROOT_SCHEMA = _REPO_ROOT / "schema" / "root.schema.json"
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 _SRC = _REPO_ROOT / "bot" / "src" / "indexbot"
+
+
+def _shipped_registry_hosts() -> frozenset[str]:
+    """This repo's own committed `.github/index-policy.json`, parsed by the
+    production parser — the public index's effective G-03 policy read from the
+    real file, never a value restated here (a restated copy could agree with
+    itself while the shipped file said something else)."""
+    return parse_index_policy((_REPO_ROOT / INDEX_POLICY_PATH).read_bytes())
+
 
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
@@ -197,11 +207,30 @@ def test_g02_name_must_equal_path() -> None:
 
 
 def test_g03_repository_host_allowlisted() -> None:
-    """G-03: `check_repository_allowlisted` raises for a non-`ghcr.io` host,
-    passes for the allowlisted host."""
-    check_repository_allowlisted("oci://ghcr.io/ocx-contrib/cmake")  # allowlisted -> no raise
+    """G-03: `check_repository_allowlisted` raises for a host outside the
+    deployment's policy, passes for one inside it."""
+    hosts = _shipped_registry_hosts()
+    check_repository_allowlisted("oci://ghcr.io/ocx-contrib/cmake", hosts)  # allowed -> no raise
     with pytest.raises(ValidationError):
-        check_repository_allowlisted("oci://registry.evil.example/ocx-contrib/cmake")
+        check_repository_allowlisted("oci://registry.evil.example/ocx-contrib/cmake", hosts)
+
+
+def test_g03_shipped_policy_is_exactly_ghcr_io() -> None:
+    """G-03's effective policy for THIS index — the committed
+    `.github/index-policy.json`, parsed by the same code the bot runs.
+
+    The allowlist became a per-deployment input; this repo IS the public
+    index, and its policy stays exactly `{"ghcr.io"}`. Any PR that widens the
+    committed file fails here, which is the reviewed-diff half of "extend only
+    via reviewed PR" made mechanical."""
+    assert _shipped_registry_hosts() == frozenset({"ghcr.io"})
+
+
+def test_g03_shipped_policy_is_servable_by_an_adapter() -> None:
+    """The other half of the same guard, asserted against the real file rather
+    than a fabricated one: every host this index allowlists has a
+    `RegistryPort` that can actually fetch its bytes (`cli/_wiring.py`)."""
+    assert _shipped_registry_hosts() <= _wiring.REGISTRY_ADAPTER_HOSTS
 
 
 # --- G-04 ------------------------------------------------------------------
@@ -402,7 +431,11 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
     before = dict(files.files)
 
     result = reconcile.run(
-        argparse.Namespace(package=None), files=files, registry=registry, github=github
+        argparse.Namespace(package=None),
+        files=files,
+        registry=registry,
+        github=github,
+        allowed_hosts=_shipped_registry_hosts(),
     )
 
     assert result == ExitCode.OK
@@ -651,6 +684,7 @@ _OUT_OF_SCOPE_PATHS: list[tuple[str, str]] = [
     ("other-package-root", "p/acme/widget.json"),
     ("deleted-repo-file", "README.md"),
     ("repo-config", ".github/maintainers.yml"),
+    ("registry-host-policy", INDEX_POLICY_PATH),
 ]
 
 

@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from indexbot.model import PackageId, PackageRoot
     from indexbot.ports import ClockPort, FilePort, GitHubPort, RegistryPort
 
-_BASE_REF: Final[str] = "main"
+BASE_REF: Final[str] = "main"
 _DEFAULT_INDEX_REPO: Final[str] = "ocx-sh/index"
 _DEFAULT_YANK_REASON: Final[str] = "yanked via announce"
 _PNG_MAGIC: Final[bytes] = b"\x89PNG\r\n\x1a\n"
@@ -178,6 +178,7 @@ def run(
     fork_github: GitHubPort | None,
     files: FilePort,
     clock: ClockPort,
+    allowed_hosts: frozenset[str],
 ) -> ExitCode:
     """`indexbot announce` entry point. See module docstring for the
     pipeline. `fork_github` is `None` for `--out` mode (never touched on that
@@ -189,16 +190,16 @@ def run(
     yank_reason = cast(str, args.yank_reason)
 
     root_path = _root_path(package_id)
-    current_raw = index_github.get_file_contents(root_path, _BASE_REF)
+    current_raw = index_github.get_file_contents(root_path, BASE_REF)
     if current_raw is None:
         raise ValidationError(
-            f"unclaimed namespace: no committed root at {root_path!r} on {_BASE_REF!r} for "
+            f"unclaimed namespace: no committed root at {root_path!r} on {BASE_REF!r} for "
             f"{package_id} — new packages go through the human lane"
         )
     current = parse_package_root(current_raw)
 
     # BD-1 SSRF ordering: must run before any RegistryPort call below.
-    check_repository_allowlisted(current.repository)
+    check_repository_allowlisted(current.repository, allowed_hosts)
 
     observations: list[Observation] = []
     for tag in curated_tags:
@@ -262,9 +263,9 @@ def run(
     # ponytail: assumes the fork's default branch is also "main" (the common
     # GitHub fork convention) — upgrade to a `--fork-base` override if a
     # publisher's fork ever uses a different default branch name.
-    base_sha = github.get_ref_sha(branch) or github.get_ref_sha(_BASE_REF)
+    base_sha = github.get_ref_sha(branch) or github.get_ref_sha(BASE_REF)
     if base_sha is None:
-        raise ValidationError(f"base ref {_BASE_REF!r} does not exist on {fork!r}")
+        raise ValidationError(f"base ref {BASE_REF!r} does not exist on {fork!r}")
 
     commit_files: dict[str, bytes | None] = dict(files_by_path)
     github.commit_files(
@@ -275,7 +276,7 @@ def run(
     )
     index_github.open_or_update_pull_request(
         branch=branch,
-        base=_BASE_REF,
+        base=BASE_REF,
         title=f"announce: curate {package_id}",
         body=f"Publisher-curated tag update for `{package_id}`.",
         head_owner=fork_owner,

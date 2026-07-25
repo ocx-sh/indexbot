@@ -19,12 +19,30 @@ from indexbot.model import (
     TagEntry,
     Yank,
 )
+from indexbot.ports import FilePort, GitHubPort, RegistryPort
 from tests.fakes import FakeGitHub, FakeRegistry, InMemoryFiles
 
 _OWNER = Owner(github="alice", github_id=1)
 _CMAKE_REPO = "oci://ghcr.io/ocx-contrib/cmake"
 _WIDGET_REPO = "oci://ghcr.io/ocx-contrib/widget"
 _ISSUE_TITLE = "indexbot reconcile: anomalies detected"
+_ALLOWED_HOSTS = frozenset({"ghcr.io"})
+
+
+def _run(
+    args: argparse.Namespace,
+    *,
+    files: FilePort,
+    registry: RegistryPort,
+    github: GitHubPort,
+) -> ExitCode:
+    """`reconcile.run` bound to the shipped `{"ghcr.io"}` registry-host policy
+    (`.github/index-policy.json`) — every test in this file runs under the
+    public index's own allowlist. Tests needing a different policy call
+    `reconcile.run` directly with their own `allowed_hosts`."""
+    return reconcile.run(
+        args, files=files, registry=registry, github=github, allowed_hosts=_ALLOWED_HOSTS
+    )
 
 
 def _args(*, package: str | None = None) -> argparse.Namespace:
@@ -157,21 +175,17 @@ def test_unallowlisted_repository_raises_before_any_registry_call() -> None:
     _put_root(files, "kitware", "cmake", _root(repository="oci://evil.example.com/x/y"))
 
     with pytest.raises(ValidationError, match="G-03"):
-        reconcile.run(_args(), files=files, registry=_PoisonRegistry(), github=FakeGitHub())
+        _run(_args(), files=files, registry=_PoisonRegistry(), github=FakeGitHub())
 
 
 def test_empty_index_is_a_noop() -> None:
-    result = reconcile.run(
-        _args(), files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub()
-    )
+    result = _run(_args(), files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub())
     assert result == ExitCode.OK
 
 
 def test_missing_args_attributes_default_to_full_run() -> None:
     bare_args = argparse.Namespace(command="reconcile")
-    result = reconcile.run(
-        bare_args, files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub()
-    )
+    result = _run(bare_args, files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub())
     assert result == ExitCode.OK
 
 
@@ -183,7 +197,7 @@ def test_clean_package_is_a_noop_and_never_writes() -> None:
     _put_cas(files, "kitware", "cmake", entry.content, object_bytes)
     github = FakeGitHub()
 
-    result = reconcile.run(_args(), files=files, registry=registry, github=github)
+    result = _run(_args(), files=files, registry=registry, github=github)
 
     assert result == ExitCode.OK
     assert github.issues == {}
@@ -210,7 +224,7 @@ def test_package_scope_filters_to_one_package() -> None:
         ),
     )
 
-    result = reconcile.run(
+    result = _run(
         _args(package="kitware/cmake"), files=files, registry=registry, github=FakeGitHub()
     )
 
@@ -219,7 +233,7 @@ def test_package_scope_filters_to_one_package() -> None:
 
 def test_ghost_root_vanished_between_list_and_read_is_skipped() -> None:
     files = _GhostFiles(listed=["p/kitware/cmake.json"])
-    result = reconcile.run(_args(), files=files, registry=FakeRegistry(), github=FakeGitHub())
+    result = _run(_args(), files=files, registry=FakeRegistry(), github=FakeGitHub())
     assert result == ExitCode.OK
 
 
@@ -242,7 +256,7 @@ def test_pinned_tag_mutation_escalates_to_anomaly() -> None:
     github = FakeGitHub()
 
     with pytest.raises(AnomalyError, match="pinned-tag-mutation"):
-        reconcile.run(_args(), files=files, registry=registry, github=github)
+        _run(_args(), files=files, registry=registry, github=github)
 
     assert "pinned-tag-mutation" in github.issues[_ISSUE_TITLE][1]
 
@@ -267,7 +281,7 @@ def test_floating_tag_drift_does_not_escalate() -> None:
     registry.tags[_CMAKE_REPO] = ["latest"]
     registry.manifests[(_CMAKE_REPO, "latest")] = _bare_manifest(architecture="arm64")
 
-    result = reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+    result = _run(_args(), files=files, registry=registry, github=FakeGitHub())
 
     assert result == ExitCode.OK
 
@@ -285,7 +299,7 @@ def test_yanked_vanished_tag_does_not_escalate() -> None:
     _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": yanked_entry}))
     _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
 
-    result = reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+    result = _run(_args(), files=files, registry=registry, github=FakeGitHub())
 
     assert result == ExitCode.OK
 
@@ -306,7 +320,7 @@ def test_non_yanked_vanished_tag_escalates_to_anomaly() -> None:
     github = FakeGitHub()
 
     with pytest.raises(AnomalyError, match="tag-missing-upstream"):
-        reconcile.run(_args(), files=files, registry=registry, github=github)
+        _run(_args(), files=files, registry=registry, github=github)
 
     assert "tag-missing-upstream" in github.issues[_ISSUE_TITLE][1]
 
@@ -320,7 +334,7 @@ def test_dangling_cas_reference_escalates() -> None:
     github = FakeGitHub()
 
     with pytest.raises(AnomalyError, match="cas-object-missing"):
-        reconcile.run(_args(), files=files, registry=registry, github=github)
+        _run(_args(), files=files, registry=registry, github=github)
 
 
 def test_tampered_cas_object_escalates() -> None:
@@ -331,7 +345,7 @@ def test_tampered_cas_object_escalates() -> None:
     _put_cas(files, "kitware", "cmake", entry.content, b"tampered bytes")
 
     with pytest.raises(AnomalyError, match="cas-object-hash-mismatch"):
-        reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+        _run(_args(), files=files, registry=registry, github=FakeGitHub())
 
 
 def test_desc_blob_hash_mismatch_escalates() -> None:
@@ -343,7 +357,7 @@ def test_desc_blob_hash_mismatch_escalates() -> None:
     _put_cas(files, "kitware", "cmake", readme_digest, b"tampered readme", ext="md")
 
     with pytest.raises(AnomalyError, match="desc-blob-hash-mismatch"):
-        reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+        _run(_args(), files=files, registry=registry, github=FakeGitHub())
 
 
 def test_desc_blob_missing_escalates() -> None:
@@ -355,7 +369,7 @@ def test_desc_blob_missing_escalates() -> None:
     # No CAS file written for the readme digest at all.
 
     with pytest.raises(AnomalyError, match="desc-blob-missing"):
-        reconcile.run(_args(), files=files, registry=registry, github=FakeGitHub())
+        _run(_args(), files=files, registry=registry, github=FakeGitHub())
 
 
 # --- partial-success: clean + anomalous packages together -----------------
@@ -380,7 +394,7 @@ def test_clean_and_anomalous_packages_both_reported() -> None:
     github = FakeGitHub()
 
     with pytest.raises(AnomalyError) as exc_info:
-        reconcile.run(_args(), files=files, registry=registry, github=github)
+        _run(_args(), files=files, registry=registry, github=github)
 
     assert "acme/widget" in str(exc_info.value)
     assert "kitware/cmake" not in str(exc_info.value)
@@ -395,8 +409,8 @@ def test_anomaly_issue_is_idempotent_across_repeated_runs() -> None:
     github = FakeGitHub()
 
     with pytest.raises(AnomalyError):
-        reconcile.run(_args(), files=files, registry=registry, github=github)
+        _run(_args(), files=files, registry=registry, github=github)
     with pytest.raises(AnomalyError):
-        reconcile.run(_args(), files=files, registry=registry, github=github)
+        _run(_args(), files=files, registry=registry, github=github)
 
     assert len(github.issues) == 1

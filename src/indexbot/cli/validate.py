@@ -131,7 +131,13 @@ def _cas_paths_by_digest(files: FilePort, namespace: str, package: str) -> dict[
 
 
 def _validate_one(
-    path: str, *, files: FilePort, registry: RegistryPort, offline: bool, allow_reserved: bool
+    path: str,
+    *,
+    files: FilePort,
+    registry: RegistryPort,
+    allowed_hosts: frozenset[str],
+    offline: bool,
+    allow_reserved: bool,
 ) -> FileReport:
     """Runs the full structural pipeline for one changed root, catching
     `ValidationError`/`AnomalyError` into a `FileReport` (first failure wins
@@ -170,7 +176,7 @@ def _validate_one(
         check_namespace_not_reserved(package_id, allow_reserved=allow_reserved)
         # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
         # call reachable below.
-        check_repository_allowlisted(root.repository)
+        check_repository_allowlisted(root.repository, allowed_hosts)
         check_repository_shape(root.repository)
 
         for entry in root.tags.values():
@@ -271,7 +277,13 @@ def _print_report(report: FileReport) -> None:
         print(f"{report.path}: WARN - {warning}", file=sys.stderr)
 
 
-def run(args: argparse.Namespace, *, files: FilePort, registry: RegistryPort) -> ExitCode:
+def run(
+    args: argparse.Namespace,
+    *,
+    files: FilePort,
+    registry: RegistryPort,
+    allowed_hosts: frozenset[str],
+) -> ExitCode:
     """`indexbot validate <path> [<path> ...] [--offline] [--allow-reserved-namespace]`
     (CONTRACTS.md §12).
 
@@ -293,7 +305,12 @@ def run(args: argparse.Namespace, *, files: FilePort, registry: RegistryPort) ->
 
     reports = [
         _validate_one(
-            path, files=files, registry=registry, offline=offline, allow_reserved=allow_reserved
+            path,
+            files=files,
+            registry=registry,
+            allowed_hosts=allowed_hosts,
+            offline=offline,
+            allow_reserved=allow_reserved,
         )
         for path in paths
     ]

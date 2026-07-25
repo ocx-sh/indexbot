@@ -145,7 +145,11 @@ def _cas_bytes_by_digest(
 
 
 def _verify_one(
-    package_id: PackageId, *, files: FilePort, registry: RegistryPort
+    package_id: PackageId,
+    *,
+    files: FilePort,
+    registry: RegistryPort,
+    allowed_hosts: frozenset[str],
 ) -> _PackageReport | None:
     """One package's verify-only sweep step. `None` if the root vanished
     between `list_files` and this read (the same race the previous
@@ -157,7 +161,7 @@ def _verify_one(
 
     # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
     # call below.
-    check_repository_allowlisted(root.repository)
+    check_repository_allowlisted(root.repository, allowed_hosts)
     check_repository_shape(root.repository)
 
     observations: list[Observation] = []
@@ -211,7 +215,12 @@ def _escalating_findings(report: _PackageReport) -> tuple[str, ...]:
 
 
 def run(
-    args: argparse.Namespace, *, files: FilePort, registry: RegistryPort, github: GitHubPort
+    args: argparse.Namespace,
+    *,
+    files: FilePort,
+    registry: RegistryPort,
+    github: GitHubPort,
+    allowed_hosts: frozenset[str],
 ) -> ExitCode:
     """Full-index verify-only sweep. `args.package` (optional
     `<namespace>/<package>` scope string) is read if present, defaulting to
@@ -227,7 +236,9 @@ def run(
     findings: list[str] = []
     checked = 0
     for package_id in package_ids:
-        report = _verify_one(package_id, files=files, registry=registry)
+        report = _verify_one(
+            package_id, files=files, registry=registry, allowed_hosts=allowed_hosts
+        )
         if report is None:
             continue
         checked += 1

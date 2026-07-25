@@ -236,39 +236,66 @@ def test_check_namespace_not_reserved_allow_reserved_still_blocks_generic_segmen
 
 # --- check_repository_allowlisted (G-03, SSRF ordering) ---------------------
 
+_ALLOWED_HOSTS = frozenset({"ghcr.io"})
+"""The shipped `.github/index-policy.json` policy — the argument every case
+below passes, since G-03's allowlist is now a per-deployment input rather
+than a constant this module owns."""
+
 
 def test_check_repository_allowlisted_ok() -> None:
-    validate_entry.check_repository_allowlisted("oci://ghcr.io/ocx-contrib/cmake")
+    validate_entry.check_repository_allowlisted("oci://ghcr.io/ocx-contrib/cmake", _ALLOWED_HOSTS)
 
 
 def test_check_repository_allowlisted_uppercase_host_lowercase_folds() -> None:
-    validate_entry.check_repository_allowlisted("oci://GHCR.IO/ocx-contrib/cmake")
+    validate_entry.check_repository_allowlisted("oci://GHCR.IO/ocx-contrib/cmake", _ALLOWED_HOSTS)
 
 
 def test_check_repository_allowlisted_wrong_scheme_raises() -> None:
     with pytest.raises(ValidationError):
-        validate_entry.check_repository_allowlisted("https://ghcr.io/ocx-contrib/cmake")
+        validate_entry.check_repository_allowlisted(
+            "https://ghcr.io/ocx-contrib/cmake", _ALLOWED_HOSTS
+        )
 
 
 def test_check_repository_allowlisted_no_scheme_at_all_raises() -> None:
     with pytest.raises(ValidationError):
-        validate_entry.check_repository_allowlisted("ghcr.io/ocx-contrib/cmake")
+        validate_entry.check_repository_allowlisted("ghcr.io/ocx-contrib/cmake", _ALLOWED_HOSTS)
 
 
 def test_check_repository_allowlisted_empty_netloc_raises() -> None:
     with pytest.raises(ValidationError):
-        validate_entry.check_repository_allowlisted("oci:///ocx-contrib/cmake")
+        validate_entry.check_repository_allowlisted("oci:///ocx-contrib/cmake", _ALLOWED_HOSTS)
 
 
 def test_check_repository_allowlisted_hostless_netloc_raises() -> None:
     # netloc is non-empty (":8080") but urlsplit resolves no hostname from it.
     with pytest.raises(ValidationError):
-        validate_entry.check_repository_allowlisted("oci://:8080/ocx-contrib/cmake")
+        validate_entry.check_repository_allowlisted("oci://:8080/ocx-contrib/cmake", _ALLOWED_HOSTS)
 
 
 def test_check_repository_allowlisted_unlisted_host_raises() -> None:
     with pytest.raises(ValidationError, match="G-03"):
-        validate_entry.check_repository_allowlisted("oci://evil.example.com/ocx-contrib/cmake")
+        validate_entry.check_repository_allowlisted(
+            "oci://evil.example.com/ocx-contrib/cmake", _ALLOWED_HOSTS
+        )
+
+
+def test_check_repository_allowlisted_honors_a_different_deployments_policy() -> None:
+    """The allowlist is the caller's input, not this module's constant: a
+    corporate index copy's own policy admits its own host and still rejects
+    everything else, `ghcr.io` included."""
+    corporate = frozenset({"harbor.corp.internal"})
+    validate_entry.check_repository_allowlisted("oci://harbor.corp.internal/team/tool", corporate)
+    with pytest.raises(ValidationError, match="G-03"):
+        validate_entry.check_repository_allowlisted("oci://ghcr.io/ocx-contrib/cmake", corporate)
+
+
+def test_check_repository_allowlisted_ignores_the_port_when_matching_the_host() -> None:
+    """`urlsplit().hostname` never carries the port, so a policy entry is a
+    bare host — `.github/index-policy.json` cannot (and need not) name one."""
+    validate_entry.check_repository_allowlisted(
+        "oci://harbor.corp:5000/team/tool", frozenset({"harbor.corp"})
+    )
 
 
 class _PoisonRegistry:
@@ -301,7 +328,7 @@ def test_ssrf_ordering_allowlist_rejection_precedes_every_registry_call() -> Non
     bad_repository = "oci://evil.example.com/ocx-contrib/cmake"
 
     with pytest.raises(ValidationError, match="G-03"):
-        validate_entry.check_repository_allowlisted(bad_repository)
+        validate_entry.check_repository_allowlisted(bad_repository, _ALLOWED_HOSTS)
         # Unreachable below by construction — documents that a correctly
         # ordered pipeline never gets far enough to touch `poison`.
         check_digest_in_scope(bad_repository, "sha256:" + "a" * 64, poison)

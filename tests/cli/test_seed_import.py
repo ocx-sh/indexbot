@@ -5,12 +5,32 @@ import json
 
 import pytest
 
-from indexbot.cli.seed_import import run
+from indexbot.cli import seed_import
 from indexbot.errors import ValidationError
 from indexbot.exit_codes import ExitCode
+from indexbot.ports import ClockPort, FilePort, RegistryPort
 from tests.fakes import FakeRegistry, FixedClock, InMemoryFiles
 
 _REPO = "oci://ghcr.io/ocx-contrib/cmake"
+_ALLOWED_HOSTS = frozenset({"ghcr.io"})
+
+
+def run(
+    args: argparse.Namespace,
+    *,
+    registry: RegistryPort,
+    files: FilePort,
+    clock: ClockPort,
+) -> ExitCode:
+    """`seed_import.run` bound to the shipped `{"ghcr.io"}` registry-host policy
+    (`.github/index-policy.json`) — every test in this file runs under the
+    public index's own allowlist. Tests needing a different policy call
+    `seed_import.run` directly with their own `allowed_hosts`."""
+    return seed_import.run(
+        args, registry=registry, files=files, clock=clock, allowed_hosts=_ALLOWED_HOSTS
+    )
+
+
 _BARE_MANIFEST_AMD64: dict[str, object] = {"platform": {"architecture": "amd64", "os": "linux"}}
 
 _CATALOG_MD = """---
@@ -346,7 +366,7 @@ def test_mirror_yml_comment_and_blank_lines_are_skipped() -> None:
 
 def test_repository_not_allowlisted_raises() -> None:
     files = _files(**{"kitware/cmake/mirror.yml": "repository: oci://docker.io/kitware/cmake\n"})
-    with pytest.raises(ValidationError, match="not allowlisted"):
+    with pytest.raises(ValidationError, match="allowlist"):
         run(_args(), registry=_registry(), files=files, clock=FixedClock())
 
 
@@ -450,7 +470,7 @@ def test_repository_override_bypasses_a_non_allowlisted_mirror_yml() -> None:
 
 def test_repository_override_rejected_host_raises() -> None:
     files = _files()
-    with pytest.raises(ValidationError, match="not allowlisted"):
+    with pytest.raises(ValidationError, match="allowlist"):
         run(
             _args(repository="oci://docker.io/kitware/cmake"),
             registry=_registry(),

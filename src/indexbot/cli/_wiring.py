@@ -17,15 +17,21 @@ all — crashing an unprivileged job that never sets it. Deferring
 construction to inside each `_run_*` function (only reached once
 `cli/main.py` has already resolved which single subcommand to dispatch to)
 keeps every subcommand's environment requirements independent of the others.
+
+The same call-time rule governs this deployment's registry-host policy
+(`.github/index-policy.json`, `core/policy.py`): the four subcommands that
+resolve a `repository` load and check it here, at wiring time, before any
+work; `render`/`classify-pr`/`governance-check` never touch a registry host
+and are deliberately left able to run without a policy file at all.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
-from indexbot.adapters.ghcr import GhcrRegistry
+from indexbot.adapters.ghcr import GHCR_HOST, GhcrRegistry
 from indexbot.adapters.github_api import GitHubApi
 from indexbot.adapters.local_files import LocalFiles
 from indexbot.adapters.system_clock import SystemClock
@@ -38,13 +44,15 @@ from indexbot.cli import (
     seed_import,
     validate,
 )
+from indexbot.core.policy import INDEX_POLICY_PATH, parse_index_policy
+from indexbot.errors import ValidationError
 
 if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
     from indexbot.exit_codes import ExitCode
-    from indexbot.ports import GitHubPort
+    from indexbot.ports import FilePort, GitHubPort
 
 
 def _require_env(name: str) -> str:
@@ -80,6 +88,62 @@ def _repo_root() -> Path:
     override (out of this work package's `cli/`-only path scope to change).
     """
     return Path(os.environ.get("GITHUB_WORKSPACE", "."))
+
+
+REGISTRY_ADAPTER_HOSTS: Final[frozenset[str]] = frozenset({GHCR_HOST})
+"""Every registry host some `RegistryPort` adapter can actually serve.
+
+There is exactly one adapter (`adapters/ghcr.py`) and no dispatch-by-host:
+every `_run_*` below constructs `GhcrRegistry()` unconditionally. This set is
+the honest statement of that limit, and `_registry_hosts` refuses any policy
+that exceeds it. Adding a second adapter means adding its host here *and*
+teaching the `_run_*` functions to pick one — do not extend this set on its
+own, that would re-open exactly the gap the guard exists to close."""
+
+
+def _registry_hosts(raw: bytes | None) -> frozenset[str]:
+    """This deployment's G-03 allowlist, from `.github/index-policy.json`.
+
+    `raw` is the policy file's bytes as read through whichever port the
+    calling subcommand already holds (`FilePort` for the checkout-resident
+    subcommands, `GitHubPort` at `main` for the publisher-side `announce` —
+    both return `None` when the path does not exist).
+
+    Two failure modes, both raised here at wiring time, before the subcommand
+    does any work:
+
+    - **No policy file.** Fail closed rather than fall back to a compiled-in
+      default: an index copy that never stated a policy must say so out loud,
+      not silently inherit the public index's `ghcr.io`.
+    - **A host no adapter can serve** — the important one. Allowlisting
+      `harbor.corp.internal` today would let a root pass every validation
+      check and then fail every byte fetch, which is strictly worse than the
+      honest refusal it replaces. Refused up front, naming the missing piece.
+    """
+    if raw is None:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH} not found — this index has no registry-host policy. "
+            "Every index copy commits its own (a reviewed file, never an environment "
+            'variable): {"registry_hosts": ["ghcr.io"]}'
+        )
+    hosts = parse_index_policy(raw)
+    unservable = sorted(hosts - REGISTRY_ADAPTER_HOSTS)
+    if unservable:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: no registry adapter can serve {unservable} — indexbot "
+            f"only implements {sorted(REGISTRY_ADAPTER_HOSTS)}. Allowlisting a host with no "
+            "adapter produces roots that pass validation and then cannot be fetched, so it "
+            "is refused here instead: implement a RegistryPort for it in "
+            "src/indexbot/adapters/, add its host to REGISTRY_ADAPTER_HOSTS, and dispatch "
+            "it from cli/_wiring.py first."
+        )
+    return hosts
+
+
+def _local_policy_hosts(files: FilePort) -> frozenset[str]:
+    """`_registry_hosts` over the checked-out repository (`validate`,
+    `reconcile`, `seed-import` all run inside an index checkout)."""
+    return _registry_hosts(files.read_bytes(INDEX_POLICY_PATH))
 
 
 def _github_api() -> GitHubApi:
@@ -125,24 +189,43 @@ def _run_announce(args: argparse.Namespace) -> ExitCode:
         fork_github = GitHubApi(
             owner=fork_owner, repo=fork_repo, token=_require_env("GITHUB_TOKEN")
         )
+    index_github = _index_github(args)
+    # The one subcommand whose policy does NOT come from the local checkout:
+    # a publisher runs `announce` from their own working directory (the fork
+    # commit goes over the API, there is no index checkout to read), so the
+    # governing policy is the target index's own committed file at `main` —
+    # read through the same `GitHubPort`, at the same base ref, as the root
+    # this run is about to regenerate. A publisher cannot widen it locally.
+    allowed_hosts = _registry_hosts(
+        index_github.get_file_contents(INDEX_POLICY_PATH, announce.BASE_REF)
+    )
     return announce.run(
         args,
         registry=GhcrRegistry(),
-        index_github=_index_github(args),
+        index_github=index_github,
         fork_github=fork_github,
         files=LocalFiles(root=_repo_root()),
         clock=SystemClock(),
+        allowed_hosts=allowed_hosts,
     )
 
 
 def _run_reconcile(args: argparse.Namespace) -> ExitCode:
+    files = LocalFiles(root=_repo_root())
     return reconcile.run(
-        args, files=LocalFiles(root=_repo_root()), registry=GhcrRegistry(), github=_github_api()
+        args,
+        files=files,
+        registry=GhcrRegistry(),
+        github=_github_api(),
+        allowed_hosts=_local_policy_hosts(files),
     )
 
 
 def _run_validate(args: argparse.Namespace) -> ExitCode:
-    return validate.run(args, files=LocalFiles(root=_repo_root()), registry=GhcrRegistry())
+    files = LocalFiles(root=_repo_root())
+    return validate.run(
+        args, files=files, registry=GhcrRegistry(), allowed_hosts=_local_policy_hosts(files)
+    )
 
 
 def _run_render(args: argparse.Namespace) -> ExitCode:
@@ -150,11 +233,13 @@ def _run_render(args: argparse.Namespace) -> ExitCode:
 
 
 def _run_seed_import(args: argparse.Namespace) -> ExitCode:
+    files = LocalFiles(root=_repo_root())
     return seed_import.run(
         args,
         registry=GhcrRegistry(),
-        files=LocalFiles(root=_repo_root()),
+        files=files,
         clock=SystemClock(),
+        allowed_hosts=_local_policy_hosts(files),
     )
 
 

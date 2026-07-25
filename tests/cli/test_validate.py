@@ -23,6 +23,7 @@ from indexbot.model import (
     Upstream,
     Yank,
 )
+from indexbot.ports import FilePort, RegistryPort
 from tests.fakes import FakeRegistry, InMemoryFiles
 
 _NAMESPACE = "kitware"
@@ -31,6 +32,17 @@ _PATH = f"p/{_NAMESPACE}/{_PACKAGE}.json"
 _REPOSITORY = "oci://ghcr.io/ocx-contrib/cmake"
 _NAME = f"ocx.sh/{_NAMESPACE}/{_PACKAGE}"
 _PLATFORM_DIGEST = "sha256:" + "1" * 64
+
+
+_ALLOWED_HOSTS = frozenset({"ghcr.io"})
+
+
+def _run(args: argparse.Namespace, *, files: FilePort, registry: RegistryPort) -> ExitCode:
+    """`validate.run` bound to the shipped `{"ghcr.io"}` registry-host policy
+    (`.github/index-policy.json`) — every test in this file runs under the
+    public index's own allowlist. Tests that need a different policy call
+    `validate.run` directly with their own `allowed_hosts`."""
+    return validate.run(args, files=files, registry=registry, allowed_hosts=_ALLOWED_HOSTS)
 
 
 def _cas_path(digest: str, *, ext: str = "json") -> str:
@@ -144,14 +156,14 @@ class _PoisonRegistry:
 
 def test_run_all_checks_pass_online_exits_ok(capsys: pytest.CaptureFixture[str]) -> None:
     files, registry = _valid_package()
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.OK
     assert f"{_PATH}: OK" in capsys.readouterr().err
 
 
 def test_run_offline_skips_registry_checks_and_warns(capsys: pytest.CaptureFixture[str]) -> None:
     files, _registry = _valid_package()
-    result = validate.run(_args([_PATH], offline=True), files=files, registry=_PoisonRegistry())
+    result = _run(_args([_PATH], offline=True), files=files, registry=_PoisonRegistry())
     assert result == ExitCode.OK
     err = capsys.readouterr().err
     assert f"{_PATH}: WARN - G-15 registry checks skipped (--offline)" in err
@@ -160,7 +172,7 @@ def test_run_offline_skips_registry_checks_and_warns(capsys: pytest.CaptureFixtu
 def test_run_no_tags_online_passes_and_still_probes_ownership() -> None:
     files = _build(tags={})
     registry = FakeRegistry(ownership={_REPOSITORY: "confirmed"})
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.OK
 
 
@@ -176,7 +188,7 @@ def test_run_tag_with_no_platforms_passes() -> None:
         },
         extra_files={_cas_path(observation.content_digest): object_bytes},
     )
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.OK
 
 
@@ -188,7 +200,7 @@ def test_run_desc_without_readme_or_logo_passes() -> None:
         desc=desc,
         extra_files={_cas_path(entry.content): object_bytes},
     )
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.OK
 
 
@@ -214,7 +226,7 @@ def test_run_desc_with_readme_and_logo_passes() -> None:
             _cas_path(logo_digest, ext="svg"): logo_bytes,
         },
     )
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.OK
 
 
@@ -232,14 +244,14 @@ def test_run_desc_readme_hash_mismatch_is_anomaly() -> None:
             _cas_path(readme_digest, ext="md"): b"not the readme bytes",
         },
     )
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.ANOMALY
 
 
 def test_run_ownership_unconfirmed_warns_but_passes(capsys: pytest.CaptureFixture[str]) -> None:
     files, registry = _valid_package()
     del registry.ownership[_REPOSITORY]
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.OK
     assert "WARN - ownership unconfirmed (G-15)" in capsys.readouterr().err
 
@@ -249,13 +261,13 @@ def test_run_ownership_unconfirmed_warns_but_passes(capsys: pytest.CaptureFixtur
 
 def test_run_missing_file_is_validation_failure() -> None:
     files = InMemoryFiles(files={})
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_malformed_json_is_validation_failure() -> None:
     files = InMemoryFiles(files={_PATH: b"not json"})
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -269,20 +281,20 @@ def test_run_non_canonical_root_bytes_is_validation_failure() -> None:
         "utf-8"
     )
     files = InMemoryFiles(files={_PATH: minified})
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_bad_path_shape_is_validation_failure() -> None:
     bad_path = "p/kitware.json"
     files = InMemoryFiles(files={bad_path: _build().files[_PATH]})
-    result = validate.run(_args([bad_path]), files=files, registry=FakeRegistry())
+    result = _run(_args([bad_path]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_name_path_mismatch_is_validation_failure() -> None:
     files = _build(name="ocx.sh/kitware/other-tool")
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -292,7 +304,7 @@ def test_run_name_path_mismatch_is_validation_failure() -> None:
 def test_run_upstream_javascript_scheme_never_touches_registry() -> None:
     upstream = Upstream(org="Evil", repository_url="javascript:alert(1)")
     files = _build(upstream=upstream)
-    result = validate.run(_args([_PATH]), files=files, registry=_PoisonRegistry())
+    result = _run(_args([_PATH]), files=files, registry=_PoisonRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -300,7 +312,7 @@ def test_run_upstream_https_scheme_passes(capsys: pytest.CaptureFixture[str]) ->
     upstream = Upstream(org="Kitware", repository_url="https://github.com/Kitware/CMake")
     files = _build(tags={}, upstream=upstream)
     registry = FakeRegistry(ownership={_REPOSITORY: "confirmed"})
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.OK
     assert f"{_PATH}: OK" in capsys.readouterr().err
 
@@ -314,7 +326,7 @@ def test_run_tag_observed_with_utc_offset_is_validation_failure() -> None:
             "3.28.1": TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00+02:00")
         }
     )
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -327,26 +339,26 @@ def test_run_tag_yanked_at_with_utc_offset_is_validation_failure() -> None:
             )
         }
     )
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_reserved_namespace_is_validation_failure() -> None:
     path = "p/admin/cmake.json"
     files = _build(path=path, name="ocx.sh/admin/cmake")
-    result = validate.run(_args([path]), files=files, registry=FakeRegistry())
+    result = _run(_args([path]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_repository_not_allowlisted_never_touches_registry() -> None:
     files = _build(repository="oci://evil.example.com/x/y")
-    result = validate.run(_args([_PATH]), files=files, registry=_PoisonRegistry())
+    result = _run(_args([_PATH]), files=files, registry=_PoisonRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_repository_shape_invalid_is_validation_failure() -> None:
     files = _build(repository="oci://ghcr.io")
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -354,14 +366,14 @@ def test_run_malformed_tag_digest_is_validation_failure() -> None:
     files = _build(
         tags={"3.28.1": TagEntry(content="not-a-digest", observed="2026-07-17T00:00:00Z")}
     )
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_malformed_desc_digest_is_validation_failure() -> None:
     desc = Desc(digest="not-a-digest", title="CMake", description="Build tool")
     files = _build(desc=desc)
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -373,7 +385,7 @@ def test_run_malformed_desc_readme_digest_is_validation_failure() -> None:
         readme="not-a-digest",
     )
     files = _build(desc=desc)
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -385,7 +397,7 @@ def test_run_malformed_desc_logo_digest_is_validation_failure() -> None:
         logo="not-a-digest",
     )
     files = _build(desc=desc)
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -403,21 +415,21 @@ def test_run_malformed_platform_digest_is_validation_failure_never_reaches_regis
         tags={"3.28.1": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
         extra_files={_cas_path(tag_digest): object_bytes},
     )
-    result = validate.run(_args([_PATH]), files=files, registry=_PoisonRegistry())
+    result = _run(_args([_PATH]), files=files, registry=_PoisonRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_digest_out_of_scope_is_validation_failure() -> None:
     files, _registry = _valid_package()
     registry = FakeRegistry(ownership={_REPOSITORY: "confirmed"})  # no manifests registered
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.VALIDATION_FAILURE
 
 
 def test_run_ownership_mismatch_is_validation_failure() -> None:
     files, registry = _valid_package()
     registry.ownership[_REPOSITORY] = "mismatch"
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -429,7 +441,7 @@ def test_run_claim_digest_mismatch_is_validation_failure() -> None:
     entry, object_bytes, registry = _observed_tag()
     files = _build(tags={"3.28.1": entry}, extra_files={_cas_path(entry.content): object_bytes})
     registry.manifests[(_REPOSITORY, "3.28.1")] = _bare_manifest(architecture="arm64")
-    result = validate.run(_args([_PATH]), files=files, registry=registry)
+    result = _run(_args([_PATH]), files=files, registry=registry)
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -441,7 +453,7 @@ def test_run_dangling_reference_is_anomaly() -> None:
     files = _build(
         tags={"3.28.1": TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z")}
     )
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.ANOMALY
 
 
@@ -453,7 +465,7 @@ def test_run_tampered_content_digest_is_anomaly() -> None:
         # entirely — CAS integrity violation.
         extra_files={_cas_path(claimed_digest): b'{"platforms":[]}'},
     )
-    result = validate.run(_args([_PATH]), files=files, registry=FakeRegistry())
+    result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.ANOMALY
 
 
@@ -467,7 +479,7 @@ def test_run_aggregates_multiple_files_worst_exit_code_wins() -> None:
         path=bad_path, name="ocx.sh/oven-sh/other", repository="oci://ghcr.io/ocx-contrib/bun"
     ).files[bad_path]
 
-    result = validate.run(_args([_PATH, bad_path]), files=files, registry=registry)
+    result = _run(_args([_PATH, bad_path]), files=files, registry=registry)
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -483,7 +495,7 @@ def test_run_aggregates_validation_and_anomaly_anomaly_wins(
         tags={"1.0.0": TagEntry(content="sha256:" + "c" * 64, observed="2026-07-17T00:00:00Z")},
     ).files[anomaly_path]
 
-    result = validate.run(_args([_PATH, anomaly_path]), files=files, registry=registry)
+    result = _run(_args([_PATH, anomaly_path]), files=files, registry=registry)
     assert result == ExitCode.ANOMALY
     err = capsys.readouterr().err
     assert f"{_PATH}: OK" in err
@@ -528,7 +540,7 @@ def test_add_arguments_allow_reserved_namespace_defaults_to_false() -> None:
 def test_run_default_still_blocks_brand_segment() -> None:
     path = "p/ocx/cli.json"
     files = _build(path=path, name="ocx.sh/ocx/cli")
-    result = validate.run(_args([path]), files=files, registry=FakeRegistry())
+    result = _run(_args([path]), files=files, registry=FakeRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -538,9 +550,7 @@ def test_run_allow_reserved_namespace_admits_brand_segment(
     path = "p/ocx/cli.json"
     files = _build(path=path, name="ocx.sh/ocx/cli")
     registry = FakeRegistry(ownership={_REPOSITORY: "confirmed"})
-    result = validate.run(
-        _args([path], allow_reserved_namespace=True), files=files, registry=registry
-    )
+    result = _run(_args([path], allow_reserved_namespace=True), files=files, registry=registry)
     assert result == ExitCode.OK
     assert f"{path}: --allow-reserved-namespace used" in capsys.readouterr().err
 
@@ -548,7 +558,7 @@ def test_run_allow_reserved_namespace_admits_brand_segment(
 def test_run_allow_reserved_namespace_does_not_admit_control_path_segment() -> None:
     path = "p/admin/cmake.json"
     files = _build(path=path, name="ocx.sh/admin/cmake")
-    result = validate.run(
+    result = _run(
         _args([path], allow_reserved_namespace=True), files=files, registry=FakeRegistry()
     )
     assert result == ExitCode.VALIDATION_FAILURE

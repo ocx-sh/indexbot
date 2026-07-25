@@ -12,6 +12,7 @@ from indexbot.core.validate_entry import parse_package_root, serialize_package_r
 from indexbot.errors import TransientError, ValidationError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import ManifestFetch, Owner, OwnershipProbeResult, PackageRoot, TagEntry, Yank
+from indexbot.ports import ClockPort, FilePort, GitHubPort, RegistryPort
 from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles
 
 _NS = "kitware"
@@ -20,6 +21,31 @@ _REPO = "oci://ghcr.io/ocx-contrib/cmake"
 _ROOT_PATH = f"p/{_NS}/{_PKG}.json"
 _BRANCH = f"indexbot-announce-{_NS}-{_PKG}"
 _OWNER = Owner(github="alice", github_id=1)
+_ALLOWED_HOSTS = frozenset({"ghcr.io"})
+
+
+def _run(
+    args: argparse.Namespace,
+    *,
+    registry: RegistryPort,
+    index_github: GitHubPort,
+    fork_github: GitHubPort | None,
+    files: FilePort,
+    clock: ClockPort,
+) -> ExitCode:
+    """`announce.run` bound to the shipped `{"ghcr.io"}` registry-host policy
+    (`.github/index-policy.json`) — every test in this file runs under the
+    public index's own allowlist. Tests needing a different policy call
+    `announce.run` directly with their own `allowed_hosts`."""
+    return announce.run(
+        args,
+        registry=registry,
+        index_github=index_github,
+        fork_github=fork_github,
+        files=files,
+        clock=clock,
+        allowed_hosts=_ALLOWED_HOSTS,
+    )
 
 
 @dataclass
@@ -179,7 +205,7 @@ def test_add_arguments_parses_yank_and_unyank_lists() -> None:
 
 def test_unclaimed_namespace_raises_validation_error() -> None:
     with pytest.raises(ValidationError, match="unclaimed"):
-        announce.run(
+        _run(
             _args(),
             registry=_RaisingRegistry(),
             index_github=FakeGitHub(),
@@ -193,8 +219,8 @@ def test_repository_allowlist_checked_before_any_registry_call() -> None:
     current = _root({}, repository="oci://evil.example.com/ns/pkg")
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
 
-    with pytest.raises(ValidationError, match="allowlisted"):
-        announce.run(
+    with pytest.raises(ValidationError, match="allowlist"):
+        _run(
             _args(),
             registry=_RaisingRegistry(),
             index_github=index_github,
@@ -210,7 +236,7 @@ def test_curated_tag_typo_raises_validation_error() -> None:
     registry = FakeRegistry()  # no tags/manifests registered at all
 
     with pytest.raises(ValidationError, match="does not resolve"):
-        announce.run(
+        _run(
             _args(tags="9.9.9-typo"),
             registry=registry,
             index_github=index_github,
@@ -225,7 +251,7 @@ def test_empty_tags_raises_validation_error() -> None:
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
 
     with pytest.raises(ValidationError, match="no tags given"):
-        announce.run(
+        _run(
             _args(tags="   ,  "),
             registry=FakeRegistry(),
             index_github=index_github,
@@ -240,7 +266,7 @@ def test_tags_file_missing_raises_validation_error() -> None:
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
 
     with pytest.raises(ValidationError, match="does not exist"):
-        announce.run(
+        _run(
             _args(tags=None, tags_file="missing.txt"),
             registry=FakeRegistry(),
             index_github=index_github,
@@ -262,7 +288,7 @@ def test_tags_file_comma_separated() -> None:
     )
     files = InMemoryFiles(files={"tags.txt": b"1.0.0"})
 
-    result = announce.run(
+    result = _run(
         _args(tags=None, tags_file="tags.txt", out="dist"),
         registry=registry,
         index_github=index_github,
@@ -290,7 +316,7 @@ def test_tags_file_newline_separated() -> None:
     )
     files = InMemoryFiles(files={"tags.txt": b"1.0.0\n2.0.0\n"})
 
-    result = announce.run(
+    result = _run(
         _args(tags=None, tags_file="tags.txt", out="dist"),
         registry=registry,
         index_github=index_github,
@@ -322,7 +348,7 @@ def test_out_mode_writes_root_and_cas_files_locally() -> None:
     )
     files = InMemoryFiles()
 
-    result = announce.run(
+    result = _run(
         _args(tags="3.28.1,3.29.0", out="dist"),
         registry=registry,
         index_github=index_github,
@@ -354,7 +380,7 @@ def test_out_mode_curated_set_drops_tags_not_announced() -> None:
     )
     files = InMemoryFiles()
 
-    announce.run(
+    _run(
         _args(tags="3.28.1", out="dist"),
         registry=registry,
         index_github=index_github,
@@ -393,7 +419,7 @@ def test_desc_change_writes_readme_only_when_no_logo_layer() -> None:
     )
     files = InMemoryFiles()
 
-    result = announce.run(
+    result = _run(
         _args(tags="3.28.1", out="dist"),
         registry=registry,
         index_github=index_github,
@@ -438,7 +464,7 @@ def test_desc_change_writes_png_logo_with_sniffed_extension() -> None:
     )
     files = InMemoryFiles()
 
-    announce.run(
+    _run(
         _args(tags="3.28.1", out="dist"),
         registry=registry,
         index_github=index_github,
@@ -482,7 +508,7 @@ def test_desc_change_writes_svg_logo_with_sniffed_extension() -> None:
     )
     files = InMemoryFiles()
 
-    announce.run(
+    _run(
         _args(tags="3.28.1", out="dist"),
         registry=registry,
         index_github=index_github,
@@ -509,7 +535,7 @@ def test_yank_marks_tag_yanked() -> None:
     )
     files = InMemoryFiles()
 
-    announce.run(
+    _run(
         _args(tags="3.28.1", out="dist", yank=["3.28.1"], yank_reason="cve-2026-0001"),
         registry=registry,
         index_github=index_github,
@@ -541,7 +567,7 @@ def test_unyank_clears_existing_marker() -> None:
     )
     files = InMemoryFiles()
 
-    announce.run(
+    _run(
         _args(tags="3.28.1", out="dist", unyank=["3.28.1"]),
         registry=registry,
         index_github=index_github,
@@ -563,7 +589,7 @@ def test_yank_tag_not_in_curated_set_raises() -> None:
     )
 
     with pytest.raises(ValidationError, match="not in the curated tag set"):
-        announce.run(
+        _run(
             _args(tags="3.28.1", out="dist", yank=["9.9.9"]),
             registry=registry,
             index_github=index_github,
@@ -582,7 +608,7 @@ def test_unyank_tag_not_in_curated_set_raises() -> None:
     )
 
     with pytest.raises(ValidationError, match="not in the curated tag set"):
-        announce.run(
+        _run(
             _args(tags="3.28.1", out="dist", unyank=["9.9.9"]),
             registry=registry,
             index_github=index_github,
@@ -601,7 +627,7 @@ def test_same_tag_in_yank_and_unyank_raises() -> None:
     )
 
     with pytest.raises(ValidationError, match="both --yank and --unyank"):
-        announce.run(
+        _run(
             _args(tags="3.28.1", out="dist", yank=["3.28.1"], unyank=["3.28.1"]),
             registry=registry,
             index_github=index_github,
@@ -626,7 +652,7 @@ def test_fork_mode_commits_to_fork_and_opens_pr_against_index_repo() -> None:
         tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
     )
 
-    result = announce.run(
+    result = _run(
         _args(tags="3.28.1", out=None, fork="alice/index"),
         registry=registry,
         index_github=index_github,
@@ -654,7 +680,7 @@ def test_fork_mode_reuses_existing_announce_branch_as_commit_base() -> None:
     # If base_sha were sourced from "main" instead of the already-open
     # branch, FakeGitHub.commit_files would raise TransientError (stale
     # base) — reaching ExitCode.OK proves the existing branch was reused.
-    result = announce.run(
+    result = _run(
         _args(tags="3.28.1", out=None, fork="alice/index"),
         registry=registry,
         index_github=index_github,
@@ -676,7 +702,7 @@ def test_fork_mode_missing_base_ref_raises_validation_error() -> None:
     )
 
     with pytest.raises(ValidationError, match="main"):
-        announce.run(
+        _run(
             _args(tags="3.28.1", out=None, fork="alice/index"),
             registry=registry,
             index_github=index_github,
@@ -695,7 +721,7 @@ def test_fork_mode_never_writes_to_index_repo_files() -> None:
         tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
     )
 
-    announce.run(
+    _run(
         _args(tags="3.28.1", out=None, fork="alice/index"),
         registry=registry,
         index_github=index_github,
@@ -726,7 +752,7 @@ def test_unchanged_out_mode_short_circuits_without_writing(
     files = _NoWriteFiles()  # write_bytes raises if the short-circuit fails to fire
 
     # A fresh clock instant that must NOT churn the carried-over observed ts.
-    result = announce.run(
+    result = _run(
         _args(tags="3.28.1", out="dist"),
         registry=registry,
         index_github=index_github,
@@ -752,7 +778,7 @@ def test_unchanged_fork_mode_short_circuits_without_pr(
         tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
     )
 
-    result = announce.run(
+    result = _run(
         _args(tags="3.28.1", out=None, fork="alice/index"),
         registry=registry,
         index_github=index_github,
@@ -779,7 +805,7 @@ def test_changed_tag_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None:
         tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(new_manifest)}
     )
 
-    result = announce.run(
+    result = _run(
         _args(tags="3.28.1", out=None, fork="alice/index"),
         registry=registry,
         index_github=index_github,
@@ -823,7 +849,7 @@ def test_changed_desc_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None
         blobs={(_REPO, "sha256:" + "e" * 64): readme_bytes},
     )
 
-    result = announce.run(
+    result = _run(
         _args(tags="3.28.1", out=None, fork="alice/index"),
         registry=registry,
         index_github=index_github,

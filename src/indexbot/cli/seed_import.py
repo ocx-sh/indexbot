@@ -20,11 +20,12 @@ Inputs, all read via `FilePort` (never a bare filesystem call):
   dependency declared in `pyproject.toml`, CONTRACTS.md §12/§13 open question 5)
   for the physical repository, either a flat `repository:` key or the nested
   `target: {registry:, repository:}` mapping real `ocx-contrib` mirrors emit
-  today (`_resolve_repository`) — a `target.registry` that isn't on
-  `REPOSITORY_HOST_ALLOWLIST` (e.g. the legacy `ocx.sh` registry mirror bots
-  push to pending the human-gated M-1 `ghcr.io` republish) is a hard
-  `ValidationError`, never silently substituted. `--repository` overrides
-  either shape once the real physical repository exists.
+  today (`_resolve_repository`) — a `target.registry` that isn't on this
+  deployment's registry-host allowlist (`core/policy.py`; e.g. the legacy
+  `ocx.sh` registry the mirror bots push to pending the human-gated M-1
+  `ghcr.io` republish) is a hard `ValidationError`, never silently
+  substituted. `--repository` overrides either shape once the real physical
+  repository exists.
 - `--namespace`/`--package`, or derived from `--catalog-md`'s path (its parent
   two path segments, e.g. `seeds/kitware/cmake/CATALOG.md` -> `kitware/cmake`).
 - `--owner-github`/`--owner-github-id` and optional `--upstream-*`: **not** in
@@ -53,7 +54,6 @@ from typing import TYPE_CHECKING, Final, cast
 
 from indexbot.core.observe import observe
 from indexbot.core.validate_entry import (
-    REPOSITORY_HOST_ALLOWLIST,
     check_namespace_not_reserved,
     check_repository_allowlisted,
     check_repository_shape,
@@ -167,14 +167,17 @@ def _parse_mirror_yml(raw: str, *, source: str) -> dict[str, str | dict[str, str
     return fields
 
 
-def _resolve_repository(fields: dict[str, str | dict[str, str]], *, source: str) -> str:
+def _resolve_repository(
+    fields: dict[str, str | dict[str, str]], *, source: str, allowed_hosts: frozenset[str]
+) -> str:
     """The physical `oci://<host>/<path>` repository from a parsed
     `mirror.yml` — the flat `repository:` key if present, else the nested
     `target: {registry:, repository:}` mapping real `ocx-contrib` mirrors
     emit today.
 
-    A nested `target.registry` not on `REPOSITORY_HOST_ALLOWLIST` (e.g. the
-    legacy `ocx.sh` registry mirror bots push to today) is a hard failure,
+    A nested `target.registry` not on `allowed_hosts` — this deployment's
+    committed registry-host policy (`core/policy.py`), e.g. the legacy
+    `ocx.sh` registry mirror bots push to today — is a hard failure,
     never silently substituted with a guessed `ghcr.io/ocx-contrib/<pkg>`
     URI — the ghcr.io physical layer only exists once the human-gated M-1
     republish (`ocx-mirror` scope) has actually run for this package. Pass
@@ -193,10 +196,10 @@ def _resolve_repository(fields: dict[str, str | dict[str, str]], *, source: str)
             raise ValidationError(
                 f"{source}: 'target' mapping missing required 'registry'/'repository' keys"
             )
-        if registry not in REPOSITORY_HOST_ALLOWLIST:
+        if registry not in allowed_hosts:
             raise ValidationError(
                 f"{source}: mirror target registry {registry!r} is not an allowlisted "
-                f"physical registry ({sorted(REPOSITORY_HOST_ALLOWLIST)!r}) — the index "
+                f"physical registry ({sorted(allowed_hosts)!r}) — the index "
                 "requires the physical repository to live on an allowlisted registry, "
                 "which this package has not been republished to yet (pending the "
                 "human-gated M-1 ghcr.io republish); pass --repository once it has been"
@@ -274,6 +277,7 @@ def run(
     registry: RegistryPort,
     files: FilePort,
     clock: ClockPort,
+    allowed_hosts: frozenset[str],
 ) -> ExitCode:
     """Import one brand-new package from local seed files plus a live registry observe.
 
@@ -342,11 +346,13 @@ def run(
         repository = repository_override
     else:
         mirror_fields = _parse_mirror_yml(mirror_raw, source=mirror_yml_path)
-        repository = _resolve_repository(mirror_fields, source=mirror_yml_path)
+        repository = _resolve_repository(
+            mirror_fields, source=mirror_yml_path, allowed_hosts=allowed_hosts
+        )
 
     # G-03/SSRF ordering: both checks are pure string parsing (no RegistryPort
     # call inside either) and must run before `observe()` below.
-    check_repository_allowlisted(repository)
+    check_repository_allowlisted(repository, allowed_hosts)
     check_repository_shape(repository)
 
     # (bytes, digest, extension) as one unit — never tracked as three separately
