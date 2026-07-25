@@ -32,13 +32,37 @@ CONTRACTS.md's `observe()` docstring — flagged in open_questions rather than
 silently assumed.**"""
 
 
+_SOURCE_ANNOTATION: Final[str] = "org.opencontainers.image.source"
+"""Manifest-level annotation carrying the repository whose CI produced the
+build (`ocx package push --annotation`). Read the same way `core/desc.py`
+reads `__ocx.desc`'s title/keywords annotations, and `adapters/ghcr.py`'s
+`_embedded_identifier` reads `sh.ocx.name`."""
+
+_SOURCE_SCHEME: Final[str] = "https://"
+"""Only scheme accepted from `_SOURCE_ANNOTATION`. The value is
+publisher-controlled and ends up as an `href` on a public page
+(`site/.vitepress/theme/components/detail/MetaRail.vue`), so anything else —
+`javascript:`, `data:`, plain `http:` — is dropped at ingestion rather than
+carried into a root that `schema/root.schema.json`'s `source` pattern would
+then reject at CI time. Mirrors that pattern exactly; keep the two in step."""
+
+
 @dataclass(frozen=True, slots=True)
 class Observation:
-    """One tag's freshly observed state. Input to regenerate/anomaly."""
+    """One tag's freshly observed state. Input to regenerate/anomaly.
+
+    `source` is this tag's manifest-level `org.opencontainers.image.source`
+    annotation, or `None` when absent, non-string, or not `https://`-scheme
+    (see `_SOURCE_SCHEME`). Deliberately *not* part of `object` — the
+    `ObservationObject` is content-addressed and its bytes are a frozen wire
+    contract (ADR-1 D4); a publisher re-annotating a manifest must not churn
+    every tag's CAS digest.
+    """
 
     tag: str
     content_digest: str
     object: ObservationObject
+    source: str | None = None
 
 
 def _parse_platform(raw: _Manifest) -> OciPlatform:
@@ -103,6 +127,23 @@ def _content_digest(obj: ObservationObject) -> str:
     return f"sha256:{hashlib.sha256(serialize_observation_object(obj)).hexdigest()}"
 
 
+def _source_annotation(raw: _Manifest) -> str | None:
+    """`_SOURCE_ANNOTATION`'s value from a fetched manifest, or `None`.
+
+    Same read shape as `adapters/ghcr.py`'s `_embedded_identifier` (a
+    non-string annotation value is a malformed manifest, treated as absent),
+    plus the `_SOURCE_SCHEME` filter — the one place registry-controlled URL
+    text enters this index, so it is also the one place to reject it.
+    """
+    annotations = raw.get("annotations")
+    if not isinstance(annotations, dict):
+        return None
+    value = cast("dict[str, object]", annotations).get(_SOURCE_ANNOTATION)
+    if not isinstance(value, str) or not value.startswith(_SOURCE_SCHEME):
+        return None
+    return value
+
+
 def observe_one_tag(repository: str, tag: str, registry: RegistryPort) -> Observation | None:
     """One tag's freshly observed state, or `None` if `tag` no longer exists
     on `repository` (a real 404 — fetched but vanished, or never existed at
@@ -115,7 +156,11 @@ def observe_one_tag(repository: str, tag: str, registry: RegistryPort) -> Observ
     one `PlatformEntry.digest` is `ManifestFetch.digest` itself — the
     adapter-computed, content-derived registry digest (ADR-1 D5's
     verifiability chain; `ports.py`'s digest doctrine), never a locally
-    synthesized stand-in. `platforms[]` is sorted and digested per §1.
+    synthesized stand-in. `platforms[]` is sorted and digested per §1;
+    `Observation.source` carries this manifest's
+    `org.opencontainers.image.source` annotation (see `_source_annotation`),
+    which `core/regenerate.py` folds into the root for the latest version's
+    tag only.
 
     Extracted from `observe()`'s per-tag body (fork-PR announce revamp) so
     `core/verify_claims.py` (re-derive one *claimed* tag from registry truth)
@@ -135,7 +180,12 @@ def observe_one_tag(repository: str, tag: str, registry: RegistryPort) -> Observ
         else _platforms_from_bare(raw, fetch.digest)
     )
     obj = ObservationObject(platforms=tuple(sorted(platforms, key=platform_sort_key)))
-    return Observation(tag=tag, content_digest=_content_digest(obj), object=obj)
+    return Observation(
+        tag=tag,
+        content_digest=_content_digest(obj),
+        object=obj,
+        source=_source_annotation(raw),
+    )
 
 
 def observe(repository: str, registry: RegistryPort) -> tuple[Observation, ...]:

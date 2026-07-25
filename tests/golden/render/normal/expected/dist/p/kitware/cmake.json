@@ -21,6 +21,7 @@
     "readme": "sha256:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
     "logo": "sha256:llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll"
   },
+  "source": "https://github.com/ocx-contrib/mirror-cmake",
   "tags": {
     "1.0.0": {
       "content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",

@@ -11,12 +11,34 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from indexbot.core.version_order import find_latest_version
 from indexbot.model import PackageRoot, TagEntry
 
 if TYPE_CHECKING:
     from indexbot.core.observe import Observation
     from indexbot.model import Desc
     from indexbot.ports import ClockPort
+
+
+def _source_of_latest_version(
+    tags: dict[str, TagEntry], observations: tuple[Observation, ...]
+) -> str | None:
+    """`root.source` — the `org.opencontainers.image.source` annotation of
+    the *latest version* tag's observation (`core/observe.py`), or `None`.
+
+    One root-level value rather than one per tag: provenance barely varies
+    across a package's tags, and `tagEntry` is the hottest wire object.
+    `find_latest_version` (the same predicate `/data/catalog/catalog.json`'s
+    `latestVersion` uses) picks the tag; a package whose observed set carries
+    no plain version tag at all (only `latest`, or only variant-prefixed
+    tags) therefore has no `source`, which is why the field is optional in
+    `schema/root.schema.json` rather than merely nullable.
+
+    Re-derived wholesale from `observations` on every run, like `tags` — a
+    stale annotation never survives an announce that no longer sees it.
+    """
+    latest_tag = find_latest_version(tags)
+    return next((obs.source for obs in observations if obs.tag == latest_tag), None)
 
 
 def regenerate(
@@ -42,6 +64,11 @@ def regenerate(
     untouched (human-governed, G-05) even if that tag's content also
     changed this run. A tag present in `current.tags` but absent from
     `observations` (removed upstream) is dropped.
+
+    `source`: re-derived from `observations`, never carried over from
+    `current` — see `_source_of_latest_version`. It is the one non-`tags`
+    field this function computes rather than copies, because (like `desc`,
+    which the caller supplies) it is registry-derived, not human-governed.
     """
     new_tags: dict[str, TagEntry] = {}
     for observation in observations:
@@ -64,5 +91,6 @@ def regenerate(
         desc=desc,
         upstream=current.upstream,
         superseded_by=current.superseded_by,
+        source=_source_of_latest_version(new_tags, observations),
         tags=new_tags,
     )

@@ -100,7 +100,11 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
     structural invariant, not a governance-vs-machine distinction. `desc` is
     deliberately not checked here either — it's bot-derived from the
     registry's `__ocx.desc` tag (`core/desc.py`), not human-authored, so it
-    stays in the machine lane alongside `tags`.
+    stays in the machine lane alongside `tags`. Same for `source`
+    (`core/regenerate.py`, from the latest version's
+    `org.opencontainers.image.source` annotation): a refresh that only moves
+    tags forward normally moves `source` with them, and classifying that as
+    a governance edit would push every such PR into the human lane.
     """
     if before is None:
         return "new-package"

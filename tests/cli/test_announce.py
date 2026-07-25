@@ -394,6 +394,64 @@ def test_out_mode_curated_set_drops_tags_not_announced() -> None:
     assert "3.28.1" in committed_root.tags
 
 
+def test_out_mode_records_source_annotation_of_the_latest_version() -> None:
+    # End-to-end publisher path for `org.opencontainers.image.source`:
+    # registry annotation -> `core/observe.py` -> `core/regenerate.py` ->
+    # the committed root's `source`. The older tag's annotation and the
+    # hostile-scheme one on `latest` must both lose to 3.29.0's.
+    source = "https://github.com/ocx-contrib/mirror-cmake"
+    current = _root({})
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    manifests: dict[tuple[str, str], dict[str, object]] = {
+        (_REPO, "3.28.1"): _manifest("sha256:" + "1" * 64)
+        | {"annotations": {"org.opencontainers.image.source": "https://github.com/old/repo"}},
+        (_REPO, "3.29.0"): _manifest("sha256:" + "2" * 64)
+        | {"annotations": {"org.opencontainers.image.source": source}},
+        (_REPO, "latest"): _manifest("sha256:" + "3" * 64)
+        | {"annotations": {"org.opencontainers.image.source": "javascript:alert(1)"}},
+    }
+    registry = FakeRegistry(tags={_REPO: [tag for _, tag in manifests]}, manifests=manifests)
+    files = InMemoryFiles()
+
+    result = _run(
+        _args(tags="3.28.1,3.29.0,latest", out="dist"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=None,
+        files=files,
+        clock=FixedClock(),
+    )
+
+    assert result == ExitCode.OK
+    committed_root = parse_package_root(files.read_bytes(f"dist/{_ROOT_PATH}"))  # type: ignore[arg-type]
+    assert committed_root.source == source
+
+
+def test_out_mode_omits_source_when_no_tag_carries_the_annotation() -> None:
+    current = _root({})
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]},
+        manifests={(_REPO, "3.28.1"): _manifest("sha256:" + "1" * 64)},
+    )
+    files = InMemoryFiles()
+
+    _run(
+        _args(tags="3.28.1", out="dist"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=None,
+        files=files,
+        clock=FixedClock(),
+    )
+
+    raw = files.read_bytes(f"dist/{_ROOT_PATH}")
+    assert raw is not None
+    # Omitted, not null — the schema's optional-field contract.
+    assert b"source" not in raw
+    assert parse_package_root(raw).source is None
+
+
 # --- desc regeneration: readme + logo CAS writes, extension sniffing -------
 
 

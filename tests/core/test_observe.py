@@ -271,3 +271,69 @@ def test_observe_one_tag_propagates_transient_error_uncaught() -> None:
 
     with pytest.raises(TransientError):
         observe_one_tag(_REPO, "3.28.1", _RaisingOnGetManifest())
+
+
+# --- org.opencontainers.image.source annotation (Observation.source) --------
+
+
+def _observe_with_annotations(annotations: object) -> str | None:
+    manifest: dict[str, object] = {
+        "platform": {"architecture": "amd64", "os": "linux"},
+        "annotations": annotations,
+    }
+    registry = FakeRegistry(manifests={(_REPO, "3.28.1"): manifest})
+    observation = observe_one_tag(_REPO, "3.28.1", registry)
+    assert observation is not None
+    return observation.source
+
+
+def test_observe_one_tag_reads_https_source_annotation() -> None:
+    source = "https://github.com/ocx-sh/mirror-cmake"
+    assert _observe_with_annotations({"org.opencontainers.image.source": source}) == source
+
+
+def test_observe_one_tag_drops_non_https_source_annotation() -> None:
+    # The publisher controls this annotation and the value lands as an href
+    # on a public page — a javascript:/data:/http: value is dropped at
+    # ingestion, never written into a root (where schema/root.schema.json's
+    # `source` pattern would reject it at CI time anyway).
+    for hostile in ("javascript:alert(1)", "data:text/html,<script>", "http://insecure.test"):
+        assert _observe_with_annotations({"org.opencontainers.image.source": hostile}) is None
+
+
+def test_observe_one_tag_source_none_for_non_string_or_missing_annotation() -> None:
+    assert _observe_with_annotations({"org.opencontainers.image.source": 42}) is None
+    assert _observe_with_annotations({"other": "https://example.test"}) is None
+    assert _observe_with_annotations("not-an-object") is None
+
+
+def test_observe_one_tag_source_none_when_manifest_has_no_annotations() -> None:
+    registry = FakeRegistry(
+        manifests={(_REPO, "3.28.1"): {"platform": {"architecture": "amd64", "os": "linux"}}}
+    )
+    observation = observe_one_tag(_REPO, "3.28.1", registry)
+    assert observation is not None
+    assert observation.source is None
+
+
+def test_observe_one_tag_source_annotation_does_not_change_content_digest() -> None:
+    # `source` rides on `Observation`, never inside the content-addressed
+    # `ObservationObject` — re-annotating an image index must not churn CAS.
+    # An *index* manifest, deliberately: a bare manifest's platform digest is
+    # the manifest's own content digest, which any body edit moves by
+    # definition (see the bare-manifest digest test above).
+    plain: dict[str, object] = {
+        "manifests": [{"platform": {"architecture": "amd64", "os": "linux"}, "digest": _DIGEST_1}]
+    }
+    annotated: dict[str, object] = {
+        "manifests": [{"platform": {"architecture": "amd64", "os": "linux"}, "digest": _DIGEST_1}],
+        "annotations": {"org.opencontainers.image.source": "https://github.com/ocx-sh/index"},
+    }
+    plain_obs = observe_one_tag(_REPO, "3.28.1", FakeRegistry(manifests={(_REPO, "3.28.1"): plain}))
+    annotated_obs = observe_one_tag(
+        _REPO, "3.28.1", FakeRegistry(manifests={(_REPO, "3.28.1"): annotated})
+    )
+    assert plain_obs is not None
+    assert annotated_obs is not None
+    assert plain_obs.object == annotated_obs.object
+    assert plain_obs.content_digest == annotated_obs.content_digest

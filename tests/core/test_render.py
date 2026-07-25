@@ -68,6 +68,8 @@ def _root_raw(root: PackageRoot) -> bytes:
         if root.desc.logo is not None:
             desc_dict["logo"] = root.desc.logo
         payload["desc"] = desc_dict
+    if root.source is not None:
+        payload["source"] = root.source
     tags_dict: dict[str, object] = {}
     for tag, entry in root.tags.items():
         tag_dict: dict[str, object] = {"content": entry.content, "observed": entry.observed}
@@ -87,6 +89,7 @@ def _package(
     tags: dict[str, TagEntry],
     desc: Desc | None,
     content_by_digest: dict[str, bytes],
+    source: str | None = None,
 ) -> SourcePackage:
     root = PackageRoot(
         name=f"ocx.sh/{namespace}/{package}",
@@ -96,6 +99,7 @@ def _package(
         deprecated_message=None,
         created=created,
         desc=desc,
+        source=source,
         tags=tags,
     )
     return SourcePackage(
@@ -145,6 +149,11 @@ def _case_normal() -> list[SourcePackage]:
             tags=tags,
             desc=desc,
             content_by_digest=content_by_digest,
+            # The one case carrying `source` — proves the field rides through
+            # the /p/** wire mirror verbatim (and into c/index.json's root
+            # digest) without leaking into the catalog view-model, which has
+            # no repository column to put it in.
+            source="https://github.com/ocx-contrib/mirror-cmake",
         )
     ]
 

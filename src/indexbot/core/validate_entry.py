@@ -487,6 +487,8 @@ def serialize_package_root(root: PackageRoot) -> bytes:
         data["upstream"] = _upstream_to_dict(root.upstream)
     if root.superseded_by is not None:
         data["superseded_by"] = root.superseded_by
+    if root.source is not None:
+        data["source"] = root.source
     data["tags"] = {tag: _tag_entry_to_dict(entry) for tag, entry in root.tags.items()}
     text = json.dumps(data, indent=2, sort_keys=False) + "\n"
     return text.encode("utf-8")
@@ -516,6 +518,7 @@ def parse_package_root(raw: bytes) -> PackageRoot:
         upstream_raw = data.get("upstream")
         upstream = None if upstream_raw is None else _upstream_from_dict(upstream_raw)
         superseded_by = data.get("superseded_by")
+        source = data.get("source")
         tags = {name: _tag_entry_from_dict(t) for name, t in data["tags"].items()}
         return PackageRoot(
             name=data["name"],
@@ -527,6 +530,7 @@ def parse_package_root(raw: bytes) -> PackageRoot:
             desc=desc,
             upstream=upstream,
             superseded_by=superseded_by,
+            source=source,
             tags=tags,
         )
     except (KeyError, TypeError, AttributeError) as exc:

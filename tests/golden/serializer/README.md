@@ -48,7 +48,11 @@ output. Regenerate via the procedure below instead.
 This is the exact procedure used to generate every fixture currently in this
 directory (`minimal.json`/`full-fields.json` exercise the root serializer's
 omit-when-`None` fields, the `desc: null` vs. omitted-key distinction, a
-yanked tag, and a non-ASCII `desc.title` — `\uXXXX`-escape coverage). The two
+yanked tag, and a non-ASCII `desc.title` — `\uXXXX`-escape coverage;
+`with-source.json` adds the optional `source` field, positioned between
+`superseded_by` and `tags`, alongside an `upstream.repository_url` naming a
+*different* repository — the mirror-vs-vendor distinction the two fields
+carry). The two
 observation vectors exercise the observation serializer independently of the
 root one: the multi-platform vector covers the tuple-based `platform_sort_key`
 (two `linux/amd64` platforms differing only in `os_features`, libc.glibc vs.

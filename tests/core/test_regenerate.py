@@ -104,3 +104,64 @@ def test_regenerate_idempotent_run_twice_no_timestamp_churn() -> None:
     second = regenerate(first, observations, None, FixedClock(fixed="T2"))
     assert second.tags["3.28.1"].observed == "T1"
     assert second == first
+
+
+# --- root.source (org.opencontainers.image.source, latest version only) -----
+
+_SOURCE = "https://github.com/ocx-sh/mirror-cmake"
+
+
+def _sourced(tag: str, digest: str, source: str | None) -> Observation:
+    return Observation(
+        tag=tag,
+        content_digest=digest,
+        object=_observation(tag, digest).object,
+        source=source,
+    )
+
+
+def test_regenerate_takes_source_from_the_latest_version_tag() -> None:
+    current = _root({})
+    result = regenerate(
+        current,
+        (
+            _sourced("3.28.1", _DIGEST_A, _SOURCE),
+            _sourced("latest", _DIGEST_A, "https://github.com/wrong/repo"),
+            _sourced("3.27.0", _DIGEST_B, "https://github.com/older/repo"),
+        ),
+        None,
+        FixedClock(fixed="T1"),
+    )
+    assert result.source == _SOURCE
+
+
+def test_regenerate_source_none_without_a_plain_version_tag() -> None:
+    # `find_latest_version` skips "latest" and variant-prefixed tags, so a
+    # package that announces none of the plain version shapes carries no
+    # source at all (the field is optional, not nullable-and-required).
+    current = _root({})
+    result = regenerate(
+        current,
+        (_sourced("latest", _DIGEST_A, _SOURCE), _sourced("musl-1.2.3", _DIGEST_B, _SOURCE)),
+        None,
+        FixedClock(fixed="T1"),
+    )
+    assert result.source is None
+
+
+def test_regenerate_source_none_when_latest_version_carries_no_annotation() -> None:
+    current = _root({})
+    result = regenerate(
+        current, (_sourced("3.28.1", _DIGEST_A, None),), None, FixedClock(fixed="T1")
+    )
+    assert result.source is None
+
+
+def test_regenerate_rederives_source_never_carries_it_over() -> None:
+    # Publisher removed the annotation upstream -> the next announce drops
+    # the claim rather than preserving a stale one.
+    observations = (_sourced("3.28.1", _DIGEST_A, _SOURCE),)
+    first = regenerate(_root({}), observations, None, FixedClock(fixed="T1"))
+    assert first.source == _SOURCE
+    second = regenerate(first, (_sourced("3.28.1", _DIGEST_A, None),), None, FixedClock(fixed="T2"))
+    assert second.source is None

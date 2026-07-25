@@ -212,6 +212,14 @@ class PackageRoot:
     has not been superseded (schema forbids `null` there, mirroring
     `upstream`'s omit-when-absent contract). When set, it names the
     successor package's `<namespace>/<package>` id.
+
+    `source` defaults to `None` — the `org.opencontainers.image.source`
+    annotation of the latest version's observed manifest
+    (`core/observe.py` -> `core/regenerate.py`), i.e. the repository whose CI
+    produced the builds. Bot-derived, same omit-when-absent contract as
+    `superseded_by`. Distinct from `upstream.repository_url`, which is
+    human-governed vendor attribution — for a mirror the two name different
+    repositories on purpose.
     """
 
     name: str
@@ -223,4 +231,5 @@ class PackageRoot:
     desc: Desc | None
     upstream: Upstream | None = None
     superseded_by: str | None = None
+    source: str | None = None
     tags: dict[str, TagEntry] = field(default_factory=_empty_tags)
