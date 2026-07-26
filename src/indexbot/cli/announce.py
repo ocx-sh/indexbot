@@ -45,7 +45,6 @@ from indexbot.core.validate_entry import (
     check_repository_allowlisted,
     parse_package_id,
     parse_package_root,
-    serialize_observation_object,
     serialize_package_root,
 )
 from indexbot.errors import ValidationError
@@ -218,9 +217,7 @@ def run(
 
     files_by_path: dict[str, bytes] = {root_path: serialize_package_root(target)}
     for observation in observations:
-        files_by_path[_cas_path(package_id, observation.content_digest, "json")] = (
-            serialize_observation_object(observation.object)
-        )
+        files_by_path[_cas_path(package_id, observation.content_digest, "json")] = observation.raw
     if desc_update is not None:
         # `check_desc_change` guarantees `readme_bytes`/`desc.readme` are
         # never `None` when it returns a `DescUpdate` (raises `ValueError`
@@ -235,7 +232,7 @@ def run(
             ] = desc_update.logo_bytes
 
     # Unchanged => no-op: a byte-identical root already implies no new
-    # observation CAS (any tag-map/digest change would change the root
+    # image-index CAS (any tag-map/digest change would change the root
     # bytes), and `desc_update is None` rules out any new desc/readme/logo
     # CAS — so byte-equality plus no desc change means there is nothing to
     # write. Skip before either the `--out` or `--fork` write branch. Reuse

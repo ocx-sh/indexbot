@@ -60,7 +60,6 @@ from indexbot.core.validate_entry import (
     check_upstream_repository_url_scheme,
     parse_digest,
     parse_package_id,
-    serialize_observation_object,
     serialize_package_root,
 )
 from indexbot.errors import ValidationError
@@ -423,7 +422,7 @@ def run(
         written_object_digests.add(observation.content_digest)
         files.write_bytes(
             _cas_path(package_dir, observation.content_digest, "json"),
-            serialize_observation_object(observation.object),
+            observation.raw,
         )
 
     files.write_bytes(_cas_path(package_dir, readme_digest, "md"), readme_bytes)

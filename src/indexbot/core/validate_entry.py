@@ -1,16 +1,17 @@
-"""Schema-adjacent semantic checks on a committed `PackageRoot` / `ObservationObject`.
+"""Schema-adjacent semantic checks on a committed `PackageRoot` / CAS object.
 
 Everything JSON Schema *can* express (`schema/root.schema.json`,
-`schema/observation-object.schema.json`) runs via `check-jsonschema`, never
+`schema/image-index.schema.json`) runs via `check-jsonschema`, never
 imported here (ADR-4 BD-1). This module owns the checks a schema cannot
 express: path<->name derivation (G-02), repository host allowlisting (G-03,
 checked before any network intent — SSRF ordering; the allowlist itself is
 this deployment's committed policy, `core/policy.py`, passed in by
 `cli/_wiring.py` rather than hardcoded here), reserved-namespace
-rejection (ADR-2 ND-4), digest-hex `fullmatch` before any path join,
-content-digest self-consistency (CAS integrity), dangling-reference
-detection, the `PackageRoot`/`ObservationObject` <-> `dict` codec every
-other module reuses (CONTRACTS.md §1/§5.6) rather than hand-rolling a second
+rejection (ADR-2 ND-4), reserved-tag rejection (D7 — the one implementation
+`core/observe.py`'s sweep exclusion imports rather than restating), digest-hex
+`fullmatch` before any path join, content-digest self-consistency (CAS
+integrity), dangling-reference detection, the `PackageRoot` <-> `dict` codec
+every other module reuses (CONTRACTS.md §5.6) rather than hand-rolling a second
 encoder, and `cas_relpath` — the one CAS relative-path builder every writer
 (`core/render.py`, `cli/reconcile.py`) reuses rather than hand-rolling the
 `p/<ns>/<pkg>/o/sha256/<hex>.<ext>` shape a second time (relocated here from
@@ -43,12 +44,9 @@ from indexbot.core.policy import INDEX_POLICY_PATH
 from indexbot.errors import AnomalyError, ValidationError
 from indexbot.model import (
     Desc,
-    ObservationObject,
-    OciPlatform,
     Owner,
     PackageId,
     PackageRoot,
-    PlatformEntry,
     TagEntry,
     Upstream,
     Yank,
@@ -281,6 +279,59 @@ def check_namespace_not_reserved(package_id: PackageId, *, allow_reserved: bool 
         raise ValidationError(f"package {package_id.package!r} is reserved (ADR-2 ND-4)")
 
 
+_RESERVED_TAG_PREFIX: Final[str] = "__ocx"
+"""Case-insensitive prefix OCX reserves for its own metadata tags on a
+physical registry (`__ocx.desc` today). Reserved by *prefix*, not by exact
+name — `__ocxfoo` is reserved too, so a future metadata tag never needs a
+second governance decision."""
+
+_CANONICAL_TAG_RE: Final[re.Pattern[str]] = re.compile(
+    r"sha256\.[0-9a-fA-F]{64}|sha384\.[0-9a-fA-F]{96}|sha512\.[0-9a-fA-F]{128}"
+)
+"""`<algo>.<hex>` — the tag form `ocx package push` writes for every published
+manifest so a digest reference is fetchable by tag. Hex is matched
+case-insensitively even though OCX only ever emits lowercase: a hand-authored
+PR is untrusted input, and the client's digest parser accepts either case.
+The per-algorithm hex length is exact, so `sha384.<64 hex>` is *not* reserved
+— a prefix-only check would over-reject a legitimate tag."""
+
+
+def is_reserved_tag(tag: str) -> bool:
+    """D7: is `tag` a name this index refuses to record?
+
+    Two classes, both of which a physical registry legitimately carries and
+    neither of which is package content: OCX's own `__ocx*` metadata tags,
+    and the canonical `<algo>.<hex>` tags `ocx package push` writes.
+
+    The one implementation of this rule. `check_no_reserved_tags` rejects a
+    hand-authored root carrying such a tag; `core/observe.py`'s sweep imports
+    this same predicate to exclude them instead of refusing the whole
+    repository. Two copies of the rule would drift, and the drift would be
+    invisible until a published package stopped reconciling.
+    """
+    return (
+        tag.lower().startswith(_RESERVED_TAG_PREFIX) or _CANONICAL_TAG_RE.fullmatch(tag) is not None
+    )
+
+
+def check_no_reserved_tags(root: PackageRoot) -> None:
+    """D7 at the index layer: no `tags` key may be a reserved tag name.
+
+    This is the layer a hand-authored PR passes through, and the only one —
+    `schema/root.schema.json`'s `propertyNames` documents the same intent but
+    cannot express the full rule. Every offending key is listed, not just the
+    first, so one PR round-trip fixes them all.
+    """
+    reserved = sorted(tag for tag in root.tags if is_reserved_tag(tag))
+    if reserved:
+        raise ValidationError(
+            "reserved tag name(s) in tags: "
+            + ", ".join(repr(tag) for tag in reserved)
+            + f" — the {_RESERVED_TAG_PREFIX}* prefix and the canonical "
+            "sha256./sha384./sha512.<hex> forms are reserved (D7)"
+        )
+
+
 def check_repository_allowlisted(repository: str, allowed_hosts: frozenset[str]) -> None:
     """G-03: `repository`'s host must be one of `allowed_hosts`.
 
@@ -342,10 +393,10 @@ def cas_relpath(namespace: str, package: str, digest: str, ext: str) -> str:
 
 
 def check_digest_self_consistent(digest: str, object_bytes: bytes) -> None:
-    """CAS integrity: `object_bytes` (already serialized canonically, §1)
-    must hash to `digest`. Mismatch is `AnomalyError` — the file's name (or
-    the field claiming this digest) lies about its own content, not a
-    routine validation failure.
+    """CAS integrity: `object_bytes` must hash to `digest` — the bytes as
+    committed, which for a tag object are the registry's own (§1). Mismatch
+    is `AnomalyError` — the file's name (or the field claiming this digest)
+    lies about its own content, not a routine validation failure.
 
     Generalizes the original `TagEntry`-shaped check below to any claimed
     digest string (fork-PR announce revamp: `Desc.readme`/`Desc.logo` blobs
@@ -468,11 +519,10 @@ def serialize_package_root(root: PackageRoot) -> bytes:
     """The exact bytes committed to `p/<ns>/<pkg>.json` — pretty-printed,
     preserving `model.PackageRoot`'s declared field order (matching
     `schema/root.schema.json`'s `required` order once `upstream` is
-    omitted), plus a trailing newline. This is **not** §1's canonical
-    minified form — that form is reserved for content-addressed CAS objects,
-    which must dedup; the human-diffable root is optimized for PR review, and
-    the root's own bytes are never digested (only referenced indirectly via
-    `TagEntry.content`, which points at an `ObservationObject`).
+    omitted), plus a trailing newline. The root is the one document in this
+    index whose bytes this bot authors — CAS objects beside it are the
+    registry's own bytes, copied. Optimized for PR review; the root's own
+    bytes are never digested.
     """
     data: dict[str, Any] = {
         "name": root.name,
@@ -537,103 +587,44 @@ def parse_package_root(raw: bytes) -> PackageRoot:
         raise ValidationError(f"malformed root structure: {exc}") from exc
 
 
-# --- ObservationObject <-> dict codec (§1's canonical minified form) -------
+# --- image-index CAS object ------------------------------------------------
 
 
-def _platform_to_dict(platform: OciPlatform) -> dict[str, Any]:
-    data: dict[str, Any] = {"architecture": platform.architecture, "os": platform.os}
-    if platform.os_version is not None:
-        data["os.version"] = platform.os_version
-    if platform.os_features:
-        data["os.features"] = list(platform.os_features)
-    if platform.variant is not None:
-        data["variant"] = platform.variant
-    if platform.features:
-        data["features"] = list(platform.features)
-    return data
+def parse_image_index_digests(raw: bytes) -> tuple[str, ...]:
+    """Every `manifests[*].digest` of one committed CAS object.
 
+    Doubles as the document-kind gate (D4(c)): the bytes under a package's
+    `o/sha256/` prefix are the registry's OCI image index, stored verbatim, so
+    a CAS object that hashes correctly to its own filename but is not an image
+    index is still a rejected root. Nothing here re-serializes — the returned
+    digests are read out of the committed bytes, which stay untouched.
 
-def _platform_from_dict(data: dict[str, Any]) -> OciPlatform:
-    return OciPlatform(
-        architecture=data["architecture"],
-        os=data["os"],
-        os_version=data.get("os.version"),
-        os_features=tuple(data.get("os.features", ())),
-        variant=data.get("variant"),
-        features=tuple(data.get("features", ())),
-    )
-
-
-def _platform_entry_to_dict(entry: PlatformEntry) -> dict[str, Any]:
-    return {"platform": _platform_to_dict(entry.platform), "digest": entry.digest}
-
-
-def _platform_entry_from_dict(data: dict[str, Any]) -> PlatformEntry:
-    return PlatformEntry(platform=_platform_from_dict(data["platform"]), digest=data["digest"])
-
-
-def platform_sort_key(
-    entry: PlatformEntry,
-) -> tuple[str, str, str, str, tuple[str, ...], tuple[str, ...]]:
-    """The one canonical platform ordering key (§1) — every module that needs
-    to sort `PlatformEntry` rows (this module's `serialize_observation_object`,
-    `core/observe.py`'s construction-time sort) imports this rather than
-    hand-rolling a second copy, so the two never drift apart.
-
-    `(architecture, os, os_version or "", variant or "", os_features,
-    features)` — `os_features`/`features` must be part of the key, not
-    just the digest payload: two platforms differing *only* in one of these
-    tuple fields (e.g. the dual-libc case, `linux/amd64` + `os.features:
-    ["libc.glibc"]` vs `["libc.musl"]`) would otherwise tie under the first
-    four fields alone, and Python's stable sort would then preserve whatever
-    order the registry's manifest-list happened to return them in — silently
-    making the digest depend on registry response order and breaking ADR-1
-    D4 dedup. The tuples are compared directly (not joined into strings):
-    a `",".join(...)` collapses `("a,b",)` and `("a", "b")` to the identical
-    string `"a,b"`, which would silently re-introduce the same
-    registry-order-dependent aliasing this key exists to prevent. Tuples of
-    strings compare lexicographically element-by-element, so two distinct
-    tuples can never collide into equal keys.
+    Raises `ValidationError` on anything that is not an image index carrying a
+    `manifests` list of objects with string `digest` fields. The digests
+    themselves are *not* shape-checked here; the caller runs `parse_digest`
+    before using one (digest-hex `fullmatch` before any path join or
+    `RegistryPort` call).
     """
-    platform = entry.platform
-    return (
-        platform.architecture,
-        platform.os,
-        platform.os_version or "",
-        platform.variant or "",
-        platform.os_features,
-        platform.features,
-    )
-
-
-def serialize_observation_object(obj: ObservationObject) -> bytes:
-    """§1's canonical minified form — the CAS-digested encoding.
-
-    `platforms` is sorted by `platform_sort_key` (`(architecture, os,
-    os_version or "", variant or "", os_features, features)`, tuples
-    compared directly, never string-joined) before serialization so
-    registry-returned manifest-list ordering never affects the digest,
-    then dumped as
-    `json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`.
-    """
-    sorted_platforms = sorted(obj.platforms, key=platform_sort_key)
-    data = {"platforms": [_platform_entry_to_dict(e) for e in sorted_platforms]}
-    text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return text.encode("utf-8")
-
-
-def parse_observation_object(raw: bytes) -> ObservationObject:
-    """The `ObservationObject` codec's read side — same failure contract as
-    `parse_package_root`."""
     try:
         parsed: Any = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValidationError(f"malformed observation object JSON: {exc}") from exc
+        raise ValidationError(f"malformed CAS object JSON: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise ValidationError("observation object JSON must be a JSON object")
-    data = cast("dict[str, Any]", parsed)
-    try:
-        platforms = tuple(_platform_entry_from_dict(p) for p in data["platforms"])
-        return ObservationObject(platforms=platforms)
-    except (KeyError, TypeError, AttributeError) as exc:
-        raise ValidationError(f"malformed observation object structure: {exc}") from exc
+        raise ValidationError("CAS object JSON must be a JSON object")
+    manifests = cast("dict[str, Any]", parsed).get("manifests")
+    if not isinstance(manifests, list):
+        raise ValidationError(
+            "CAS object is not an OCI image index (no `manifests` list); this index "
+            "records image indices only"
+        )
+    digests: list[str] = []
+    for descriptor in cast("list[object]", manifests):
+        digest = (
+            cast("dict[str, object]", descriptor).get("digest")
+            if isinstance(descriptor, dict)
+            else None
+        )
+        if not isinstance(digest, str):
+            raise ValidationError("image-index descriptor has no string `digest`")
+        digests.append(digest)
+    return tuple(digests)

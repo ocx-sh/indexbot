@@ -30,14 +30,48 @@ def _owner() -> Owner:
 
 _DEFAULT_PLATFORM = {"architecture": "amd64", "os": "linux"}
 
+_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
+_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 
-def _obs_bytes(
+
+def _descriptor(tag_hint: str, platform: dict[str, str] | None) -> dict[str, object]:
+    """One `manifests[]` entry. `platform=None` emits a platform-less
+    descriptor — legal OCI (the field is optional) and one of the shapes
+    `_catalog_platforms` must skip; the others are `platform.os == "unknown"`
+    and a `platform` object missing `os` or `architecture` (ADR R4), which is
+    why the label reads both fields with `.get`. `digest` is a real sha256
+    over a label rather than a placeholder string, so the fixture reads like
+    the registry bytes it stands in for."""
+    label = (
+        f"{tag_hint}/attached"
+        if platform is None
+        else f"{tag_hint}/{platform.get('os', '?')}/{platform.get('architecture', '?')}"
+    )
+    descriptor: dict[str, object] = {
+        "mediaType": _MANIFEST_MEDIA_TYPE,
+        "digest": f"sha256:{hashlib.sha256(label.encode()).hexdigest()}",
+        "size": 512,
+    }
+    if platform is not None:
+        descriptor["platform"] = platform
+    return descriptor
+
+
+def _index_of(*descriptors: dict[str, object]) -> bytes:
+    """One tag's CAS bytes: the registry's OCI image index, as `render.py`
+    receives it. `render.py` copies these verbatim into the dist tree, so
+    every golden CAS object under `expected/dist/p/**/o/sha256/*.json` is
+    exactly this output."""
+    return json.dumps(
+        {"schemaVersion": 2, "mediaType": _INDEX_MEDIA_TYPE, "manifests": list(descriptors)}
+    ).encode()
+
+
+def _index_bytes(
     tag_hint: str, *, platforms: tuple[dict[str, str], ...] = (_DEFAULT_PLATFORM,)
 ) -> bytes:
-    entries = [
-        {"platform": platform, "digest": f"sha256:manifest-{tag_hint}"} for platform in platforms
-    ]
-    return json.dumps({"platforms": entries}).encode()
+    """The common case: one runnable-image descriptor per platform."""
+    return _index_of(*(_descriptor(tag_hint, platform) for platform in platforms))
 
 
 def _root_raw(root: PackageRoot) -> bytes:
@@ -127,10 +161,10 @@ def _case_normal() -> list[SourcePackage]:
         # Different platform sets across the two live tags -- exercises
         # `_catalog_platforms`' union + dedup (linux/amd64 shared by both) +
         # sort (darwin/arm64 sorts before linux/amd64).
-        f"{_digest('1')}.json": _obs_bytes(
+        f"{_digest('1')}.json": _index_bytes(
             "1.0.0", platforms=({"architecture": "amd64", "os": "linux"},)
         ),
-        f"{_digest('2')}.json": _obs_bytes(
+        f"{_digest('2')}.json": _index_bytes(
             "0.9.0",
             platforms=(
                 {"architecture": "amd64", "os": "linux"},
@@ -161,9 +195,9 @@ def _case_normal() -> list[SourcePackage]:
 def _case_orphan_pruned() -> list[SourcePackage]:
     tags = {"1.2.0": TagEntry(content=_digest("a"), observed="2026-07-17T00:00:00Z")}
     content_by_digest = {
-        f"{_digest('a')}.json": _obs_bytes("1.2.0"),
+        f"{_digest('a')}.json": _index_bytes("1.2.0"),
         # referenced by no tag and no desc -> pruned from dist, never emitted.
-        f"{_digest('b')}.json": _obs_bytes("orphaned"),
+        f"{_digest('b')}.json": _index_bytes("orphaned"),
     }
     return [
         _package(
@@ -183,7 +217,7 @@ def _case_yanked_excluded() -> list[SourcePackage]:
     # `observed` (2026-07-17) -- proves `_generated_timestamp` actually folds
     # in `yanked.at`, not just `observed` (finding #4: deleting that branch
     # used to fail nothing here, since 07-17 already dominated 07-02). The
-    # yanked tag's observation object also carries a platform
+    # yanked tag's image index also carries a platform
     # (windows/amd64) distinct from the live tag's (linux/amd64), so the
     # golden `platforms` array proves exclusion by absence, not coincidence
     # (finding #5: the two used to share a platform, making exclusion
@@ -197,9 +231,9 @@ def _case_yanked_excluded() -> list[SourcePackage]:
         ),
     }
     content_by_digest = {
-        f"{_digest('x')}.json": _obs_bytes("1.0.0"),
+        f"{_digest('x')}.json": _index_bytes("1.0.0"),
         # only referenced by the yanked tag, no live tag shares it -> pruned.
-        f"{_digest('y')}.json": _obs_bytes(
+        f"{_digest('y')}.json": _index_bytes(
             "0.9.0-yanked", platforms=({"architecture": "amd64", "os": "windows"},)
         ),
     }
@@ -222,7 +256,7 @@ def _case_shared_digest_dedup() -> list[SourcePackage]:
         "0.13.0": TagEntry(content=shared, observed="2026-07-17T00:00:00Z"),
         "latest": TagEntry(content=shared, observed="2026-07-17T00:00:00Z"),
     }
-    content_by_digest = {f"{shared}.json": _obs_bytes("0.13.0")}
+    content_by_digest = {f"{shared}.json": _index_bytes("0.13.0")}
     return [
         _package(
             namespace="ziglang",
@@ -238,7 +272,7 @@ def _case_shared_digest_dedup() -> list[SourcePackage]:
 
 def _case_no_desc() -> list[SourcePackage]:
     tags = {"3.7.0": TagEntry(content=_digest("s"), observed="2026-07-17T00:00:00Z")}
-    content_by_digest = {f"{_digest('s')}.json": _obs_bytes("3.7.0")}
+    content_by_digest = {f"{_digest('s')}.json": _index_bytes("3.7.0")}
     return [
         _package(
             namespace="mvdan",
@@ -263,7 +297,7 @@ def _case_png_only_logo() -> list[SourcePackage]:
         logo=_digest("p"),
     )
     content_by_digest = {
-        f"{_digest('g')}.json": _obs_bytes("1.42.0"),
+        f"{_digest('g')}.json": _index_bytes("1.42.0"),
         f"{_digest('p')}.png": b"\x89PNG\r\n\x1a\nfake-glab-logo",
     }
     return [
@@ -290,7 +324,7 @@ def _case_nested_namespace() -> list[SourcePackage]:
         logo=_digest("w"),
     )
     content_by_digest = {
-        f"{_digest('n')}.json": _obs_bytes("0.7.0"),
+        f"{_digest('n')}.json": _index_bytes("0.7.0"),
         f"{_digest('q')}.md": b"# regsync\n\nUtility to sync images between registries.\n",
         f"{_digest('w')}.svg": b"<svg>regsync-logo</svg>",
     }
@@ -302,6 +336,43 @@ def _case_nested_namespace() -> list[SourcePackage]:
             created="2026-02-01",
             tags=tags,
             desc=desc,
+            content_by_digest=content_by_digest,
+        )
+    ]
+
+
+def _case_attestation_descriptor() -> list[SourcePackage]:
+    """ADR R4. A real registry serves attestation and referrer descriptors
+    inside the same image index as the runnable ones — cosign/buildkit
+    attestations carry `platform: {"os": "unknown", ...}`, and `platform` is
+    an optional descriptor field so a referrer may carry none at all. The
+    fourth shape is a `platform` object that names only one of the two
+    fields: nothing upstream of render validates `platform` at all (the
+    image-index gate stops at each descriptor's `digest`), so these are raw
+    publisher bytes and a partial object must be skipped, not crash the
+    whole-index render. None of the three names a target anything can run
+    on, so none may reach the catalog's `platforms` matrix; the golden's
+    `catalog.json` shows them absent. Authored from the ADR before any
+    golden was regenerated.
+    """
+    tags = {"2.0.0": TagEntry(content=_digest("t"), observed="2026-07-17T00:00:00Z")}
+    content_by_digest = {
+        f"{_digest('t')}.json": _index_of(
+            _descriptor("2.0.0", {"architecture": "amd64", "os": "linux"}),
+            _descriptor("2.0.0", {"architecture": "arm64", "os": "linux"}),
+            _descriptor("2.0.0", {"architecture": "unknown", "os": "unknown"}),
+            _descriptor("2.0.0", None),
+            _descriptor("2.0.0", {"os": "linux"}),
+        )
+    }
+    return [
+        _package(
+            namespace="sigstore",
+            package="cosign",
+            repository="oci://ghcr.io/ocx-contrib/cosign",
+            created="2026-01-01",
+            tags=tags,
+            desc=None,
             content_by_digest=content_by_digest,
         )
     ]
@@ -348,6 +419,22 @@ def test_render_png_only_logo() -> None:
 
 def test_render_nested_namespace() -> None:
     _assert_matches_golden("nested_namespace", build_render_plan(_case_nested_namespace()))
+
+
+def test_render_attestation_descriptor_skips_platformless_and_unknown() -> None:
+    _assert_matches_golden(
+        "attestation_descriptor", build_render_plan(_case_attestation_descriptor())
+    )
+
+
+def test_catalog_platforms_skips_platformless_unknown_and_partial_descriptors() -> None:
+    # The golden above pins the whole tree; this pins the one claim the
+    # scenario exists for, readably and independently of the byte compare.
+    plan = build_render_plan(_case_attestation_descriptor())
+    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
+    assert isinstance(catalog_file.content, str)
+    catalog = json.loads(catalog_file.content)
+    assert catalog["packages"][0]["platforms"] == ["linux/amd64", "linux/arm64"]
 
 
 def test_build_render_plan_sorts_packages_by_package_id() -> None:
@@ -408,7 +495,7 @@ def test_build_render_plan_reachability_readme_without_logo() -> None:
         logo=None,
     )
     content_by_digest = {
-        f"{_digest('k')}.json": _obs_bytes("1.0.0"),
+        f"{_digest('k')}.json": _index_bytes("1.0.0"),
         f"{_digest('h')}.md": b"# shfmt\n",
     }
     package = _package(

@@ -57,10 +57,11 @@ def _parse_keywords(raw: object) -> tuple[str, ...]:
 
 
 def _cas_digest(content: bytes) -> str:
-    """This index's own CAS digest of `content` — deliberately independent
-    of the registry's blob digest for that same content (a different digest
-    namespace, mirroring `TagEntry.content` vs `PlatformEntry.digest`,
-    D2/D5)."""
+    """This index's CAS address for `content` — sha256 over the exact bytes
+    fetched, computed here rather than copied from the `__ocx.desc` layer
+    descriptor's `digest` field. This index never adopts a digest it did not
+    derive from content it holds (`ports.py`'s digest doctrine, D2/D5); that
+    the two agree for a conforming registry is a check, not a shortcut."""
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 

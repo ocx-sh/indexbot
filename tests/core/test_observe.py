@@ -7,15 +7,53 @@ from dataclasses import dataclass
 import pytest
 
 from indexbot.core.observe import observe, observe_one_tag
-from indexbot.errors import TransientError
+from indexbot.errors import TransientError, ValidationError
 from indexbot.model import ManifestFetch, OwnershipProbeResult
 from tests.fakes import FakeRegistry
 
 _REPO = "oci://ghcr.io/ocx-contrib/cmake"
 _DIGEST_1 = "sha256:" + "1" * 64
 _DIGEST_2 = "sha256:" + "2" * 64
-_DIGEST_3 = "sha256:" + "3" * 64
-_DIGEST_9 = "sha256:" + "9" * 64
+
+
+def _index(*platforms: dict[str, str], digest: str = _DIGEST_1) -> dict[str, object]:
+    """A minimal OCI image index — the only manifest shape this index records."""
+    return {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {"platform": platform, "digest": digest} for platform in (platforms or ({},))
+        ],
+    }
+
+
+@dataclass
+class _FixedFetchRegistry:
+    """Serves one caller-built `ManifestFetch`, the *same object* every call.
+
+    `FakeRegistry` re-encodes on every `get_manifest`, so no test using it can
+    tell "copied the registry's bytes through" from "re-encoded them into an
+    equal-looking value" — and that distinction is the whole contract (§1).
+    This double makes it observable, and lets a test hand over bytes that are
+    *not* in any canonical form, so a re-encoder would be caught by equality
+    too."""
+
+    fetch: ManifestFetch
+
+    def list_tags(self, repository: str) -> list[str]:
+        raise AssertionError("should not be called")
+
+    def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
+        return self.fetch
+
+    def get_desc_tag_digest(self, repository: str) -> str | None:
+        raise AssertionError("should not be called")
+
+    def get_blob(self, repository: str, digest: str) -> bytes:
+        raise AssertionError("should not be called")
+
+    def probe_ownership(self, repository: str, expected_name: str) -> OwnershipProbeResult:
+        raise AssertionError("should not be called")
 
 
 @dataclass
@@ -40,185 +78,153 @@ class _RaisingRegistry:
         raise AssertionError("should not be called")
 
 
-def test_observe_multi_platform_index_sorts_platforms() -> None:
+# --- the bytes are the registry's, unmodified ------------------------------
+
+
+def test_observe_one_tag_stores_raw_registry_bytes() -> None:
+    """`Observation.raw` is the exact object `RegistryPort` returned — the
+    same `bytes` instance, not an equal-looking re-encoding — and
+    `content_digest` is the registry's own digest over those bytes.
+
+    Asserted with `is`, deliberately. `==` would still pass if this module
+    grew back a `json.dumps(json.loads(raw), sort_keys=True, ...)` round-trip
+    — the exact encoder the ADR deleted. The registry's bytes here are
+    pretty-printed with the keys out of sorted order, so the re-encoding this
+    pins against would produce visibly different bytes."""
+    raw = b'{\n  "schemaVersion": 2,\n  "manifests": [\n    {"digest": "%s"}\n  ]\n}' % (
+        _DIGEST_1.encode()
+    )
+    registry = _FixedFetchRegistry(
+        ManifestFetch(
+            raw=raw,
+            digest=f"sha256:{hashlib.sha256(raw).hexdigest()}",
+            parsed=json.loads(raw),
+        )
+    )
+    fetch = registry.get_manifest(_REPO, "3.28.1")
+    observation = observe_one_tag(_REPO, "3.28.1", registry)
+    assert observation is not None
+    assert observation.raw is fetch.raw
+    assert observation.content_digest == fetch.digest
+    assert json.loads(observation.raw)["manifests"][0]["digest"] == _DIGEST_1
+
+
+def test_observe_one_tag_refuses_a_bare_manifest() -> None:
+    """D4(a): a tag resolving to a single image manifest is refused, naming
+    both the tag and the repository — there is no stand-in index to
+    manufacture."""
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]},
-        manifests={
-            (_REPO, "3.28.1"): {
-                "manifests": [
-                    {"platform": {"architecture": "arm64", "os": "linux"}, "digest": _DIGEST_2},
-                    {"platform": {"architecture": "amd64", "os": "linux"}, "digest": _DIGEST_1},
-                ]
-            }
-        },
+        manifests={(_REPO, "3.28.1"): {"platform": {"architecture": "amd64", "os": "linux"}}}
     )
-    result = observe(_REPO, registry)
-    assert len(result) == 1
-    observation = result[0]
-    assert observation.tag == "3.28.1"
-    assert [p.platform.architecture for p in observation.object.platforms] == ["amd64", "arm64"]
-    assert observation.content_digest.startswith("sha256:")
+    with pytest.raises(ValidationError) as excinfo:
+        observe_one_tag(_REPO, "3.28.1", registry)
+    assert "3.28.1" in str(excinfo.value)
+    assert _REPO in str(excinfo.value)
 
 
-def test_observe_dual_libc_platforms_sort_stably_by_os_features() -> None:
-    # Regression: two platforms sharing architecture/os/os_version/variant
-    # and differing ONLY in os.features (the dual-libc glibc/musl case) must
-    # not tie under the sort key — a tie would leak the registry's
-    # manifest-list order into content_digest (ADR-1 D4).
-    manifest_glibc_first: dict[str, object] = {
-        "manifests": [
-            {
-                "platform": {"architecture": "amd64", "os": "linux", "os.features": ["libc.glibc"]},
-                "digest": _DIGEST_1,
-            },
-            {
-                "platform": {"architecture": "amd64", "os": "linux", "os.features": ["libc.musl"]},
-                "digest": _DIGEST_2,
-            },
-        ]
-    }
-    manifest_musl_first: dict[str, object] = {
-        "manifests": list(reversed(manifest_glibc_first["manifests"]))  # type: ignore[arg-type]
-    }
-    registry_a = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): manifest_glibc_first}
-    )
-    registry_b = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): manifest_musl_first}
-    )
-    result_a = observe(_REPO, registry_a)
-    result_b = observe(_REPO, registry_b)
-    assert result_a[0].content_digest == result_b[0].content_digest
-    assert [p.platform.os_features for p in result_a[0].object.platforms] == [
-        ("libc.glibc",),
-        ("libc.musl",),
-    ]
-
-
-def test_observe_full_fields_platform_parses_all_fields() -> None:
+def test_observe_one_tag_refuses_an_oversized_index() -> None:
+    """Verbatim storage means the registry decides how many bytes each tag
+    commits to this git repository, permanently, and an image index's
+    `annotations` are unbounded. A padded index is refused at the one point
+    registry bytes enter."""
+    padding = "x" * (4 * 1024 * 1024)
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]},
-        manifests={
-            (_REPO, "3.28.1"): {
-                "manifests": [
-                    {
-                        "platform": {
-                            "architecture": "arm",
-                            "os": "linux",
-                            "os.version": "5.15.0",
-                            "os.features": ["headless"],
-                            "variant": "v7",
-                            "features": ["sse4"],
-                        },
-                        "digest": _DIGEST_3,
-                    }
-                ]
-            }
-        },
+        manifests={(_REPO, "3.28.1"): {"manifests": [], "annotations": {"pad": padding}}}
     )
-    result = observe(_REPO, registry)
-    platform = result[0].object.platforms[0].platform
-    assert platform.os_version == "5.15.0"
-    assert platform.os_features == ("headless",)
-    assert platform.variant == "v7"
-    assert platform.features == ("sse4",)
+    with pytest.raises(ValidationError) as excinfo:
+        observe_one_tag(_REPO, "3.28.1", registry)
+    assert "ceiling" in str(excinfo.value)
+    assert "3.28.1" in str(excinfo.value)
 
 
-def test_observe_dedups_identical_platform_sets_across_tags() -> None:
-    manifest: dict[str, object] = {
-        "manifests": [
-            {"platform": {"architecture": "amd64", "os": "linux"}, "digest": _DIGEST_1},
-        ]
-    }
+def test_observe_one_tag_accepts_an_index_at_the_ceiling() -> None:
+    """The bound rejects *over* the ceiling, not at it — a legitimately large
+    index must not be refused by an off-by-one."""
+    prefix = b'{"manifests":[],"annotations":{"pad":"'
+    suffix = b'"}}'
+    padding = b"x" * (4 * 1024 * 1024 - len(prefix) - len(suffix))
+    raw = prefix + padding + suffix
+    assert len(raw) == 4 * 1024 * 1024
+    registry = _FixedFetchRegistry(
+        ManifestFetch(
+            raw=raw,
+            digest=f"sha256:{hashlib.sha256(raw).hexdigest()}",
+            parsed={
+                "manifests": [],
+            },
+        )
+    )
+    observation = observe_one_tag(_REPO, "3.28.1", registry)
+    assert observation is not None
+    assert observation.raw is raw
+
+
+def test_observe_identical_indices_across_tags_share_one_digest() -> None:
+    """Byte-identical registry responses dedup to one CAS object (ADR-1 D3)."""
+    manifest = _index({"architecture": "amd64", "os": "linux"})
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1", "latest"]},
         manifests={(_REPO, "3.28.1"): manifest, (_REPO, "latest"): manifest},
     )
     result = observe(_REPO, registry)
-    digests = {observation.content_digest for observation in result}
-    assert len(digests) == 1
+    assert {observation.content_digest for observation in result} == {result[0].content_digest}
+    assert {observation.raw for observation in result} == {result[0].raw}
 
 
-def test_observe_bare_manifest_own_platform_field() -> None:
+def test_observe_index_with_no_manifests_is_still_an_index() -> None:
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]},
-        manifests={(_REPO, "3.28.1"): {"platform": {"architecture": "amd64", "os": "linux"}}},
+        tags={_REPO: ["latest"]}, manifests={(_REPO, "latest"): {"manifests": []}}
     )
     result = observe(_REPO, registry)
-    assert result[0].object.platforms[0].platform.architecture == "amd64"
+    assert json.loads(result[0].raw) == {"manifests": []}
 
 
-def test_observe_bare_manifest_config_platform_fallback() -> None:
+# --- the sweep excludes reserved tags, it does not refuse them (ADR R3) ----
+
+
+def test_observe_excludes_canonical_sha256_dot_tags() -> None:
+    """`ocx package push` writes a `sha256.<hex>` tag beside every version
+    tag, pointing at a bare manifest. The sweep must skip it — refusing it
+    would abort reconcile for every ocx-published repository."""
+    canonical = "sha256." + "1" * 64
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]},
+        tags={_REPO: ["1.0.0", canonical]},
         manifests={
-            (_REPO, "3.28.1"): {
-                "config": {"platform": {"architecture": "arm64", "os": "linux"}},
-            }
+            (_REPO, "1.0.0"): _index({"architecture": "amd64", "os": "linux"}),
+            # A bare manifest, exactly as ocx publishes it under this tag —
+            # observing it would raise, so the test proves it is never fetched.
+            (_REPO, canonical): {"platform": {"architecture": "amd64", "os": "linux"}},
         },
     )
-    result = observe(_REPO, registry)
-    assert result[0].object.platforms[0].platform.architecture == "arm64"
+    assert [observation.tag for observation in observe(_REPO, registry)] == ["1.0.0"]
 
 
-def test_observe_bare_manifest_missing_platform_raises() -> None:
+def test_observe_excludes_every_reserved_tag_form() -> None:
+    reserved = ["__ocx.desc", "__ocx", "__ocxfoo", "__OCX.desc", "sha384." + "a" * 96]
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]},
-        manifests={(_REPO, "3.28.1"): {"config": {}}},
+        tags={_REPO: ["1.0.0", *reserved]},
+        manifests={(_REPO, "1.0.0"): _index({"architecture": "amd64", "os": "linux"})},
     )
-    with pytest.raises(ValueError, match="platform"):
-        observe(_REPO, registry)
+    assert [observation.tag for observation in observe(_REPO, registry)] == ["1.0.0"]
 
 
-def test_observe_bare_manifest_platform_digest_is_registry_content_digest() -> None:
-    """A bare manifest's one `PlatformEntry.digest` is
-    `RegistryPort.get_manifest`'s adapter-computed `ManifestFetch.digest`
-    (ADR-1 D5's verifiability chain) — never a value embedded in the
-    manifest's own JSON body, and never a locally synthesized stand-in.
-    """
-    manifest: dict[str, object] = {"platform": {"architecture": "amd64", "os": "linux"}}
-    registry = FakeRegistry(tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): manifest})
-    result = observe(_REPO, registry)
-    raw = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-        "utf-8"
-    )
-    expected_digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
-    assert result[0].object.platforms[0].digest == expected_digest
-
-
-def test_observe_bare_manifest_digest_ignores_a_digest_key_inside_the_body() -> None:
-    # A "digest" field embedded in the manifest's own JSON is registry
-    # content like any other — it must never be treated as the platform's
-    # real digest (that would defeat the verifiability chain: content could
-    # claim any digest for itself).
+def test_observe_still_excludes___ocx_desc() -> None:
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]},
-        manifests={
-            (_REPO, "3.28.1"): {
-                "platform": {"architecture": "amd64", "os": "linux"},
-                "digest": _DIGEST_9,
-            }
-        },
+        tags={_REPO: ["__ocx.desc", "3.28.1"]},
+        manifests={(_REPO, "3.28.1"): _index({"architecture": "amd64", "os": "linux"})},
     )
-    result = observe(_REPO, registry)
-    assert result[0].object.platforms[0].digest != _DIGEST_9
+    assert [observation.tag for observation in observe(_REPO, registry)] == ["3.28.1"]
+
+
+# --- loop behaviour --------------------------------------------------------
 
 
 def test_observe_skips_vanished_tag() -> None:
     registry = FakeRegistry(
         tags={_REPO: ["ghost", "3.28.1"]},
-        manifests={(_REPO, "3.28.1"): {"platform": {"architecture": "amd64", "os": "linux"}}},
+        manifests={(_REPO, "3.28.1"): _index({"architecture": "amd64", "os": "linux"})},
     )
     # "ghost" has no configured manifest -> FakeRegistry.get_manifest raises KeyError.
-    result = observe(_REPO, registry)
-    assert [observation.tag for observation in result] == ["3.28.1"]
-
-
-def test_observe_excludes_internal_desc_tag() -> None:
-    registry = FakeRegistry(
-        tags={_REPO: ["__ocx.desc", "3.28.1"]},
-        manifests={(_REPO, "3.28.1"): {"platform": {"architecture": "amd64", "os": "linux"}}},
-    )
     result = observe(_REPO, registry)
     assert [observation.tag for observation in result] == ["3.28.1"]
 
@@ -238,12 +244,11 @@ def test_observe_empty_tag_list_returns_empty_tuple() -> None:
 
 def test_observe_one_tag_returns_the_single_tag_observation() -> None:
     registry = FakeRegistry(
-        manifests={(_REPO, "3.28.1"): {"platform": {"architecture": "amd64", "os": "linux"}}}
+        manifests={(_REPO, "3.28.1"): _index({"architecture": "amd64", "os": "linux"})}
     )
     observation = observe_one_tag(_REPO, "3.28.1", registry)
     assert observation is not None
     assert observation.tag == "3.28.1"
-    assert observation.object.platforms[0].platform.architecture == "amd64"
 
 
 def test_observe_one_tag_returns_none_for_a_missing_tag() -> None:
@@ -277,8 +282,10 @@ def test_observe_one_tag_propagates_transient_error_uncaught() -> None:
 
 
 def _observe_with_annotations(annotations: object) -> str | None:
+    """An image index (the only shape `observe_one_tag` accepts) carrying
+    `annotations` verbatim, whatever they are."""
     manifest: dict[str, object] = {
-        "platform": {"architecture": "amd64", "os": "linux"},
+        "manifests": [{"platform": {"architecture": "amd64", "os": "linux"}, "digest": _DIGEST_2}],
         "annotations": annotations,
     }
     registry = FakeRegistry(manifests={(_REPO, "3.28.1"): manifest})
@@ -309,31 +316,8 @@ def test_observe_one_tag_source_none_for_non_string_or_missing_annotation() -> N
 
 def test_observe_one_tag_source_none_when_manifest_has_no_annotations() -> None:
     registry = FakeRegistry(
-        manifests={(_REPO, "3.28.1"): {"platform": {"architecture": "amd64", "os": "linux"}}}
+        manifests={(_REPO, "3.28.1"): _index({"architecture": "amd64", "os": "linux"})}
     )
     observation = observe_one_tag(_REPO, "3.28.1", registry)
     assert observation is not None
     assert observation.source is None
-
-
-def test_observe_one_tag_source_annotation_does_not_change_content_digest() -> None:
-    # `source` rides on `Observation`, never inside the content-addressed
-    # `ObservationObject` — re-annotating an image index must not churn CAS.
-    # An *index* manifest, deliberately: a bare manifest's platform digest is
-    # the manifest's own content digest, which any body edit moves by
-    # definition (see the bare-manifest digest test above).
-    plain: dict[str, object] = {
-        "manifests": [{"platform": {"architecture": "amd64", "os": "linux"}, "digest": _DIGEST_1}]
-    }
-    annotated: dict[str, object] = {
-        "manifests": [{"platform": {"architecture": "amd64", "os": "linux"}, "digest": _DIGEST_1}],
-        "annotations": {"org.opencontainers.image.source": "https://github.com/ocx-sh/index"},
-    }
-    plain_obs = observe_one_tag(_REPO, "3.28.1", FakeRegistry(manifests={(_REPO, "3.28.1"): plain}))
-    annotated_obs = observe_one_tag(
-        _REPO, "3.28.1", FakeRegistry(manifests={(_REPO, "3.28.1"): annotated})
-    )
-    assert plain_obs is not None
-    assert annotated_obs is not None
-    assert plain_obs.object == annotated_obs.object
-    assert plain_obs.content_digest == annotated_obs.content_digest

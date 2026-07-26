@@ -1,6 +1,6 @@
-"""`core/validate_entry.py` — pure semantic checks + the PackageRoot/
-ObservationObject <-> dict codec. DAMP, self-contained (no shared fixture
-module beyond `tests/fakes/`, CONTRACTS.md §2).
+"""`core/validate_entry.py` — pure semantic checks + the PackageRoot <-> dict
+codec. DAMP, self-contained (no shared fixture module beyond `tests/fakes/`,
+CONTRACTS.md §2).
 """
 
 from __future__ import annotations
@@ -19,13 +19,10 @@ from indexbot.errors import AnomalyError, ValidationError
 from indexbot.model import (
     Desc,
     ManifestFetch,
-    ObservationObject,
-    OciPlatform,
     Owner,
     OwnershipProbeResult,
     PackageId,
     PackageRoot,
-    PlatformEntry,
     TagEntry,
     Upstream,
     Yank,
@@ -408,28 +405,36 @@ def test_cas_relpath_varies_extension() -> None:
 
 # --- check_content_digest_self_consistent ------------------------------------
 
+_INDEX_BYTES = (
+    b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json",'
+    b'"manifests":[{"digest":"sha256:' + b"a" * 64 + b'"}]}'
+)
+"""What a tag's CAS object actually is: the registry's image index bytes.
+
+These checks hash without parsing, so any payload would pass — which is
+precisely why the fixture has to be the real shape. A reader learns the CAS
+object's form from here, and D4(c)'s whole point is that a hash-correct
+object of the wrong kind is still invalid."""
+
 
 def test_check_content_digest_self_consistent_ok() -> None:
-    object_bytes = b'{"platforms":[]}'
-    digest = f"sha256:{hashlib.sha256(object_bytes).hexdigest()}"
+    digest = f"sha256:{hashlib.sha256(_INDEX_BYTES).hexdigest()}"
     tag = TagEntry(content=digest, observed="2026-07-17T00:00:00Z")
-    validate_entry.check_content_digest_self_consistent(tag, object_bytes)  # no raise
+    validate_entry.check_content_digest_self_consistent(tag, _INDEX_BYTES)  # no raise
 
 
 def test_check_content_digest_self_consistent_mismatch_raises_anomaly() -> None:
-    object_bytes = b'{"platforms":[]}'
     tag = TagEntry(content="sha256:" + "0" * 64, observed="2026-07-17T00:00:00Z")
     with pytest.raises(AnomalyError):
-        validate_entry.check_content_digest_self_consistent(tag, object_bytes)
+        validate_entry.check_content_digest_self_consistent(tag, _INDEX_BYTES)
 
 
 # --- check_digest_self_consistent (generalized, fork-PR announce revamp) ----
 
 
 def test_check_digest_self_consistent_ok() -> None:
-    object_bytes = b'{"platforms":[]}'
-    digest = f"sha256:{hashlib.sha256(object_bytes).hexdigest()}"
-    validate_entry.check_digest_self_consistent(digest, object_bytes)  # no raise
+    digest = f"sha256:{hashlib.sha256(_INDEX_BYTES).hexdigest()}"
+    validate_entry.check_digest_self_consistent(digest, _INDEX_BYTES)  # no raise
 
 
 def test_check_digest_self_consistent_mismatch_raises_anomaly() -> None:
@@ -728,187 +733,77 @@ def test_parse_package_root_wrong_type_for_owners_raises() -> None:
         validate_entry.parse_package_root(payload)
 
 
-# --- ObservationObject <-> dict codec -----------------------------------------
+# --- parse_image_index_digests (D4(c): the committed CAS object's kind) ----
 
 
-def test_serialize_observation_object_canonical_minified_shape() -> None:
-    obj = ObservationObject(
-        platforms=(
-            PlatformEntry(
-                platform=OciPlatform(architecture="amd64", os="linux"), digest="sha256:" + "1" * 64
-            ),
-        )
-    )
-    raw = validate_entry.serialize_observation_object(obj)
-    assert raw == (
-        b'{"platforms":[{"digest":"sha256:'
-        + b"1" * 64
-        + b'","platform":{"architecture":"amd64","os":"linux"}}]}'
-    )
+def test_parse_image_index_digests_reads_every_descriptor_in_order() -> None:
+    raw = json.dumps(
+        {
+            "schemaVersion": 2,
+            "manifests": [
+                {"platform": {"architecture": "amd64", "os": "linux"}, "digest": "sha256:aaa"},
+                {"digest": "sha256:bbb"},
+            ],
+        }
+    ).encode("utf-8")
+    assert validate_entry.parse_image_index_digests(raw) == ("sha256:aaa", "sha256:bbb")
 
 
-def test_serialize_observation_object_sorts_platforms_deterministically() -> None:
-    entry_amd64 = PlatformEntry(
-        platform=OciPlatform(architecture="amd64", os="linux"), digest="sha256:" + "1" * 64
-    )
-    entry_arm64 = PlatformEntry(
-        platform=OciPlatform(architecture="arm64", os="linux"), digest="sha256:" + "2" * 64
-    )
-    forward = ObservationObject(platforms=(entry_amd64, entry_arm64))
-    reversed_order = ObservationObject(platforms=(entry_arm64, entry_amd64))
-    assert validate_entry.serialize_observation_object(
-        forward
-    ) == validate_entry.serialize_observation_object(reversed_order)
+def test_parse_image_index_digests_empty_manifests_is_an_empty_tuple() -> None:
+    assert validate_entry.parse_image_index_digests(b'{"manifests":[]}') == ()
 
 
-def test_serialize_observation_object_sorts_platforms_by_os_features_too() -> None:
-    # Regression: two platforms differing ONLY in os.features (the dual-libc
-    # case) must not tie under the sort key — a tie would let Python's stable
-    # sort leak registry manifest-list order into the digest (ADR-1 D4).
-    entry_glibc = PlatformEntry(
-        platform=OciPlatform(architecture="amd64", os="linux", os_features=("libc.glibc",)),
-        digest="sha256:" + "1" * 64,
-    )
-    entry_musl = PlatformEntry(
-        platform=OciPlatform(architecture="amd64", os="linux", os_features=("libc.musl",)),
-        digest="sha256:" + "2" * 64,
-    )
-    forward = ObservationObject(platforms=(entry_glibc, entry_musl))
-    reversed_order = ObservationObject(platforms=(entry_musl, entry_glibc))
-    forward_bytes = validate_entry.serialize_observation_object(forward)
-    reversed_bytes = validate_entry.serialize_observation_object(reversed_order)
-    assert forward_bytes == reversed_bytes
-    assert hashlib.sha256(forward_bytes).hexdigest() == hashlib.sha256(reversed_bytes).hexdigest()
+def test_parse_image_index_digests_ignores_unknown_index_fields() -> None:
+    """The registry's bytes are stored verbatim, so the parse must tolerate
+    `subject`, `artifactType`, `annotations` and any future spec field."""
+    raw = json.dumps(
+        {
+            "schemaVersion": 2,
+            "artifactType": "application/vnd.example+type",
+            "subject": {"digest": "sha256:ccc"},
+            "annotations": {"org.opencontainers.image.source": "https://example.test"},
+            "manifests": [{"digest": "sha256:aaa", "unknownField": 1}],
+        }
+    ).encode("utf-8")
+    assert validate_entry.parse_image_index_digests(raw) == ("sha256:aaa",)
 
 
-def test_serialize_observation_object_sorts_platforms_by_features_too() -> None:
-    # Same regression, for the plain `features` field.
-    entry_a = PlatformEntry(
-        platform=OciPlatform(architecture="amd64", os="linux", features=("f1",)),
-        digest="sha256:" + "3" * 64,
-    )
-    entry_b = PlatformEntry(
-        platform=OciPlatform(architecture="amd64", os="linux", features=("f2",)),
-        digest="sha256:" + "4" * 64,
-    )
-    forward = ObservationObject(platforms=(entry_a, entry_b))
-    reversed_order = ObservationObject(platforms=(entry_b, entry_a))
-    assert validate_entry.serialize_observation_object(
-        forward
-    ) == validate_entry.serialize_observation_object(reversed_order)
+def test_parse_image_index_digests_malformed_json_raises() -> None:
+    with pytest.raises(ValidationError, match="malformed CAS object JSON"):
+        validate_entry.parse_image_index_digests(b"{not json")
 
 
-def test_platform_sort_key_does_not_alias_on_comma_join() -> None:
-    # Regression: two schema-legal, genuinely different os_features tuples
-    # ("a,b") and ("a", "b") must not collapse to the same sort key just
-    # because a naive `",".join(...)` would render them identically.
-    entry_one_feature = PlatformEntry(
-        platform=OciPlatform(architecture="amd64", os="linux", os_features=("a,b",)),
-        digest="sha256:" + "5" * 64,
-    )
-    entry_two_features = PlatformEntry(
-        platform=OciPlatform(architecture="amd64", os="linux", os_features=("a", "b")),
-        digest="sha256:" + "6" * 64,
-    )
-    assert validate_entry.platform_sort_key(entry_one_feature) != validate_entry.platform_sort_key(
-        entry_two_features
-    )
-    forward = ObservationObject(platforms=(entry_one_feature, entry_two_features))
-    reversed_order = ObservationObject(platforms=(entry_two_features, entry_one_feature))
-    assert validate_entry.serialize_observation_object(
-        forward
-    ) == validate_entry.serialize_observation_object(reversed_order)
-
-
-def test_serialize_observation_object_full_platform_fields() -> None:
-    platform = OciPlatform(
-        architecture="arm",
-        os="linux",
-        os_version="1.0",
-        os_features=("sse4",),
-        variant="v7",
-        features=("f1",),
-    )
-    obj = ObservationObject(
-        platforms=(PlatformEntry(platform=platform, digest="sha256:" + "4" * 64),)
-    )
-    parsed = json.loads(validate_entry.serialize_observation_object(obj))
-    platform_dict = parsed["platforms"][0]["platform"]
-    assert platform_dict["os.version"] == "1.0"
-    assert platform_dict["os.features"] == ["sse4"]
-    assert platform_dict["variant"] == "v7"
-    assert platform_dict["features"] == ["f1"]
-
-
-def test_serialize_observation_object_escapes_non_ascii_and_is_digest_stable() -> None:
-    # CONTRACTS.md §1's `ensure_ascii=True` is dedup-load-bearing (ADR-1 D4):
-    # a non-ASCII field value must serialize to `\uXXXX` escapes, not raw
-    # UTF-8 bytes, and produce the same bytes (hence the same digest) on
-    # every call — proven here rather than only asserted by shape.
-    platform = OciPlatform(architecture="amd64", os="linux", variant="év7")  # "év7"
-    obj = ObservationObject(
-        platforms=(PlatformEntry(platform=platform, digest="sha256:" + "8" * 64),)
-    )
-    raw = validate_entry.serialize_observation_object(obj)
-    assert b"\\u00e9v7" in raw
-    assert "év7".encode() not in raw
-    assert validate_entry.serialize_observation_object(obj) == raw  # stable across calls
-
-
-def test_serialize_observation_object_minimal_platform_omits_optional_keys() -> None:
-    obj = ObservationObject(
-        platforms=(
-            PlatformEntry(
-                platform=OciPlatform(architecture="amd64", os="linux"), digest="sha256:" + "5" * 64
-            ),
-        )
-    )
-    parsed = json.loads(validate_entry.serialize_observation_object(obj))
-    platform_dict = parsed["platforms"][0]["platform"]
-    assert set(platform_dict.keys()) == {"architecture", "os"}
-
-
-def test_parse_observation_object_round_trips_full_fields() -> None:
-    platform = OciPlatform(
-        architecture="arm",
-        os="linux",
-        os_version="1.0",
-        os_features=("sse4",),
-        variant="v7",
-        features=("f1",),
-    )
-    obj = ObservationObject(
-        platforms=(PlatformEntry(platform=platform, digest="sha256:" + "6" * 64),)
-    )
-    raw = validate_entry.serialize_observation_object(obj)
-    assert validate_entry.parse_observation_object(raw) == obj
-
-
-def test_parse_observation_object_round_trips_minimal_fields() -> None:
-    obj = ObservationObject(
-        platforms=(
-            PlatformEntry(
-                platform=OciPlatform(architecture="amd64", os="linux"), digest="sha256:" + "7" * 64
-            ),
-        )
-    )
-    raw = validate_entry.serialize_observation_object(obj)
-    assert validate_entry.parse_observation_object(raw) == obj
-
-
-def test_parse_observation_object_malformed_json_raises() -> None:
-    with pytest.raises(ValidationError, match="malformed observation object JSON"):
-        validate_entry.parse_observation_object(b"{not json")
-
-
-def test_parse_observation_object_non_object_json_raises() -> None:
+def test_parse_image_index_digests_non_object_json_raises() -> None:
     with pytest.raises(ValidationError, match="JSON object"):
-        validate_entry.parse_observation_object(b'"just a string"')
+        validate_entry.parse_image_index_digests(b'"just a string"')
 
 
-def test_parse_observation_object_missing_platforms_key_raises() -> None:
-    with pytest.raises(ValidationError, match="malformed observation object structure"):
-        validate_entry.parse_observation_object(b"{}")
+def test_parse_image_index_digests_bare_manifest_is_rejected() -> None:
+    """A single image manifest hashes to its filename just as well as an
+    index does — the document-kind check is the only thing that catches it."""
+    raw = json.dumps({"schemaVersion": 2, "config": {"digest": "sha256:aaa"}}).encode("utf-8")
+    with pytest.raises(ValidationError, match="not an OCI image index"):
+        validate_entry.parse_image_index_digests(raw)
+
+
+def test_parse_image_index_digests_non_list_manifests_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="not an OCI image index"):
+        validate_entry.parse_image_index_digests(b'{"manifests":{"digest":"sha256:aaa"}}')
+
+
+def test_parse_image_index_digests_descriptor_without_digest_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="no string `digest`"):
+        validate_entry.parse_image_index_digests(b'{"manifests":[{"size":42}]}')
+
+
+def test_parse_image_index_digests_non_object_descriptor_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="no string `digest`"):
+        validate_entry.parse_image_index_digests(b'{"manifests":["sha256:aaa"]}')
+
+
+def test_parse_image_index_digests_non_string_digest_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="no string `digest`"):
+        validate_entry.parse_image_index_digests(b'{"manifests":[{"digest":42}]}')
 
 
 # --- parse_package_id (re-homed from the deleted core/validate_payload.py) --

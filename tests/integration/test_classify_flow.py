@@ -151,8 +151,8 @@ def test_refresh_lane(
     fake_forge: FakeForgeServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The machine lane over a realistic announce diff: the root *plus* the
-    observation object it now points at, which is what `indexbot announce`
-    actually commits — a single-path diff would not exercise the refresh-scope
+    image index it now points at, which is what `indexbot announce` actually
+    commits — a single-path diff would not exercise the refresh-scope
     allowlist at all."""
     before = _root(tags={"1.0.0": TagEntry(content="sha256:" + "a" * 64, observed="T0")})
     after = _root(tags={"1.0.0": TagEntry(content="sha256:" + "b" * 64, observed="T1")})

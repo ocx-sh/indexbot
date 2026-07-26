@@ -76,17 +76,25 @@ class FakeRegistry:
 
     def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
         """Same digest doctrine as `adapters/ghcr.py`: `digest` is computed
-        from `raw` (this fake's §1-canonical serialization of the configured
-        manifest dict), never a value tests set directly — so a `core/`
-        consumer relying on a locally synthesized/trusted digest fails
-        against this fake exactly as it would against the real adapter."""
+        from `raw`, never a value tests set directly — so a `core/` consumer
+        relying on a locally synthesized/trusted digest fails against this
+        fake exactly as it would against the real adapter.
+
+        `raw` is **deliberately not any encoder's canonical output**: 2-space
+        indent, the configured mapping's own insertion key order. A registry
+        serves the bytes its publisher pushed and the index stores those bytes
+        verbatim, so a consumer that re-encoded a parsed manifest must be
+        byte-distinguishable here from one that copied `raw`. Emitting
+        `json.dumps(..., sort_keys=True, separators=(",", ":"))` instead would
+        make the two indistinguishable and turn every "stored verbatim"
+        assertion written against this fake into a tautology
+        (`test_fake_registry_manifest_bytes_are_not_canonical_json` guards it).
+        """
         try:
             manifest = self.manifests[(repository, reference)]
         except KeyError:
             raise KeyError(f"no manifest for {repository}@{reference}") from None
-        raw = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
+        raw = json.dumps(manifest, indent=2, ensure_ascii=True).encode("utf-8")
         digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
         return ManifestFetch(raw=raw, digest=digest, parsed=manifest)
 

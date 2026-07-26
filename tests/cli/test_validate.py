@@ -8,17 +8,14 @@ import pytest
 
 from indexbot.cli import validate
 from indexbot.core.observe import observe_one_tag
-from indexbot.core.validate_entry import serialize_observation_object, serialize_package_root
+from indexbot.core.validate_entry import serialize_package_root
 from indexbot.exit_codes import ExitCode
 from indexbot.model import (
     Desc,
     ManifestFetch,
-    ObservationObject,
-    OciPlatform,
     Owner,
     OwnershipProbeResult,
     PackageRoot,
-    PlatformEntry,
     TagEntry,
     Upstream,
     Yank,
@@ -49,39 +46,36 @@ def _cas_path(digest: str, *, ext: str = "json") -> str:
     return f"p/{_NAMESPACE}/{_PACKAGE}/o/sha256/{digest.removeprefix('sha256:')}.{ext}"
 
 
-def _observation_bytes(*, platforms: tuple[PlatformEntry, ...] | None = None) -> bytes:
-    if platforms is None:
-        platform = OciPlatform(architecture="amd64", os="linux")
-        platforms = (PlatformEntry(platform=platform, digest=_PLATFORM_DIGEST),)
-    return serialize_observation_object(ObservationObject(platforms=platforms))
+def _index(
+    *, platform_digest: str = _PLATFORM_DIGEST, architecture: str = "amd64"
+) -> dict[str, object]:
+    """The only manifest shape this index records — an OCI image index."""
+    return {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {"platform": {"architecture": architecture, "os": "linux"}, "digest": platform_digest}
+        ],
+    }
 
 
 def _content_digest(object_bytes: bytes) -> str:
     return f"sha256:{hashlib.sha256(object_bytes).hexdigest()}"
 
 
-def _bare_manifest(architecture: str = "amd64") -> dict[str, object]:
-    return {"platform": {"architecture": architecture, "os": "linux"}}
-
-
 def _observed_tag(tag: str = "3.28.1") -> tuple[TagEntry, bytes, FakeRegistry]:
-    """A committed `TagEntry` + its CAS object bytes + a `FakeRegistry` that
-    independently re-derives to the exact same content digest — the online
-    happy-path baseline every non-offline test needs now that
-    `core/verify_claims.py` re-derives each claimed tag from registry truth
-    (fork-PR announce revamp). Also registers a manifest at the resulting
-    platform digest itself, so the pre-existing G-15 digest-in-scope loop
-    (unrelated to `verify_claims`, still runs unconditionally online) keeps
-    passing too."""
+    """A committed `TagEntry` + the registry's own index bytes + a
+    `FakeRegistry` that still serves them — the online happy-path baseline
+    every non-offline test needs, since `core/verify_claims.py` re-observes
+    each claimed tag. Also registers a manifest at the index's own descriptor
+    digest, so the G-15 digest-in-scope loop passes too."""
     registry = FakeRegistry(tags={_REPOSITORY: [tag]}, ownership={_REPOSITORY: "confirmed"})
-    registry.manifests[(_REPOSITORY, tag)] = _bare_manifest()
+    registry.manifests[(_REPOSITORY, tag)] = _index()
+    registry.manifests[(_REPOSITORY, _PLATFORM_DIGEST)] = {"schemaVersion": 2}
     observation = observe_one_tag(_REPOSITORY, tag, registry)
     assert observation is not None
-    platform_digest = observation.object.platforms[0].digest
-    registry.manifests[(_REPOSITORY, platform_digest)] = {"schemaVersion": 2}
-    object_bytes = serialize_observation_object(observation.object)
     entry = TagEntry(content=observation.content_digest, observed="2026-07-17T00:00:00Z")
-    return entry, object_bytes, registry
+    return entry, observation.raw, registry
 
 
 def _build(
@@ -176,12 +170,12 @@ def test_run_no_tags_online_passes_and_still_probes_ownership() -> None:
     assert result == ExitCode.OK
 
 
-def test_run_tag_with_no_platforms_passes() -> None:
+def test_run_tag_with_an_empty_index_passes() -> None:
     registry = FakeRegistry(tags={_REPOSITORY: ["latest"]}, ownership={_REPOSITORY: "confirmed"})
     registry.manifests[(_REPOSITORY, "latest")] = {"manifests": []}
     observation = observe_one_tag(_REPOSITORY, "latest", registry)
     assert observation is not None
-    object_bytes = serialize_observation_object(observation.object)
+    object_bytes = observation.raw
     files = _build(
         tags={
             "latest": TagEntry(content=observation.content_digest, observed="2026-07-17T00:00:00Z")
@@ -402,14 +396,11 @@ def test_run_malformed_desc_logo_digest_is_validation_failure() -> None:
 
 
 def test_run_malformed_platform_digest_is_validation_failure_never_reaches_registry() -> None:
-    # A CAS object whose platforms[*].digest is not `sha256:<64 hex>`-shaped
+    # A CAS object whose manifests[*].digest is not `sha256:<64 hex>`-shaped
     # (e.g. a path-traversal payload) must be rejected by `parse_digest`
     # before it ever reaches `registry.get_manifest` — `_PoisonRegistry`
     # proves the network is never touched.
-    platform = OciPlatform(architecture="amd64", os="linux")
-    object_bytes = _observation_bytes(
-        platforms=(PlatformEntry(platform=platform, digest="sha256:aaaa/../../evil"),)
-    )
+    object_bytes = json.dumps(_index(platform_digest="sha256:aaaa/../../evil")).encode("utf-8")
     tag_digest = _content_digest(object_bytes)
     files = _build(
         tags={"3.28.1": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
@@ -440,8 +431,88 @@ def test_run_claim_digest_mismatch_is_validation_failure() -> None:
     # self-consistent and its platform digest is still in scope.
     entry, object_bytes, registry = _observed_tag()
     files = _build(tags={"3.28.1": entry}, extra_files={_cas_path(entry.content): object_bytes})
-    registry.manifests[(_REPOSITORY, "3.28.1")] = _bare_manifest(architecture="arm64")
+    registry.manifests[(_REPOSITORY, "3.28.1")] = _index(architecture="arm64")
     result = _run(_args([_PATH]), files=files, registry=registry)
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
+def test_run_claim_retagged_to_a_bare_manifest_reports_a_finding(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A tag re-pointed at a single image manifest reaches the operator as a
+    `digest-mismatch` *finding* from `verify_claims`, not as an escaped
+    `observe_one_tag` shape error. Both land on exit 1 here, so the exit code
+    alone cannot tell them apart — the message is what proves the claim was
+    verified rather than the sweep aborted."""
+    entry, object_bytes, registry = _observed_tag()
+    files = _build(tags={"3.28.1": entry}, extra_files={_cas_path(entry.content): object_bytes})
+    registry.manifests[(_REPOSITORY, "3.28.1")] = {"config": {"digest": "sha256:" + "9" * 64}}
+    result = _run(_args([_PATH]), files=files, registry=registry)
+    assert result == ExitCode.VALIDATION_FAILURE
+    err = capsys.readouterr().err
+    assert "claim verification failed" in err
+    assert "digest-mismatch: 3.28.1" in err
+
+
+# --- D7: a hand-authored root may not carry a reserved tag ----------------
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "__ocx.desc",
+        "__ocx",
+        "__ocxfoo",
+        "__OCX.desc",
+        "sha256." + "a" * 64,
+        "sha384." + "b" * 96,
+        "sha512." + "c" * 128,
+    ],
+)
+def test_run_reserved_tag_is_validation_failure_and_never_touches_registry(tag: str) -> None:
+    """The PR gate is the only layer a hand-authored root passes through, so
+    the reserved-tag rejection lives here — and it lands before any network
+    call, which `_PoisonRegistry` proves."""
+    files = _build(
+        tags={tag: TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z")}
+    )
+    result = _run(_args([_PATH]), files=files, registry=_PoisonRegistry())
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
+def test_run_ordinary_tag_names_still_pass() -> None:
+    entry, object_bytes, registry = _observed_tag()
+    files = _build(tags={"3.28.1": entry}, extra_files={_cas_path(entry.content): object_bytes})
+    assert _run(_args([_PATH]), files=files, registry=registry) == ExitCode.OK
+
+
+# --- D4(c): a committed CAS object must be an OCI image index -------------
+
+
+def test_run_cas_object_that_is_not_an_image_index_is_validation_failure() -> None:
+    """The bytes hash correctly to their own filename — only the document-kind
+    check catches that they are a bare image manifest, not an index."""
+    object_bytes = json.dumps({"schemaVersion": 2, "config": {"digest": _PLATFORM_DIGEST}}).encode(
+        "utf-8"
+    )
+    tag_digest = _content_digest(object_bytes)
+    files = _build(
+        tags={"3.28.1": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
+        extra_files={_cas_path(tag_digest): object_bytes},
+    )
+    result = _run(_args([_PATH]), files=files, registry=_PoisonRegistry())
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
+def test_run_cas_object_kind_is_checked_even_offline() -> None:
+    """A governance check a flag can switch off is not a governance check."""
+    object_bytes = b'{"schemaVersion":2,"layers":[]}'
+    tag_digest = _content_digest(object_bytes)
+    files = _build(
+        tags={"3.28.1": TagEntry(content=tag_digest, observed="2026-07-17T00:00:00Z")},
+        extra_files={_cas_path(tag_digest): object_bytes},
+    )
+    result = _run(_args([_PATH], offline=True), files=files, registry=_PoisonRegistry())
     assert result == ExitCode.VALIDATION_FAILURE
 
 
@@ -463,7 +534,7 @@ def test_run_tampered_content_digest_is_anomaly() -> None:
         tags={"3.28.1": TagEntry(content=claimed_digest, observed="2026-07-17T00:00:00Z")},
         # Present at the claimed path, but its bytes hash to something else
         # entirely — CAS integrity violation.
-        extra_files={_cas_path(claimed_digest): b'{"platforms":[]}'},
+        extra_files={_cas_path(claimed_digest): b'{"manifests":[]}'},
     )
     result = _run(_args([_PATH]), files=files, registry=FakeRegistry())
     assert result == ExitCode.ANOMALY

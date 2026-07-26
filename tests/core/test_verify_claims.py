@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 
 from indexbot.core.observe import observe_one_tag
-from indexbot.core.validate_entry import serialize_observation_object
 from indexbot.core.verify_claims import ClaimFinding, verify_claims
 from indexbot.model import Desc, Owner, PackageId, PackageRoot, TagEntry
 from tests.fakes import FakeRegistry
@@ -26,24 +25,29 @@ def _root(tags: dict[str, TagEntry] | None = None, *, desc: Desc | None = None) 
     )
 
 
-def _bare_manifest(architecture: str = "amd64") -> dict[str, object]:
-    return {"platform": {"architecture": architecture, "os": "linux"}}
+def _index(architecture: str = "amd64") -> dict[str, object]:
+    return {
+        "schemaVersion": 2,
+        "manifests": [
+            {
+                "platform": {"architecture": architecture, "os": "linux"},
+                "digest": "sha256:" + "1" * 64,
+            }
+        ],
+    }
 
 
 def _observed_claim(
     tag: str, *, architecture: str = "amd64"
 ) -> tuple[TagEntry, bytes, FakeRegistry]:
-    """A `TagEntry` + its CAS object bytes + a `FakeRegistry` that
-    independently re-derives to the exact same content digest — the clean
-    baseline every test starts from and mutates one field of."""
-    registry = FakeRegistry(
-        tags={_REPO: [tag]}, manifests={(_REPO, tag): _bare_manifest(architecture)}
-    )
+    """A `TagEntry` + the registry's own index bytes + a `FakeRegistry` still
+    serving them — the clean baseline every test starts from and mutates one
+    field of."""
+    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index(architecture)})
     observation = observe_one_tag(_REPO, tag, registry)
     assert observation is not None
-    object_bytes = serialize_observation_object(observation.object)
     entry = TagEntry(content=observation.content_digest, observed="2026-07-17T00:00:00Z")
-    return entry, object_bytes, registry
+    return entry, observation.raw, registry
 
 
 def test_verify_claims_clean_tag_is_empty() -> None:
@@ -51,6 +55,22 @@ def test_verify_claims_clean_tag_is_empty() -> None:
     root = _root({"3.28.1": entry})
     findings = verify_claims(_PACKAGE_ID, root, {entry.content: object_bytes}, registry)
     assert findings == ()
+
+
+def test_verify_tag_claim_compares_against_the_registry_computed_digest() -> None:
+    """The claimed `content` is compared to `ManifestFetch.digest` — the
+    registry's own digest over the bytes it served — not to anything this bot
+    re-derived. Equal digest, equal bytes, no finding; and the committed CAS
+    bytes are literally the ones the registry returned."""
+    entry, object_bytes, registry = _observed_claim("3.28.1")
+    assert entry.content == registry.get_manifest(_REPO, "3.28.1").digest
+    assert object_bytes == registry.get_manifest(_REPO, "3.28.1").raw
+    assert (
+        verify_claims(
+            _PACKAGE_ID, _root({"3.28.1": entry}), {entry.content: object_bytes}, registry
+        )
+        == ()
+    )
 
 
 def test_verify_claims_no_tags_no_desc_is_empty() -> None:
@@ -78,6 +98,51 @@ def test_verify_claims_digest_mismatch() -> None:
         _PACKAGE_ID,
         root,
         {stale_entry.content: object_bytes, entry.content: object_bytes},
+        registry,
+    )
+    assert findings == (
+        ClaimFinding(package_id=_PACKAGE_ID, kind="digest-mismatch", detail="3.28.1"),
+    )
+
+
+def test_verify_claims_retagged_to_a_bare_manifest_is_a_digest_mismatch() -> None:
+    """The publisher re-tagged `3.28.1` onto a single image manifest.
+    `observe_one_tag` raises `ValidationError` for that, but this module
+    returns findings and never raises: the claim "this tag resolves to the
+    committed index" stopped being true, which is `"digest-mismatch"`.
+
+    Letting the raise through would drop the exact drift the nightly sweep
+    exists to detect, exit on the `ValidationError` arm instead of the
+    anomaly arm, and skip every package queued behind this one."""
+    entry, object_bytes, _registry = _observed_claim("3.28.1")
+    retagged = FakeRegistry(
+        tags={_REPO: ["3.28.1"]},
+        manifests={(_REPO, "3.28.1"): {"config": {"digest": "sha256:" + "9" * 64}}},
+    )
+    findings = verify_claims(
+        _PACKAGE_ID, _root({"3.28.1": entry}), {entry.content: object_bytes}, retagged
+    )
+    assert findings == (
+        ClaimFinding(package_id=_PACKAGE_ID, kind="digest-mismatch", detail="3.28.1"),
+    )
+
+
+def test_verify_claims_keeps_verifying_after_a_rejected_tag() -> None:
+    """One bad tag must not abandon the packages/tags behind it — the
+    concrete cost of an escaping exception."""
+    good_entry, good_bytes, _r = _observed_claim("3.27.0")
+    bad_entry, bad_bytes, _r2 = _observed_claim("3.28.1")
+    registry = FakeRegistry(
+        tags={_REPO: ["3.27.0", "3.28.1"]},
+        manifests={
+            (_REPO, "3.27.0"): _index(),
+            (_REPO, "3.28.1"): {"config": {"digest": "sha256:" + "9" * 64}},
+        },
+    )
+    findings = verify_claims(
+        _PACKAGE_ID,
+        _root({"3.27.0": good_entry, "3.28.1": bad_entry}),
+        {good_entry.content: good_bytes, bad_entry.content: bad_bytes},
         registry,
     )
     assert findings == (

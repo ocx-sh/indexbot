@@ -1,18 +1,10 @@
 from __future__ import annotations
 
+import json
+
 from indexbot.core.observe import Observation
 from indexbot.core.regenerate import regenerate
-from indexbot.model import (
-    Desc,
-    ObservationObject,
-    OciPlatform,
-    Owner,
-    PackageRoot,
-    PlatformEntry,
-    TagEntry,
-    Upstream,
-    Yank,
-)
+from indexbot.model import Desc, Owner, PackageRoot, TagEntry, Upstream, Yank
 from tests.fakes import FixedClock
 
 _OWNER = Owner(github="alice", github_id=1)
@@ -36,10 +28,28 @@ def _root(tags: dict[str, TagEntry], *, superseded_by: str | None = None) -> Pac
     )
 
 
-def _observation(tag: str, digest: str) -> Observation:
-    platform = OciPlatform(architecture="amd64", os="linux")
-    entry = PlatformEntry(platform=platform, digest="sha256:" + "1" * 64)
-    return Observation(tag=tag, content_digest=digest, object=ObservationObject(platforms=(entry,)))
+_INDEX_RAW = json.dumps(
+    {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": "sha256:" + "1" * 64,
+                "size": 512,
+                "platform": {"architecture": "amd64", "os": "linux"},
+            }
+        ],
+    }
+).encode()
+"""Stand-in for the registry's image index bytes. `regenerate` reads only
+`tag`/`content_digest`/`source`, never `raw` — these bytes are here because
+an `Observation` cannot exist without them, not because anything asserts on
+them."""
+
+
+def _observation(tag: str, digest: str, source: str | None = None) -> Observation:
+    return Observation(tag=tag, content_digest=digest, raw=_INDEX_RAW, source=source)
 
 
 def test_regenerate_new_tag_gets_fresh_timestamp() -> None:
@@ -111,23 +121,14 @@ def test_regenerate_idempotent_run_twice_no_timestamp_churn() -> None:
 _SOURCE = "https://github.com/ocx-sh/mirror-cmake"
 
 
-def _sourced(tag: str, digest: str, source: str | None) -> Observation:
-    return Observation(
-        tag=tag,
-        content_digest=digest,
-        object=_observation(tag, digest).object,
-        source=source,
-    )
-
-
 def test_regenerate_takes_source_from_the_latest_version_tag() -> None:
     current = _root({})
     result = regenerate(
         current,
         (
-            _sourced("3.28.1", _DIGEST_A, _SOURCE),
-            _sourced("latest", _DIGEST_A, "https://github.com/wrong/repo"),
-            _sourced("3.27.0", _DIGEST_B, "https://github.com/older/repo"),
+            _observation("3.28.1", _DIGEST_A, _SOURCE),
+            _observation("latest", _DIGEST_A, "https://github.com/wrong/repo"),
+            _observation("3.27.0", _DIGEST_B, "https://github.com/older/repo"),
         ),
         None,
         FixedClock(fixed="T1"),
@@ -142,7 +143,10 @@ def test_regenerate_source_none_without_a_plain_version_tag() -> None:
     current = _root({})
     result = regenerate(
         current,
-        (_sourced("latest", _DIGEST_A, _SOURCE), _sourced("musl-1.2.3", _DIGEST_B, _SOURCE)),
+        (
+            _observation("latest", _DIGEST_A, _SOURCE),
+            _observation("musl-1.2.3", _DIGEST_B, _SOURCE),
+        ),
         None,
         FixedClock(fixed="T1"),
     )
@@ -152,7 +156,7 @@ def test_regenerate_source_none_without_a_plain_version_tag() -> None:
 def test_regenerate_source_none_when_latest_version_carries_no_annotation() -> None:
     current = _root({})
     result = regenerate(
-        current, (_sourced("3.28.1", _DIGEST_A, None),), None, FixedClock(fixed="T1")
+        current, (_observation("3.28.1", _DIGEST_A, None),), None, FixedClock(fixed="T1")
     )
     assert result.source is None
 
@@ -160,8 +164,10 @@ def test_regenerate_source_none_when_latest_version_carries_no_annotation() -> N
 def test_regenerate_rederives_source_never_carries_it_over() -> None:
     # Publisher removed the annotation upstream -> the next announce drops
     # the claim rather than preserving a stale one.
-    observations = (_sourced("3.28.1", _DIGEST_A, _SOURCE),)
+    observations = (_observation("3.28.1", _DIGEST_A, _SOURCE),)
     first = regenerate(_root({}), observations, None, FixedClock(fixed="T1"))
     assert first.source == _SOURCE
-    second = regenerate(first, (_sourced("3.28.1", _DIGEST_A, None),), None, FixedClock(fixed="T2"))
+    second = regenerate(
+        first, (_observation("3.28.1", _DIGEST_A, None),), None, FixedClock(fixed="T2")
+    )
     assert second.source is None

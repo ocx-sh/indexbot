@@ -25,34 +25,26 @@ WP2-M) passes the real `adapters/*` implementation. "No I/O" means no direct
 such effect is reached exclusively through an injected port. This is the same
 pattern the existing scaffold already uses for `ClockPort`/`FixedClock`.
 
-## 1. Canonical JSON & digest computation (binding for every module below)
+## 1. CAS objects are copied, not serialized (binding for every module below)
 
-Any function that computes a content digest (`ObservationObject` digests,
-`desc.digest` comparisons, CAS filenames) uses this encoding, no exceptions —
-two independently-implemented modules computing the same logical content must
-produce byte-identical output or dedup (ADR-1 D4) silently breaks:
+A CAS object under `p/<ns>/<pkg>/o/sha256/<hex>.json` is the OCI image index
+the physical registry served for a tag, stored **verbatim**. Its ordering is
+the registry's ordering; its whitespace is the registry's whitespace; `<hex>`
+is `sha256` of those exact bytes, which is the registry's own manifest digest
+for that index. **No module in this repo serializes one**, so there is no
+canonical encoding to agree on and nothing for two implementations to drift
+apart about — the property earlier revisions bought with a sort key and a
+minified encoder is now free, because the bytes never round-trip.
 
-```python
-json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-```
-UTF-8 encoded, then `hashlib.sha256(...).hexdigest()`, written as
-`f"sha256:{hex}"`. `ObservationObject.platforms` is sorted by
-`(platform.architecture, platform.os, platform.os_version or "", platform.variant or "", platform.os_features, platform.features)`
-(`core/validate_entry.py`'s `platform_sort_key` — the one shared key every
-sorter imports, never a second copy; two platforms differing only in
-`os_features`/`features`, e.g. the dual-libc `libc.glibc` vs `libc.musl`
-case, must not tie under a shorter key or Python's stable sort would leak
-registry manifest-list order into the digest). `os_features`/`features`
-are compared as tuples directly, never `",".join(...)`-ed into a string
-first — joining is not collision-free (`("a,b",)` and `("a", "b")` both
-join to `"a,b"`), which would silently reproduce the same registry-order
-dependence this key exists to eliminate
-before serialization — registry-returned manifest-list ordering must never
-affect the digest. The JSON *shape* serialized is the wire shape from
-`schema/observation-object.schema.json` (`os.version`/`os.features` as
-literal dotted keys, not a nested `os` object) — `core/validate_entry.py`
-owns the `PackageRoot`/`ObservationObject` <-> `dict` codec (§5.6) that every
-other module reuses; do not hand-roll a second encoder.
+`core/observe.py` records `ManifestFetch.raw` as `Observation.raw` and
+`ManifestFetch.digest` as `Observation.content_digest`; every writer
+(`cli/announce.py`, `cli/seed_import.py`, `core/render.py`) copies that
+`bytes` object through unchanged.
+
+The one JSON document this bot *does* author is the package root, and it has
+its own byte-exact form (§5.6, §14) — pretty-printed for PR review, never
+digested. `desc.digest` comparisons and desc-blob digests are likewise
+`sha256` over bytes the registry served, never over a re-encoding.
 
 ## 2. Test conventions
 
@@ -178,15 +170,16 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
   (N-segment grammar — never `PACKAGE_ID_RE`).
 - `parse_digest(raw: str) -> str` — `re.fullmatch(r"sha256:[a-f0-9]{64}", raw)`
   or `ValidationError`. Every digest-shaped string anywhere in the bot
-  (`TagEntry.content`, `PlatformEntry.digest`, `Desc.digest`/`.readme`/
-  `.logo`) is validated through this one function before it is ever used to
+  (`TagEntry.content`, an image index's `manifests[*].digest`,
+  `Desc.digest`/`.readme`/`.logo`) is validated through this one function
+  before it is ever used to
   build a filesystem path — digest-hex `fullmatch` before path join, no
   exceptions.
 - `check_digest_self_consistent(digest: str, object_bytes: bytes) -> None`
   (fork-PR announce revamp, 2026-07-18) — the general form: recomputes sha256
-  of `object_bytes` (§1's canonical form — the object was already serialized
-  canonically when written, so this is a byte-equality check, not a
-  re-serialization) and compares to `digest`; mismatch is `AnomalyError`
+  of `object_bytes` (the committed bytes exactly as they sit on disk — a
+  byte-equality check, never a re-serialization) and compares to `digest`;
+  mismatch is `AnomalyError`
   (this is CAS integrity, not a routine validation failure — the file's name
   lies about its own content). Any claimed digest string works here, not
   only a `TagEntry`'s — `cli/validate.py`'s blanket per-file CAS scan and
@@ -208,12 +201,11 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
   produces the exact bytes committed to `p/<ns>/<pkg>.json` — pretty-printed
   (`json.dumps(..., indent=2, sort_keys=False)` preserving the field order
   `model.PackageRoot` declares them in, matching `schema/root.schema.json`'s
-  `required` order) plus a trailing newline, **not** the canonical
-  minified form from §1 (§1's canonical form is only for content-addressed
-  CAS objects, which must dedup; the human-diffable root is optimized for PR
-  review, not digest stability — the root's own bytes are never digested,
-  only referenced by `TagEntry.content`, which points at an
-  `ObservationObject`, not at the root itself). `upstream: None` -> the
+  `required` order) plus a trailing newline. It is the one JSON document
+  this bot authors, and it is optimized for PR review, not digest stability
+  — the root's own bytes are never digested, only referenced by
+  `TagEntry.content`, which points at an OCI image index, not at the root
+  itself. `upstream: None` -> the
   `"upstream"` key is **omitted** from the dict entirely (schema forbids
   `null` there, ADR-2 ND-9); `superseded_by: None` -> the `"superseded_by"`
   key is likewise **omitted** entirely (same omit-when-absent contract);
@@ -225,10 +217,24 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
   membership); it only needs to not crash on well-formed-but-unexpected
   JSON and to fail loudly (never partially construct a `PackageRoot`) on
   malformed JSON.
-- `parse_observation_object(raw: bytes) -> ObservationObject` /
-  `serialize_observation_object(obj: ObservationObject) -> bytes` — same
-  codec relationship, but `serialize_observation_object` **is** §1's
-  canonical minified form (this is the CAS-digested one).
+- `is_reserved_tag(tag: str) -> bool` / `check_no_reserved_tags(root: PackageRoot) -> None`
+  — D7's tag reservation, one implementation, two callers. Reserved: the
+  case-insensitive `__ocx` **prefix** (`__ocx.desc`, `__ocx`, `__ocxfoo`,
+  `__OCX.desc`), and the canonical `sha256.<64hex>` / `sha384.<96hex>` /
+  `sha512.<128hex>` tags `ocx package push` writes (hex case-insensitive,
+  per-algorithm length exact). `check_no_reserved_tags` raises
+  `ValidationError` listing every offending `tags` key — the PR gate is the
+  only layer a hand-authored root passes through. `core/observe.py`'s sweep
+  imports `is_reserved_tag` to **exclude** such tags rather than refuse the
+  repository; `schema/root.schema.json`'s `propertyNames.not` documents the
+  same intent but cannot express the full rule.
+- `parse_image_index_digests(raw: bytes) -> tuple[str, ...]` — the D4(c)
+  document-kind gate. One committed CAS object's `manifests[*].digest`, in
+  wire order; `ValidationError` if `raw` is not a JSON object carrying a
+  `manifests` list of descriptors with string `digest` fields. There is no
+  write side: nothing serializes a CAS object (§1). Unknown index fields
+  (`subject`, `artifactType`, `annotations`, future spec additions) are
+  passed over, not rejected — these are bytes OCX does not author.
 
 `registry_checks` (network — G-15, digest-scope):
 
@@ -324,32 +330,37 @@ test it, defeating the whole point of the split.
 ```python
 @dataclass(frozen=True, slots=True)
 class Observation:
-    """One tag's freshly observed state. Input to regenerate/anomaly."""
+    """A record of what a tag resolved to at observation time. `raw` is the
+    registry's OCI image index, verbatim — this class names the *event*,
+    never the artifact. Input to regenerate/anomaly."""
     tag: str
-    content_digest: str          # sha256:<hex>, §1 canonical form of `object`
-    object: ObservationObject
+    content_digest: str          # == ManifestFetch.digest, the registry's own index digest
+    raw: bytes                   # == ManifestFetch.raw, never re-serialized
+    source: str | None = None    # org.opencontainers.image.source, https:// only
 
 def observe_one_tag(repository: str, tag: str, registry: RegistryPort) -> Observation | None:
     """One tag's freshly observed state, or `None` if `tag` no longer exists
-    on `repository` (a real 404). Same manifest-shape handling as `observe`
-    below, extracted (fork-PR announce revamp, 2026-07-18) so a caller that
-    already knows which *specific* tags it cares about — `core/verify_claims.py`
-    re-deriving one claimed tag, `cli/announce.py` observing only the
-    publisher's curated tag set — never has to call `registry.list_tags()`
-    first just to reach a single tag's manifest.
+    on `repository` (a real 404). The fetched manifest must be an OCI image
+    index — discriminated by a `"manifests"` key — or `ValidationError` is
+    raised naming both the tag and the repository: this index records image
+    indices only, so a tag resolving to a single image manifest is a
+    publishing fault to surface, not a shape to convert. Extracted (fork-PR
+    announce revamp, 2026-07-18) so a caller that already knows which
+    *specific* tags it cares about — `core/verify_claims.py` re-deriving one
+    claimed tag, `cli/announce.py` observing only the publisher's curated tag
+    set — never has to call `registry.list_tags()` first just to reach a
+    single tag's manifest.
     """
 
 def observe(repository: str, registry: RegistryPort) -> tuple[Observation, ...]:
     """One `Observation` per `registry.list_tags(repository)` entry, via
-    `observe_one_tag` (zero behavior change from the pre-revamp inline
-    version). For each tag, `registry.get_manifest(repository, tag)` returns
-    either an OCI image manifest (single platform) or an image index
-    (multi-platform) — distinguish by the `mediaType`/`manifests` key per the
-    OCI image-spec; a bare manifest becomes a one-entry `platforms[]` (its own
-    `platform`/`config.platform` field — image manifests carry platform
-    info directly, not per the index shape); an index's `manifests[]`
-    entries each become one `PlatformEntry`. `platforms[]` is sorted and
-    digested per §1. A tag whose manifest fetch raises `KeyError` (fetched
+    `observe_one_tag`, **skipping every reserved tag name**
+    (`validate_entry.is_reserved_tag`, §5.6 — imported, never restated).
+    That exclusion is load-bearing: `ocx package push` writes a canonical
+    `sha256.<hex>` tag beside every version tag plus an `__ocx.desc`
+    description tag, both resolving to bare image manifests, so a sweep that
+    did not skip them would refuse every ocx-published repository on its
+    first reserved tag. A tag whose manifest fetch raises `KeyError` (fetched
     but vanished between `list_tags` and `get_manifest` — a real registry
     race) is **skipped**, not fatal — `observe_one_tag` returning `None`. A
     `TransientError` from either call propagates uncaught (the whole
@@ -390,7 +401,11 @@ subset of what the registry carries; that is the entire point of owner
 curation — decision-set item 2, "announce is the only add/remove
 authority"). Per tag: `observe_one_tag(root.repository, tag, registry)`
 returning `None` -> `"tag-missing-upstream"`; a different `content_digest`
--> `"digest-mismatch"`; the claimed digest missing from/not hashing to
+-> `"digest-mismatch"`; `observe_one_tag` *raising* `ValidationError` (the
+tag now resolves to a bare image manifest, or to bytes over
+`_MAX_INDEX_BYTES`) -> `"digest-mismatch"` as well, since the claim that
+this tag resolves to the committed index is exactly what stopped being true;
+the claimed digest missing from/not hashing to
 `cas_object_bytes` -> `"cas-object-missing"`/`"cas-object-hash-mismatch"`.
 `root.desc.readme`/`.logo`, when set, get the identical CAS-hash check
 (missing/mismatch -> `"desc-blob-missing"`/`"desc-blob-hash-mismatch"`) —
@@ -510,7 +525,7 @@ def regenerate(
 class Patch:
     package_id: PackageId
     root: PackageRoot                                       # target — write verbatim (validate_entry.serialize_package_root)
-    new_objects: tuple[tuple[str, ObservationObject], ...]   # (digest, object) pairs not already reachable from `current`
+    new_objects: tuple[tuple[str, bytes], ...]               # (digest, the registry's index bytes) not already reachable from `current`
     summary: str                                             # one-line PR-body fragment, e.g. "+3.29.0, ~latest -> sha256:bbbb"
 
 def diff(current: PackageRoot, target: PackageRoot) -> Patch | None:
@@ -641,9 +656,10 @@ Returned file list:
   — one entry per package in `ordered`, keyed on the bare `<namespace>/<package>`
   id (not the `ocx.sh/`-prefixed `name`). The digest is `sha256` of
   `source.root_raw`'s **exact committed bytes** — explicitly **not** a
-  re-serialization through §1's canonical form (root bytes are never digested
-  for wire-contract purposes elsewhere either, same rationale as §5's
-  `serialize_package_root`).
+  re-serialization through `serialize_package_root` (which would be
+  byte-identical today and is still the wrong input: what this digest
+  attests is the file that was committed, not what the dataclass would
+  produce from it).
 - `data/catalog/catalog.json` — the catalog-grid view-model, frozen shape
   (`plan_site_redesign`), referencing logo/readme blobs by their CAS URL
   rather than duplicating blob bytes into `/data/catalog` (ADR-3's explicit
@@ -665,7 +681,7 @@ Returned file list:
       "latestVersion": string | null,
       "tagCount": number,        // non-yanked tag count
       "platforms": string[],     // "<os>/<architecture>" union across every
-                                  // non-yanked tag's observation object,
+                                  // non-yanked tag's image index,
                                   // deduped + sorted
       "logoUrl": string | null, "readmeUrl": string | null   // pre-resolved CAS paths
     }]
@@ -926,9 +942,8 @@ this is the spec **ocx#216** (the client-side port of this same
 serialization, for a publisher tool implemented outside this repo) ports
 against. Restates §5/§1 in one place rather than requiring a cross-reader to
 reassemble it from two sections; **not** a new rule — `validate_entry.py`'s
-`serialize_package_root`/`serialize_observation_object` remain the one
-authoritative implementation, this section documents their exact output byte
--for-byte.
+`serialize_package_root` remains the one authoritative implementation of the
+root form, and this section documents its exact output byte-for-byte.
 
 **`p/<namespace>/<package>.json` (the package root — human-diffable, PR-review
 form, never digested itself):**
@@ -937,7 +952,7 @@ form, never digested itself):**
   explicitly but never overridden either) — non-ASCII field values (e.g. a
   non-ASCII `deprecated_message`, `desc.title`/`.description`, or
   `upstream.disclaimer`) serialize as `\uXXXX` escapes, never raw UTF-8
-  bytes, identical to the observation-object form below. A `serde_json`
+  bytes. A `serde_json`
   (or any other) port that defaults to `to_string_pretty`'s
   UTF-8-passthrough behavior instead will byte-diverge on the first
   non-ASCII value it serializes — required reading for **ocx#216**.
@@ -972,35 +987,34 @@ form, never digested itself):**
   or a third-party port of this spec) must emit exactly this form, not
   merely schema-equivalent JSON.
 
-**`p/<namespace>/<package>/o/sha256/<hex>.json` (the content-addressed
-observation object — §1's canonical minified form, the one that's actually
-digested):**
+**`p/<namespace>/<package>/o/sha256/<hex>.json` (the content-addressed CAS
+object):**
 
-- UTF-8 encoded, `ensure_ascii=True` — non-ASCII field values (e.g. a
-  variant string) serialize as `\uXXXX` escapes, never raw UTF-8 bytes; this
-  is dedup-load-bearing (ADR-1 D4), not a stylistic choice.
-- `json.dumps(data, sort_keys=True, separators=(",", ":"))` — **minified**
-  (no whitespace at all between tokens), keys **alphabetized** (the opposite
-  of the root's insertion-order rule above).
-- `platforms[]` sorted by `platform_sort_key` — the tuple
-  `(architecture, os, os_version or "", variant or "", os_features, features)`,
-  compared as tuples element-by-element, **never** `",".join(...)`-ed into a
-  string first (§1's own aliasing-prevention rationale). Registry
-  manifest-list order must never leak into this digest.
-- No trailing newline (unlike the root form above) — the digest is computed
-  over these exact bytes with nothing appended.
+- **Not serialized by this bot.** It is the exact byte sequence the physical
+  registry returned for `GET /v2/<repo>/manifests/<tag>`, stored unmodified;
+  `<hex>` is `sha256` of those bytes, which is the registry's own manifest
+  digest for that image index. There is no canonical form to re-derive, so
+  the byte-exact rules above have no counterpart here — CI verifies the hash
+  and the **document kind** (`cli/validate.py`, §12: `parse_image_index_digests`
+  rejects anything that is not an OCI image index), never a re-serialization.
+  This resolves ADR OQ3: the `o/` gate is a kind check, not a round-trip.
+- **Bounded at 4 MiB** (`core/observe.py`'s `_MAX_INDEX_BYTES`). Verbatim
+  storage hands the publisher's registry control of how many bytes each tag
+  commits — an image index's `annotations` are unbounded — so `observe_one_tag`
+  refuses anything larger with `ValidationError`. 4 MiB is the OCI
+  distribution spec's manifest size, not a number this repo invented.
+- Whitespace, key order and `manifests[]` order are the registry's. Two tags
+  resolving to byte-identical index responses still dedup to one object
+  (ADR-1 D3) — the registry's own digest already guarantees it.
 - Desc blobs (`o/sha256/<hex>.md` — readme, `o/sha256/<hex>.{svg,png}` —
-  logo) are **not** re-serialized at all: copied verbatim from the physical
-  registry's `__ocx.desc` artifact layers, digest = `sha256` of those exact
-  bytes. This spec's byte-exact rules above apply only to the two JSON forms
-  (root, observation object); a desc blob's "canonical form" is simply
-  whatever bytes the registry served.
+  logo) follow the same rule for the same reason: copied verbatim from the
+  physical registry's `__ocx.desc` artifact layers, digest = `sha256` of
+  those exact bytes.
 
 `tests/golden/serializer/` (WP-P0-P1, 2026-07-24) holds this section's
-committed byte vectors — real `serialize_package_root`/
-`serialize_observation_object` output, never hand-typed — and
-`tests/core/test_serializer_golden.py` is the round-trip gate that rides
-`task bot:test`.
+committed byte vectors for the root form — real `serialize_package_root`
+output, never hand-typed — and `tests/core/test_serializer_golden.py` is the
+gate that rides `task bot:test`.
 
 ## 15. `core/policy.py` — deployment policy (`.github/index-policy.json`)
 

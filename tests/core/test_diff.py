@@ -3,12 +3,9 @@ from __future__ import annotations
 from indexbot.core.diff import classify_change, diff
 from indexbot.core.observe import Observation
 from indexbot.model import (
-    ObservationObject,
-    OciPlatform,
     Owner,
     PackageId,
     PackageRoot,
-    PlatformEntry,
     Status,
     TagEntry,
     Upstream,
@@ -44,10 +41,14 @@ def _root(
     )
 
 
+def _index_bytes(digest: str) -> bytes:
+    """Distinct registry bytes per content digest — the fixture stands in for
+    what a registry served, so two different digests must not share bytes."""
+    return b'{"manifests":[{"digest":"' + digest.encode() + b'"}]}'
+
+
 def _observation(tag: str, digest: str) -> Observation:
-    platform = OciPlatform(architecture="amd64", os="linux")
-    entry = PlatformEntry(platform=platform, digest="sha256:" + "1" * 64)
-    return Observation(tag=tag, content_digest=digest, object=ObservationObject(platforms=(entry,)))
+    return Observation(tag=tag, content_digest=digest, raw=_index_bytes(digest))
 
 
 def test_diff_returns_none_for_identical_roots() -> None:
@@ -67,6 +68,14 @@ def test_diff_new_objects_excludes_already_reachable_digests() -> None:
     patch = diff(_PKG, current, target, observations)
     assert patch is not None
     assert [digest for digest, _ in patch.new_objects] == [_DIGEST_B]
+
+
+def test_diff_new_objects_carries_raw_bytes() -> None:
+    current = _root({})
+    target = _root({"3.28.1": TagEntry(content=_DIGEST_A, observed="T0")})
+    patch = diff(_PKG, current, target, (_observation("3.28.1", _DIGEST_A),))
+    assert patch is not None
+    assert patch.new_objects == ((_DIGEST_A, _index_bytes(_DIGEST_A)),)
 
 
 def test_diff_shared_digest_cascade_produces_no_new_objects() -> None:

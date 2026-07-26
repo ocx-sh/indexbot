@@ -11,7 +11,7 @@ it.
 
 `commit_files` uses the Git Data API (blob/tree/commit/ref), never the
 per-file Contents API, so a multi-file regenerate (root JSON plus N
-observation objects) lands as one atomic commit. Branch staleness ("the
+image indices) lands as one atomic commit. Branch staleness ("the
 branch moved since `base_sha` was read") is detected by GitHub's own
 non-fast-forward 422/409 response on the ref update — this adapter does not
 pre-check and race a separate read, it lets the write itself be the atomic

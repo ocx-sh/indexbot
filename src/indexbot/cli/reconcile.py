@@ -23,6 +23,14 @@ digest-mismatch, on a *pinned* tag, is already caught by the reused
 `check_tag_mutations` check above, so this avoids double-flagging one
 underlying phenomenon through two different finding shapes.
 
+A committed tag `observe_one_tag` now *refuses* — repointed at a bare image
+manifest, or grown past the index size ceiling — escalates as
+`tag-unrecordable`. The sweep catches that refusal per tag rather than letting
+it propagate: one publisher repointing one tag must not abort the nightly run
+for every other package, and the tag's `"digest-mismatch"` counterpart from
+`core/verify_claims.py` is filtered out below as floating-tag drift, so
+without this line the fault would leave no trace at all.
+
 `"tag-missing-upstream"` (ADR-6 FP-2/FP-3 — a decided rule, not an open
 question) **does** escalate, unless the committed `TagEntry.yanked is not
 None` for that tag: yank is grace, an explicit owner-authorized exemption
@@ -30,6 +38,15 @@ from the registry-existence check; a tag vanishing from the registry with
 no yank marker at all is an anomaly, not a silent drop (`_PackageReport`
 carries the committed root's yanked-tag names so `_escalating_findings` can
 tell the two apart).
+
+`tag-unrecordable` takes that same grace, and for the same reason: both ask
+what the registry currently serves for a tag the index may already have
+disclaimed. A yanked tag repointed at a bare manifest and a yanked tag
+deleted outright are one owner intent, and it would be incoherent to open a
+nightly anomaly issue for the first while exempting the second. This is the
+line the `cas-object-*` family sits on the other side of — those concern
+bytes this index *stores* and is answerable for whatever the tag's
+disposition, so no yank excuses them.
 
 A non-empty escalating-finding set opens/updates one anomaly issue
 (`GitHubPort.create_or_update_issue`, promoted onto the port this stage) and
@@ -50,7 +67,7 @@ from indexbot.core.validate_entry import (
     parse_package_root,
 )
 from indexbot.core.verify_claims import verify_claims
-from indexbot.errors import AnomalyError
+from indexbot.errors import AnomalyError, ValidationError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import PackageId
 
@@ -92,6 +109,16 @@ class _PackageReport:
     """Committed tag names with a non-`None` `TagEntry.yanked` marker — the
     grace exemption `_escalating_findings` checks a `"tag-missing-upstream"`
     finding's tag name against (ADR-6 FP-2/FP-3)."""
+
+    unrecordable_tags: tuple[str, ...]
+    """`"<tag>: <reason>"` for every *live* committed tag whose current
+    registry state `observe_one_tag` refuses outright — repointed at a bare
+    image manifest, or grown past the size ceiling. Escalates: it is a
+    structural fault, not the floating-tag digest drift `_escalates`
+    deliberately tolerates. Yanked tags are filtered out at collection in
+    `_verify_one` under the same ADR-6 FP-2/FP-3 grace `tag-missing-upstream`
+    gets — the index has already disclaimed them, so what the registry now
+    serves for one is not the index's anomaly."""
 
 
 def _root_path(package_id: PackageId) -> str:
@@ -164,9 +191,17 @@ def _verify_one(
     check_repository_allowlisted(root.repository, allowed_hosts)
     check_repository_shape(root.repository)
 
+    yanked_tags = frozenset(tag for tag, entry in root.tags.items() if entry.yanked is not None)
+
     observations: list[Observation] = []
+    unrecordable: list[str] = []
     for tag in root.tags:
-        observation = observe_one_tag(root.repository, tag, registry)
+        try:
+            observation = observe_one_tag(root.repository, tag, registry)
+        except ValidationError as error:
+            if tag not in yanked_tags:
+                unrecordable.append(f"{tag}: {error}")
+            continue
         if observation is not None:
             observations.append(observation)
     pinned_mutations = check_tag_mutations(package_id, root, tuple(observations))
@@ -181,12 +216,12 @@ def _verify_one(
     )
     cas_bytes = _cas_bytes_by_digest(files, package_id, wanted_digests)
     claim_findings = verify_claims(package_id, root, cas_bytes, registry)
-    yanked_tags = frozenset(tag for tag, entry in root.tags.items() if entry.yanked is not None)
     return _PackageReport(
         package_id=package_id,
         pinned_mutations=pinned_mutations,
         claim_findings=claim_findings,
         yanked_tags=yanked_tags,
+        unrecordable_tags=tuple(unrecordable),
     )
 
 
@@ -206,6 +241,9 @@ def _escalating_findings(report: _PackageReport) -> tuple[str, ...]:
         f"committed={finding.committed_content} fresh={finding.fresh_content}"
         for finding in report.pinned_mutations
     ]
+    lines.extend(
+        f"{report.package_id} tag-unrecordable: {entry}" for entry in report.unrecordable_tags
+    )
     lines.extend(
         f"{report.package_id} {finding.kind}: {finding.detail}"
         for finding in report.claim_findings

@@ -131,14 +131,19 @@ def _root(tags: dict[str, TagEntry], *, repository: str = _REPO) -> PackageRoot:
     )
 
 
-def _manifest(digest: str) -> dict[str, object]:
-    return {"platform": {"architecture": "amd64", "os": "linux"}, "digest": digest}
+def _index(digest: str) -> dict[str, object]:
+    """The only manifest shape this index records — an OCI image index
+    (D4(a)), its one descriptor pointing at `digest`. Matches
+    `tests/cli/test_validate.py`'s `_index` helper."""
+    return {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{"platform": {"architecture": "amd64", "os": "linux"}, "digest": digest}],
+    }
 
 
 def _observed_content_digest(tag: str, manifest_digest: str) -> str:
-    registry = FakeRegistry(
-        tags={_REPO: [tag]}, manifests={(_REPO, tag): _manifest(manifest_digest)}
-    )
+    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index(manifest_digest)})
     observation = observe_one_tag(_REPO, tag, registry)
     assert observation is not None
     return observation.content_digest
@@ -284,7 +289,7 @@ def test_tags_file_comma_separated() -> None:
     current = _root({})
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     registry = FakeRegistry(
-        tags={_REPO: ["1.0.0"]}, manifests={(_REPO, "1.0.0"): _manifest(manifest_digest)}
+        tags={_REPO: ["1.0.0"]}, manifests={(_REPO, "1.0.0"): _index(manifest_digest)}
     )
     files = InMemoryFiles(files={"tags.txt": b"1.0.0"})
 
@@ -310,8 +315,8 @@ def test_tags_file_newline_separated() -> None:
     registry = FakeRegistry(
         tags={_REPO: ["1.0.0", "2.0.0"]},
         manifests={
-            (_REPO, "1.0.0"): _manifest(manifest_digest_a),
-            (_REPO, "2.0.0"): _manifest(manifest_digest_b),
+            (_REPO, "1.0.0"): _index(manifest_digest_a),
+            (_REPO, "2.0.0"): _index(manifest_digest_b),
         },
     )
     files = InMemoryFiles(files={"tags.txt": b"1.0.0\n2.0.0\n"})
@@ -342,8 +347,8 @@ def test_out_mode_writes_root_and_cas_files_locally() -> None:
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1", "3.29.0"]},
         manifests={
-            (_REPO, "3.28.1"): _manifest(manifest_digest_a),
-            (_REPO, "3.29.0"): _manifest(manifest_digest_b),
+            (_REPO, "3.28.1"): _index(manifest_digest_a),
+            (_REPO, "3.29.0"): _index(manifest_digest_b),
         },
     )
     files = InMemoryFiles()
@@ -376,7 +381,7 @@ def test_out_mode_curated_set_drops_tags_not_announced() -> None:
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     manifest_digest = "sha256:" + "1" * 64
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
     files = InMemoryFiles()
 
@@ -403,11 +408,11 @@ def test_out_mode_records_source_annotation_of_the_latest_version() -> None:
     current = _root({})
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     manifests: dict[tuple[str, str], dict[str, object]] = {
-        (_REPO, "3.28.1"): _manifest("sha256:" + "1" * 64)
+        (_REPO, "3.28.1"): _index("sha256:" + "1" * 64)
         | {"annotations": {"org.opencontainers.image.source": "https://github.com/old/repo"}},
-        (_REPO, "3.29.0"): _manifest("sha256:" + "2" * 64)
+        (_REPO, "3.29.0"): _index("sha256:" + "2" * 64)
         | {"annotations": {"org.opencontainers.image.source": source}},
-        (_REPO, "latest"): _manifest("sha256:" + "3" * 64)
+        (_REPO, "latest"): _index("sha256:" + "3" * 64)
         | {"annotations": {"org.opencontainers.image.source": "javascript:alert(1)"}},
     }
     registry = FakeRegistry(tags={_REPO: [tag for _, tag in manifests]}, manifests=manifests)
@@ -432,7 +437,7 @@ def test_out_mode_omits_source_when_no_tag_carries_the_annotation() -> None:
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1"]},
-        manifests={(_REPO, "3.28.1"): _manifest("sha256:" + "1" * 64)},
+        manifests={(_REPO, "3.28.1"): _index("sha256:" + "1" * 64)},
     )
     files = InMemoryFiles()
 
@@ -463,7 +468,7 @@ def test_desc_change_writes_readme_only_when_no_logo_layer() -> None:
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1"]},
         manifests={
-            (_REPO, "3.28.1"): _manifest(manifest_digest),
+            (_REPO, "3.28.1"): _index(manifest_digest),
             (_REPO, "__ocx.desc"): {
                 "annotations": {
                     "org.opencontainers.image.title": "CMake",
@@ -502,7 +507,7 @@ def test_desc_change_writes_png_logo_with_sniffed_extension() -> None:
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1"]},
         manifests={
-            (_REPO, "3.28.1"): _manifest(manifest_digest),
+            (_REPO, "3.28.1"): _index(manifest_digest),
             (_REPO, "__ocx.desc"): {
                 "annotations": {
                     "org.opencontainers.image.title": "glab",
@@ -546,7 +551,7 @@ def test_desc_change_writes_svg_logo_with_sniffed_extension() -> None:
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1"]},
         manifests={
-            (_REPO, "3.28.1"): _manifest(manifest_digest),
+            (_REPO, "3.28.1"): _index(manifest_digest),
             (_REPO, "__ocx.desc"): {
                 "annotations": {
                     "org.opencontainers.image.title": "cmake",
@@ -589,7 +594,7 @@ def test_yank_marks_tag_yanked() -> None:
     current = _root({})
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
     files = InMemoryFiles()
 
@@ -621,7 +626,7 @@ def test_unyank_clears_existing_marker() -> None:
     )
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
     files = InMemoryFiles()
 
@@ -643,7 +648,7 @@ def test_yank_tag_not_in_curated_set_raises() -> None:
     current = _root({})
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
 
     with pytest.raises(ValidationError, match="not in the curated tag set"):
@@ -662,7 +667,7 @@ def test_unyank_tag_not_in_curated_set_raises() -> None:
     current = _root({})
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
 
     with pytest.raises(ValidationError, match="not in the curated tag set"):
@@ -681,7 +686,7 @@ def test_same_tag_in_yank_and_unyank_raises() -> None:
     current = _root({})
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
 
     with pytest.raises(ValidationError, match="both --yank and --unyank"):
@@ -707,7 +712,7 @@ def test_fork_mode_commits_to_fork_and_opens_pr_against_index_repo() -> None:
     )
     fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
 
     result = _run(
@@ -732,7 +737,7 @@ def test_fork_mode_reuses_existing_announce_branch_as_commit_base() -> None:
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     fork_github = FakeGitHub(refs={"main": "fork-main-sha", _BRANCH: "stale-branch-sha"})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
 
     # If base_sha were sourced from "main" instead of the already-open
@@ -756,7 +761,7 @@ def test_fork_mode_missing_base_ref_raises_validation_error() -> None:
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     fork_github = FakeGitHub()  # no refs at all
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
 
     with pytest.raises(ValidationError, match="main"):
@@ -776,7 +781,7 @@ def test_fork_mode_never_writes_to_index_repo_files() -> None:
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
 
     _run(
@@ -805,7 +810,7 @@ def test_unchanged_out_mode_short_circuits_without_writing(
     current = _root({"3.28.1": TagEntry(content=content_digest, observed="T0")})
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
     files = _NoWriteFiles()  # write_bytes raises if the short-circuit fails to fire
 
@@ -833,7 +838,7 @@ def test_unchanged_fork_mode_short_circuits_without_pr(
     index_github = _NoWriteGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
     fork_github = _NoWriteGitHub(refs={"main": "fork-main-sha"})
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(manifest_digest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
     )
 
     result = _run(
@@ -860,7 +865,7 @@ def test_changed_tag_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None:
     fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
     new_manifest = "sha256:" + "2" * 64
     registry = FakeRegistry(
-        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _manifest(new_manifest)}
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(new_manifest)}
     )
 
     result = _run(
@@ -894,7 +899,7 @@ def test_changed_desc_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1"]},
         manifests={
-            (_REPO, "3.28.1"): _manifest(manifest_digest),
+            (_REPO, "3.28.1"): _index(manifest_digest),
             (_REPO, "__ocx.desc"): {
                 "annotations": {
                     "org.opencontainers.image.title": "CMake",
@@ -921,3 +926,53 @@ def test_changed_desc_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None
     assert index_github.pull_requests == {f"alice:{_BRANCH}": 1}
     committed_root = parse_package_root(fork_github.files[(_ROOT_PATH, _BRANCH)])
     assert committed_root.desc is not None  # desc change wrote through despite unchanged tag set
+
+
+@dataclass
+class _MemoizingRegistry(FakeRegistry):
+    """`FakeRegistry` builds a fresh `ManifestFetch` on every call, so object
+    identity cannot be observed across two of them. This one hands back the
+    same instance, which makes "did anything re-serialize these bytes?"
+    testable at all."""
+
+    fetched: dict[tuple[str, str], ManifestFetch] | None = None
+
+    def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
+        if self.fetched is None:
+            self.fetched = {}
+        key = (repository, reference)
+        if key not in self.fetched:
+            self.fetched[key] = super().get_manifest(repository, reference)
+        return self.fetched[key]
+
+
+def test_announce_writes_the_raw_bytes_unmodified() -> None:
+    """D1: a tag's CAS object is the registry's OCI image index verbatim.
+
+    Asserted by object identity, not equality. An equal-but-rebuilt `bytes`
+    would mean a re-serialization step still exists somewhere on the write
+    path — and a re-serialization is exactly what silently drops `subject`,
+    `artifactType`, and every future spec field this index does not model.
+    """
+    manifest_digest = "sha256:" + "1" * 64
+    registry = _MemoizingRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
+    )
+    current = _root({})
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    files = InMemoryFiles()
+
+    result = _run(
+        _args(tags="3.28.1", out="dist"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=None,
+        files=files,
+        clock=FixedClock(fixed="T1"),
+    )
+
+    assert result == ExitCode.OK
+    served = registry.get_manifest(_REPO, "3.28.1")
+    (cas_path,) = [p for p in files.files if p.startswith(f"dist/p/{_NS}/{_PKG}/o/sha256/")]
+    assert files.files[cas_path] is served.raw
+    assert cas_path == f"dist/p/{_NS}/{_PKG}/o/sha256/{served.digest.removeprefix('sha256:')}.json"

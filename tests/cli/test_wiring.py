@@ -18,18 +18,10 @@ from indexbot.cli import _wiring
 from indexbot.cli import main as main_module
 from indexbot.core.observe import observe
 from indexbot.core.policy import INDEX_POLICY_PATH
-from indexbot.core.validate_entry import serialize_observation_object, serialize_package_root
+from indexbot.core.validate_entry import serialize_package_root
 from indexbot.errors import TransientError, ValidationError
 from indexbot.exit_codes import ExitCode
-from indexbot.model import (
-    ObservationObject,
-    OciPlatform,
-    Owner,
-    PackageRoot,
-    PlatformEntry,
-    PullRequestInfo,
-    TagEntry,
-)
+from indexbot.model import Owner, PackageRoot, PullRequestInfo, TagEntry
 from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles
 
 _NS = "kitware"
@@ -194,8 +186,19 @@ def _root(tags: dict[str, TagEntry]) -> PackageRoot:
     )
 
 
-def _manifest() -> dict[str, object]:
-    return {"platform": {"architecture": "amd64", "os": "linux"}}
+def _index() -> dict[str, object]:
+    """The only manifest shape this index records — an OCI image index
+    (D4(a)). Matches `tests/cli/test_validate.py`'s `_index` helper."""
+    return {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "platform": {"architecture": "amd64", "os": "linux"},
+                "digest": "sha256:" + "9" * 64,
+            }
+        ],
+    }
 
 
 def _observed_content_digest(tag: str) -> str:
@@ -205,7 +208,7 @@ def _observed_content_digest(tag: str) -> str:
     registry state reproduces byte-identical output (a genuine no-op diff),
     matching `tests/cli/test_announce.py`'s established fixture pattern.
     """
-    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _manifest()})
+    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index()})
     (observation,) = observe(_REPO, registry)
     return observation.content_digest
 
@@ -255,7 +258,7 @@ def _patch_adapters(
 def test_announce_out_mode_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     tag = "1.0.0"
     committed = _root({})
-    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _manifest()})
+    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index()})
     github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(committed)})
     files = InMemoryFiles()
     _patch_adapters(monkeypatch, registry=registry, github=github, files=files)
@@ -272,7 +275,7 @@ def test_announce_fork_mode_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "publisher-token")
     tag = "1.0.0"
     committed = _root({})
-    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _manifest()})
+    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index()})
     github = FakeGitHub(
         files={(_ROOT_PATH, "main"): serialize_package_root(committed)}, refs={"main": "sha"}
     )
@@ -300,11 +303,20 @@ def test_reconcile_empty_index_happy_path(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_validate_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    platform = OciPlatform(architecture="amd64", os="linux")
-    obj = ObservationObject(
-        platforms=(PlatformEntry(platform=platform, digest="sha256:" + "a" * 64),)
-    )
-    object_bytes = serialize_observation_object(obj)
+    object_bytes = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": "sha256:" + "a" * 64,
+                    "size": 512,
+                    "platform": {"architecture": "amd64", "os": "linux"},
+                }
+            ],
+        }
+    ).encode()
     digest = f"sha256:{hashlib.sha256(object_bytes).hexdigest()}"
     root = _root({"1.0.0": TagEntry(content=digest, observed="2026-07-17T00:00:00Z")})
 
@@ -346,7 +358,7 @@ def test_seed_import_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     files = InMemoryFiles(
         files={"catalog.md": catalog_md.encode("utf-8"), "mirror.yml": mirror_yml.encode("utf-8")}
     )
-    registry = FakeRegistry(tags={_REPO: ["1.0.0"]}, manifests={(_REPO, "1.0.0"): _manifest()})
+    registry = FakeRegistry(tags={_REPO: ["1.0.0"]}, manifests={(_REPO, "1.0.0"): _index()})
     _patch_adapters(monkeypatch, files=files, registry=registry)
 
     result = main_module.main(

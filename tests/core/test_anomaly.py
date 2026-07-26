@@ -2,15 +2,7 @@ from __future__ import annotations
 
 from indexbot.core.anomaly import AnomalyFinding, check_tag_mutations
 from indexbot.core.observe import Observation
-from indexbot.model import (
-    ObservationObject,
-    OciPlatform,
-    Owner,
-    PackageId,
-    PackageRoot,
-    PlatformEntry,
-    TagEntry,
-)
+from indexbot.model import Owner, PackageId, PackageRoot, TagEntry
 
 _OWNER = Owner(github="alice", github_id=1)
 _PKG = PackageId(namespace="kitware", package="cmake")
@@ -32,9 +24,9 @@ def _root(tags: dict[str, TagEntry]) -> PackageRoot:
 
 
 def _observation(tag: str, digest: str) -> Observation:
-    platform = OciPlatform(architecture="amd64", os="linux")
-    entry = PlatformEntry(platform=platform, digest="sha256:" + "1" * 64)
-    return Observation(tag=tag, content_digest=digest, object=ObservationObject(platforms=(entry,)))
+    return Observation(
+        tag=tag, content_digest=digest, raw=b'{"manifests":[{"digest":"' + digest.encode() + b'"}]}'
+    )
 
 
 def test_pinned_tag_digest_mutation_is_flagged() -> None:

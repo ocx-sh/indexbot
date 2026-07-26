@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from indexbot.core.observe import observe_one_tag
+from indexbot.errors import ValidationError
 from indexbot.model import PackageId, PackageRoot
 
 if TYPE_CHECKING:
@@ -95,7 +96,24 @@ def _verify_tag_claim(
     registry: RegistryPort,
     cas_object_bytes: Mapping[str, bytes],
 ) -> ClaimFinding | None:
-    observation = observe_one_tag(repository, tag, registry)
+    """One tag's claim, re-observed. `Observation.content_digest` is the
+    physical registry's own digest for the image index the tag resolves to
+    *now*, so the equality below compares the committed claim against a
+    registry-computed value — nothing is re-derived on this side that could
+    disagree with the registry while both are "correct".
+
+    `observe_one_tag` rejects what a tag *now* resolves to (a bare image
+    manifest, or bytes over its size ceiling) by raising `ValidationError`.
+    That is the right answer for the announce lane, which is deciding whether
+    to record something; here it is drift like any other, so it becomes a
+    `"digest-mismatch"` finding: the claimed digest is no longer what this
+    tag resolves to. Letting it propagate would break this module's
+    returns-findings-never-raises contract, drop the finding the sweep exists
+    to produce, and abandon every package queued behind this one."""
+    try:
+        observation = observe_one_tag(repository, tag, registry)
+    except ValidationError:
+        return ClaimFinding(package_id=package_id, kind="digest-mismatch", detail=tag)
     if observation is None:
         return ClaimFinding(package_id=package_id, kind="tag-missing-upstream", detail=tag)
     if observation.content_digest != content_digest:
@@ -120,8 +138,8 @@ def verify_claims(
     semantics — see module docstring).
 
     Each `root.tags[*]` entry re-derives via `core/observe.py`'s
-    `observe_one_tag` and must (a) still resolve on the registry, (b)
-    re-derive to the exact same `content_digest`, and (c) have matching CAS
+    `observe_one_tag` and must (a) still resolve on the registry, (b) still
+    resolve to the exact same image-index digest, and (c) have matching CAS
     bytes already present in `cas_object_bytes` (keyed by digest string) that
     hash to that same digest. `root.desc.readme`/`.logo`, when set, get the
     same CAS-hash check ((b) does not apply to them — a desc blob's digest

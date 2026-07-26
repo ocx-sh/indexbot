@@ -54,18 +54,27 @@ _UNAUTHORIZED = ScriptedResponse(
 )
 
 
-def canonical_manifest_bytes(manifest: Mapping[str, object]) -> bytes:
+def manifest_wire_bytes(manifest: Mapping[str, object]) -> bytes:
     """The exact wire bytes this fake serves for `manifest`.
 
-    `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=True)`
-    — the same canonical form the real adapter computes its content digest over
-    and that `git_tree` digests at seed time, so a CAS content digest written
-    into a seeded root equals the one `core/observe.py` recomputes when the
-    real adapter serves these bytes back at validate time.
+    **Deliberately not any encoder's canonical output.** A registry serves the
+    bytes its publisher pushed, and the index stores those bytes verbatim
+    (`core/observe.py` — `Observation.raw`), so this fake serves a body that no
+    re-serialization could reproduce: 2-space indent, the mapping's own
+    insertion key order, no trailing newline.
+
+    That is the whole load-bearing property of this function. Were it to emit
+    `json.dumps(..., sort_keys=True, separators=(",", ":"))`, a pipeline that
+    re-encoded a parsed manifest would be byte-indistinguishable from one that
+    copied the registry's bytes, and every "stored verbatim" assertion in
+    `tests/integration/` would pass against both. Encoded this way, a
+    re-encoding pipeline produces a different digest and the flows fail loudly.
+
+    `git_tree` seeds through this same function, so a CAS content digest
+    written into a seeded root equals the one `core/observe.py` computes when
+    the real adapter serves these bytes back at validate time.
     """
-    return json.dumps(
-        dict(manifest), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
+    return json.dumps(dict(manifest), indent=2, ensure_ascii=True).encode("utf-8")
 
 
 def manifest_digest(body: bytes) -> str:
@@ -218,18 +227,17 @@ class FakeGhcrServer:
     # --- scripting -----------------------------------------------------------
 
     def add_manifest(self, repository: str, reference: str, manifest: Mapping[str, object]) -> str:
-        """Serve `manifest` (as canonical wire bytes) at both its tag `reference`
-        and its content-addressed `sha256:<hex>` digest ref, with a matching
-        `Docker-Content-Digest` header. Returns that digest."""
-        body = canonical_manifest_bytes(manifest)
+        """Serve `manifest` (as `manifest_wire_bytes`) at both its tag
+        `reference` and its content-addressed `sha256:<hex>` digest ref, with a
+        matching `Docker-Content-Digest` header and the document's own
+        `mediaType` as `Content-Type`. Returns that digest."""
+        body = manifest_wire_bytes(manifest)
         digest = manifest_digest(body)
+        media_type = str(manifest.get("mediaType", "application/vnd.oci.image.manifest.v1+json"))
         response = ScriptedResponse(
             status=200,
             body=body,
-            headers={
-                "Content-Type": "application/vnd.oci.image.manifest.v1+json",
-                "Docker-Content-Digest": digest,
-            },
+            headers={"Content-Type": media_type, "Docker-Content-Digest": digest},
         )
         with self._state.lock:
             self._state.manifests[(repository, reference)] = [response]

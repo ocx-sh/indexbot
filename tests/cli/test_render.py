@@ -42,22 +42,25 @@ def _root() -> PackageRoot:
     )
 
 
-def _observation_bytes() -> bytes:
+def _index_bytes() -> bytes:
+    """One tag's CAS object: the registry's OCI image index verbatim."""
     return (
-        b'{"platforms":[{"platform":{"architecture":"amd64","os":"linux"},'
-        b'"digest":"sha256:manifest-1.0.0"}]}'
+        b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json",'
+        b'"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json",'
+        b'"digest":"sha256:' + b"9" * 64 + b'","size":512,'
+        b'"platform":{"architecture":"amd64","os":"linux"}}]}'
     )
 
 
 def _seed_source(files: FilePort, *, index_dir: str = "") -> None:
     """Writes a one-package, no-desc source tree (`p/kitware/cmake.json` plus
-    its one CAS observation object) under `index_dir` -- reuses
+    its one CAS image index) under `index_dir` -- reuses
     `validate_entry.serialize_package_root` for `root_raw` rather than
     hand-rolling a second encoder (CONTRACTS.md §1)."""
     prefix = f"{index_dir.rstrip('/')}/p/" if index_dir else "p/"
     hex_digest = _DIGEST.removeprefix("sha256:")
     files.write_bytes(f"{prefix}kitware/cmake.json", serialize_package_root(_root()))
-    files.write_bytes(f"{prefix}kitware/cmake/o/sha256/{hex_digest}.json", _observation_bytes())
+    files.write_bytes(f"{prefix}kitware/cmake/o/sha256/{hex_digest}.json", _index_bytes())
 
 
 @dataclass
@@ -161,9 +164,7 @@ def test_index_dir_prefix_is_respected() -> None:
 
 
 def test_cas_subtree_file_without_a_root_is_ignored() -> None:
-    files = InMemoryFiles(
-        files={"p/kitware/cmake/o/sha256/" + "a" * 64 + ".json": _observation_bytes()}
-    )
+    files = InMemoryFiles(files={"p/kitware/cmake/o/sha256/" + "a" * 64 + ".json": _index_bytes()})
 
     result = run(_args(), files=files)
 
@@ -198,7 +199,7 @@ def test_golden_plan_execution_against_real_filesystem(tmp_path: Path) -> None:
     cas_copy = (
         tmp_path / f"site/.vitepress/dist/p/kitware/cmake/o/sha256/{hex_digest}.json"
     ).read_bytes()
-    assert cas_copy == _observation_bytes()
+    assert cas_copy == _index_bytes()
 
     catalog = json.loads(
         (tmp_path / "site/.vitepress/dist/data/catalog/catalog.json").read_text(encoding="utf-8")

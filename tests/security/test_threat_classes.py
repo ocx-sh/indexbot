@@ -25,13 +25,10 @@ from indexbot.errors import ValidationError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import (
     ManifestFetch,
-    ObservationObject,
-    OciPlatform,
     Owner,
     OwnershipProbeResult,
     PackageId,
     PackageRoot,
-    PlatformEntry,
     PullRequestInfo,
     TagEntry,
     Yank,
@@ -82,14 +79,7 @@ def _observation(tag: str, content_digest: str) -> Observation:
     return Observation(
         tag=tag,
         content_digest=content_digest,
-        object=ObservationObject(
-            platforms=(
-                PlatformEntry(
-                    platform=OciPlatform(architecture="amd64", os="linux"),
-                    digest="sha256:" + "1" * 64,
-                ),
-            )
-        ),
+        raw=b'{"manifests":[{"digest":"' + content_digest.encode() + b'"}]}',
     )
 
 

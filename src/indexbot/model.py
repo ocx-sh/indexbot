@@ -1,4 +1,4 @@
-"""Data model mirroring ADR-1's root and observation-object field tables.
+"""Data model mirroring ADR-1's package-root field table.
 
 Plain, frozen, slotted data only — no validation logic. Format validation
 against `schema/*.json` runs via `check-jsonschema` (never imported here);
@@ -100,50 +100,15 @@ class Yank:
 class TagEntry:
     """One row of the `tags` map (ADR-1 D2).
 
-    `content` addresses this index's own package-local CAS (an
-    `ObservationObject`), never an OCI manifest or image-index digest
-    directly.
+    `content` is the digest of the OCI image index this tag resolved to, as
+    served by the physical registry; those exact bytes are stored at
+    `p/<ns>/<pkg>/o/sha256/<hex>.json`. One digest namespace: the registry
+    computed it over the same bytes this index commits.
     """
 
     content: str
     observed: str
     yanked: Yank | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class OciPlatform:
-    """Inline subset of the OCI image-spec `Platform` object (ADR-1 D4)."""
-
-    architecture: str
-    os: str
-    os_version: str | None = None
-    os_features: tuple[str, ...] = ()
-    variant: str | None = None
-    features: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class PlatformEntry:
-    """One row of an observation object's `platforms[]` (ADR-1 D4).
-
-    `digest` is the OCI manifest digest on the *physical* registry — a
-    different digest namespace from `TagEntry.content`, which addresses this
-    index's own CAS.
-    """
-
-    platform: OciPlatform
-    digest: str
-
-
-@dataclass(frozen=True, slots=True)
-class ObservationObject:
-    """Immutable, package-local CAS object at `o/sha256/<hex>.json` (ADR-1 D4).
-
-    Carries no timestamps, deliberately — two observations with an identical
-    platform set produce byte-identical JSON, hence maximal dedup.
-    """
-
-    platforms: tuple[PlatformEntry, ...]
 
 
 @dataclass(frozen=True, slots=True)

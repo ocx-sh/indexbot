@@ -48,18 +48,14 @@ from indexbot.core.validate_entry import (
     cas_relpath,
     check_name_matches_path,
     check_repository_allowlisted,
-    serialize_observation_object,
     serialize_package_root,
 )
 from indexbot.errors import ValidationError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import (
-    ObservationObject,
-    OciPlatform,
     Owner,
     PackageId,
     PackageRoot,
-    PlatformEntry,
     PullRequestInfo,
     TagEntry,
     Upstream,
@@ -117,20 +113,22 @@ def _root(
     )
 
 
-def _single_platform_object(
-    architecture: str = "amd64", digest: str = "sha256:" + "1" * 64
-) -> ObservationObject:
-    return ObservationObject(
-        platforms=(
-            PlatformEntry(
-                platform=OciPlatform(architecture=architecture, os="linux"), digest=digest
-            ),
-        )
-    )
+def _index_bytes(architecture: str = "amd64", digest: str = "sha256:" + "1" * 64) -> bytes:
+    """An OCI image index as a registry would serve it — the exact bytes a
+    CAS object under `o/sha256/` holds. Never re-serialized by the bot."""
+    return json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {"platform": {"architecture": architecture, "os": "linux"}, "digest": digest}
+            ],
+        }
+    ).encode("utf-8")
 
 
 def _observation(tag: str, content_digest: str) -> Observation:
-    return Observation(tag=tag, content_digest=content_digest, object=_single_platform_object())
+    return Observation(tag=tag, content_digest=content_digest, raw=_index_bytes())
 
 
 def _resolve_check_jsonschema() -> str:
@@ -281,16 +279,16 @@ def test_g05_governance_key_change_is_human_review(
 def test_g06_render_reachability_filter() -> None:
     """G-06: render copies only CAS reachable from a live tag; an orphaned
     CAS object (no live tag references its digest) is excluded."""
-    live_obj = _single_platform_object(architecture="amd64")
-    orphan_obj = _single_platform_object(architecture="arm64", digest="sha256:" + "2" * 64)
+    live_obj = _index_bytes(architecture="amd64")
+    orphan_obj = _index_bytes(architecture="arm64", digest="sha256:" + "2" * 64)
     root = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
     source = SourcePackage(
         package_id=_PKG,
         root=root,
         root_raw=serialize_package_root(root),
         content_by_digest={
-            f"{_DIGEST_A}.json": serialize_observation_object(live_obj),
-            f"{_DIGEST_B}.json": serialize_observation_object(orphan_obj),
+            f"{_DIGEST_A}.json": live_obj,
+            f"{_DIGEST_B}.json": orphan_obj,
         },
     )
     paths = {fw.path for fw in build_render_plan((source,))}
@@ -306,7 +304,7 @@ def _seed_render_source(files: InMemoryFiles) -> None:
     files.write_bytes("p/kitware/cmake.json", serialize_package_root(root))
     files.write_bytes(
         f"p/kitware/cmake/o/sha256/{'a' * 64}.json",
-        serialize_observation_object(_single_platform_object()),
+        _index_bytes(),
     )
 
 
@@ -389,9 +387,9 @@ def test_g10_bounded_backoff_policy() -> None:
 def test_g11_regenerate_idempotent() -> None:
     """G-11: regenerate -> diff twice; the second diff is empty and the
     `observed` timestamp does not churn even under a different clock."""
-    obj = _single_platform_object()
-    content = "sha256:" + hashlib.sha256(serialize_observation_object(obj)).hexdigest()
-    observations = (Observation(tag="1.0.0", content_digest=content, object=obj),)
+    raw = _index_bytes()
+    content = "sha256:" + hashlib.sha256(raw).hexdigest()
+    observations = (Observation(tag="1.0.0", content_digest=content, raw=raw),)
     current = _root()
     first = regenerate(
         current, observations, current.desc, FixedClock(fixed="2026-07-17T00:00:00Z")
@@ -410,7 +408,9 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
     repository = "oci://ghcr.io/ocx-contrib/widget"
     manifest: dict[str, object] = {
         "schemaVersion": 2,
-        "platform": {"architecture": "amd64", "os": "linux"},
+        "manifests": [
+            {"platform": {"architecture": "amd64", "os": "linux"}, "digest": "sha256:" + "1" * 64}
+        ],
     }
     registry = FakeRegistry(manifests={(repository, "1.0.0"): manifest})
     observation = observe_one_tag(repository, "1.0.0", registry)
@@ -425,7 +425,7 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
     files.write_bytes("p/ocx-contrib/widget.json", serialize_package_root(root))
     files.write_bytes(
         f"p/ocx-contrib/widget/o/sha256/{content.removeprefix('sha256:')}.json",
-        serialize_observation_object(observation.object),
+        observation.raw,
     )
     github = FakeGitHub()
     before = dict(files.files)
@@ -714,10 +714,10 @@ def test_fp5_machine_lane_rejects_out_of_scope_paths(extra_path: str, _github_ou
 def test_fp5_machine_lane_admits_the_announce_write_set(_github_output: Path) -> None:
     """The complementary half of FP-5 — the gate rejects out-of-scope paths
     without breaking the lane it exists to protect: the exact file set
-    `cli/announce.py` writes (the root plus that same package's observation
-    object and readme/logo desc blobs) stays machine-lane (`success`)."""
+    `cli/announce.py` writes (the root plus that same package's image index
+    and readme/logo desc blobs) stays machine-lane (`success`)."""
     own_cas = (
-        f"p/kitware/cmake/o/sha256/{'b' * 64}.json",  # observation object
+        f"p/kitware/cmake/o/sha256/{'b' * 64}.json",  # image index
         f"p/kitware/cmake/o/sha256/{'c' * 64}.md",  # readme desc blob
         f"p/kitware/cmake/o/sha256/{'d' * 64}.svg",  # logo desc blob (svg)
         f"p/kitware/cmake/o/sha256/{'e' * 64}.png",  # logo desc blob (png)

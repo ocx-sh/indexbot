@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from dataclasses import dataclass, field
 
 import pytest
 
 from indexbot.cli import reconcile
 from indexbot.core.observe import observe_one_tag
-from indexbot.core.validate_entry import serialize_observation_object, serialize_package_root
+from indexbot.core.validate_entry import serialize_package_root
 from indexbot.errors import AnomalyError, ValidationError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import (
@@ -67,8 +69,33 @@ def _root(
     )
 
 
-def _bare_manifest(architecture: str = "amd64") -> dict[str, object]:
-    return {"platform": {"architecture": architecture, "os": "linux"}}
+def _image_index(architecture: str = "amd64") -> dict[str, object]:
+    """What a tag must resolve to for this index to record it at all: an OCI
+    image index, discriminated by its `manifests` key (D4(a))."""
+    return {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": "sha256:" + "9" * 64,
+                "size": 512,
+                "platform": {"architecture": architecture, "os": "linux"},
+            }
+        ],
+    }
+
+
+def _bare_manifest() -> dict[str, object]:
+    """A single OCI image manifest — no `manifests` key, so `observe_one_tag`
+    refuses it (D4(a)). What a tag looks like after a publisher repoints it
+    at one platform's image."""
+    return {"schemaVersion": 2, "config": {}, "layers": []}
+
+
+_EMPTY_INDEX = b'{"schemaVersion":2,"manifests":[]}'
+"""Filler CAS bytes for tests that commit a digest deliberately unrelated to
+what the registry serves — never expected to hash to its own claim."""
 
 
 def _put_root(files: InMemoryFiles, namespace: str, package: str, root: PackageRoot) -> None:
@@ -82,10 +109,10 @@ def _committed_tag(
     the exact same content digest from `registry` — the clean baseline every
     test mutates one field of."""
     registry.tags.setdefault(repository, []).append(tag)
-    registry.manifests[(repository, tag)] = _bare_manifest(architecture)
+    registry.manifests[(repository, tag)] = _image_index(architecture)
     observation = observe_one_tag(repository, tag, registry)
     assert observation is not None
-    object_bytes = serialize_observation_object(observation.object)
+    object_bytes = observation.raw
     entry = TagEntry(content=observation.content_digest, observed="2026-07-17T00:00:00Z")
     return entry, object_bytes
 
@@ -250,7 +277,7 @@ def test_pinned_tag_mutation_escalates_to_anomaly() -> None:
         "cmake",
         _root(tags={"3.28.1": TagEntry(content=committed_digest, observed="T0")}),
     )
-    _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
+    _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
     # Registry now resolves "3.28.1" to different content entirely.
     _committed_tag(registry, _CMAKE_REPO, "3.28.1")
     github = FakeGitHub()
@@ -277,9 +304,9 @@ def test_floating_tag_drift_does_not_escalate() -> None:
         "cmake",
         _root(tags={"latest": TagEntry(content=committed_digest, observed="T0")}),
     )
-    _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
+    _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
     registry.tags[_CMAKE_REPO] = ["latest"]
-    registry.manifests[(_CMAKE_REPO, "latest")] = _bare_manifest(architecture="arm64")
+    registry.manifests[(_CMAKE_REPO, "latest")] = _image_index(architecture="arm64")
 
     result = _run(_args(), files=files, registry=registry, github=FakeGitHub())
 
@@ -297,7 +324,7 @@ def test_yanked_vanished_tag_does_not_escalate() -> None:
         content=committed_digest, observed="T0", yanked=Yank(reason="cve", at="T0")
     )
     _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": yanked_entry}))
-    _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
+    _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
 
     result = _run(_args(), files=files, registry=registry, github=FakeGitHub())
 
@@ -316,7 +343,7 @@ def test_non_yanked_vanished_tag_escalates_to_anomaly() -> None:
         "cmake",
         _root(tags={"3.28.1": TagEntry(content=committed_digest, observed="T0")}),
     )
-    _put_cas(files, "kitware", "cmake", committed_digest, b'{"platforms":[]}')
+    _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
     github = FakeGitHub()
 
     with pytest.raises(AnomalyError, match="tag-missing-upstream"):
@@ -414,3 +441,78 @@ def test_anomaly_issue_is_idempotent_across_repeated_runs() -> None:
         _run(_args(), files=files, registry=registry, github=github)
 
     assert len(github.issues) == 1
+
+
+# --- a refusal is a finding, never an aborted sweep (N-9) -----------------
+
+
+def test_reconcile_turns_a_refusal_into_a_finding_not_an_abort() -> None:
+    """`observe_one_tag` refuses a tag repointed at a bare image manifest
+    (D4(a)). Reached from this sweep, that refusal used to propagate out of
+    `run` and abort the nightly run for every package queued behind it — and
+    `verify_claims`' own `"digest-mismatch"` for the same tag is filtered out
+    below as floating drift, so the fault would have left no trace at all.
+
+    Two packages, the refusing one sorting first ("acme/widget" <
+    "kitware/cmake"), so a surviving abort would take the clean package with
+    it.
+    """
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+
+    cas_bytes = json.dumps(_image_index()).encode()
+    claimed = f"sha256:{hashlib.sha256(cas_bytes).hexdigest()}"
+    registry.tags[_WIDGET_REPO] = ["1.0.0"]
+    registry.manifests[(_WIDGET_REPO, "1.0.0")] = _bare_manifest()
+    _put_root(
+        files,
+        "acme",
+        "widget",
+        _root(
+            name="ocx.sh/acme/widget",
+            repository=_WIDGET_REPO,
+            tags={"1.0.0": TagEntry(content=claimed, observed="2026-07-17T00:00:00Z")},
+        ),
+    )
+    _put_cas(files, "acme", "widget", claimed, cas_bytes)
+
+    clean_entry, clean_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": clean_entry}))
+    _put_cas(files, "kitware", "cmake", clean_entry.content, clean_bytes)
+
+    github = FakeGitHub()
+    with pytest.raises(AnomalyError) as exc_info:
+        _run(_args(), files=files, registry=registry, github=github)
+
+    summary = str(exc_info.value)
+    assert "acme/widget tag-unrecordable: 1.0.0" in summary
+    assert "image index" in summary  # the refusal's own reason rides along
+    assert "verified 2 package(s)" in summary  # the clean package was still swept
+    assert "kitware/cmake" not in summary
+    assert github.issues[_ISSUE_TITLE][0] == 1
+
+
+def test_yanked_unrecordable_tag_does_not_escalate() -> None:
+    """ADR-6 FP-2/FP-3 grace covers `tag-unrecordable`, not just
+    `tag-missing-upstream`. A yanked tag repointed at a bare image manifest
+    and a yanked tag deleted outright are one owner intent; escalating the
+    first while exempting the second would open a nightly anomaly issue for
+    a tag the index has already disclaimed.
+    """
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    cas_bytes = json.dumps(_image_index()).encode()
+    claimed = f"sha256:{hashlib.sha256(cas_bytes).hexdigest()}"
+    registry.tags[_CMAKE_REPO] = ["3.28.1"]
+    registry.manifests[(_CMAKE_REPO, "3.28.1")] = _bare_manifest()
+    yanked_entry = TagEntry(
+        content=claimed, observed="2026-07-17T00:00:00Z", yanked=Yank(reason="cve", at="T0")
+    )
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": yanked_entry}))
+    _put_cas(files, "kitware", "cmake", claimed, cas_bytes)
+    github = FakeGitHub()
+
+    result = _run(_args(), files=files, registry=registry, github=github)
+
+    assert result == ExitCode.OK
+    assert github.issues == {}

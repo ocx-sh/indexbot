@@ -126,7 +126,7 @@ class GitHubPort(Protocol):
         Creates `branch` at `base_sha` first if it does not exist yet (per
         `get_ref_sha`). Uses the Git Data API (tree/commit/ref) — never the
         per-file Contents API — so a multi-file regenerate (root JSON plus N
-        observation objects) lands as one commit, not N racing ones. `files`
+        image indices) lands as one commit, not N racing ones. `files`
         maps path -> new content; a `None` value deletes that path.
 
         Raises `indexbot.errors.TransientError` if `base_sha` is stale (the

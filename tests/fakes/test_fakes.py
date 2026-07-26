@@ -8,6 +8,7 @@ miss/idempotency case.
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 
@@ -44,6 +45,29 @@ def test_fake_registry_get_manifest_digest_is_computed_from_content() -> None:
     assert first.digest == second.digest
     assert first.digest.startswith("sha256:")
     assert hashlib.sha256(first.raw).hexdigest() == first.digest.removeprefix("sha256:")
+
+
+def test_fake_registry_manifest_bytes_are_not_canonical_json() -> None:
+    """`FakeRegistry` must not serve the bytes a re-serializing pipeline emits.
+
+    Every "the bytes are the registry's, unmodified" assertion written against
+    this fake is only falsifiable while `raw` differs from the canonical
+    encoding — otherwise a `json.dumps(json.loads(raw), sort_keys=True, ...)`
+    round-trip inside `core/` is byte-indistinguishable from copying `raw`, and
+    the assertion passes against both. Mirrors
+    `tests/core/test_serializer_golden.py::test_dispatch_fixture_is_not_canonical_json`
+    for the golden vectors.
+    """
+    manifest: dict[str, object] = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{"digest": f"sha256:{'a' * 64}", "size": 3}],
+    }
+    raw = FakeRegistry(manifests={("repo", "a"): manifest}).get_manifest("repo", "a").raw
+    canonical = json.dumps(
+        json.loads(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    assert canonical != raw
 
 
 def test_fake_registry_get_manifest_missing_raises_key_error() -> None:

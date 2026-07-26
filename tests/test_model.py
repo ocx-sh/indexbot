@@ -7,12 +7,9 @@ import pytest
 from indexbot.model import (
     Desc,
     ManifestFetch,
-    ObservationObject,
-    OciPlatform,
     Owner,
     PackageId,
     PackageRoot,
-    PlatformEntry,
     PullRequestInfo,
     TagEntry,
     Upstream,
@@ -83,41 +80,6 @@ def test_tag_entry_yanked() -> None:
     yank = Yank(reason="cve", at="2026-07-17T00:00:00Z")
     tag = TagEntry(content="sha256:aaaa", observed="2026-07-17T00:00:00Z", yanked=yank)
     assert tag.yanked is yank
-
-
-def test_oci_platform_minimal() -> None:
-    platform = OciPlatform(architecture="amd64", os="linux")
-    assert platform.os_version is None
-    assert platform.os_features == ()
-    assert platform.variant is None
-    assert platform.features == ()
-
-
-def test_oci_platform_full() -> None:
-    platform = OciPlatform(
-        architecture="arm",
-        os="linux",
-        os_version="1.0",
-        os_features=("sse4",),
-        variant="v7",
-        features=("f1",),
-    )
-    assert platform.variant == "v7"
-    assert platform.os_features == ("sse4",)
-
-
-def test_platform_entry() -> None:
-    platform = OciPlatform(architecture="arm64", os="linux")
-    entry = PlatformEntry(platform=platform, digest="sha256:1111")
-    assert entry.platform.architecture == "arm64"
-    assert entry.digest == "sha256:1111"
-
-
-def test_observation_object() -> None:
-    platform = OciPlatform(architecture="amd64", os="linux")
-    entry = PlatformEntry(platform=platform, digest="sha256:1111")
-    obj = ObservationObject(platforms=(entry,))
-    assert obj.platforms == (entry,)
 
 
 def test_package_id_str_and_fields() -> None:

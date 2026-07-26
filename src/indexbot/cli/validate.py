@@ -36,13 +36,14 @@ from indexbot.core.validate_entry import (
     check_name_matches_path,
     check_namespace_not_reserved,
     check_no_dangling_references,
+    check_no_reserved_tags,
     check_repository_allowlisted,
     check_repository_shape,
     check_superseded_by,
     check_tag_timestamps_z_anchored,
     check_upstream_repository_url_scheme,
     parse_digest,
-    parse_observation_object,
+    parse_image_index_digests,
     parse_package_id,
     parse_package_root,
     serialize_package_root,
@@ -167,6 +168,7 @@ def _validate_one(
         check_superseded_by(root)
         check_upstream_repository_url_scheme(root)
         check_tag_timestamps_z_anchored(root)
+        check_no_reserved_tags(root)
         if allow_reserved:
             print(
                 f"{path}: --allow-reserved-namespace used (brand-segment carve-out — "
@@ -207,19 +209,27 @@ def _validate_one(
             for tag_name, entry in root.tags.items()
         }
 
+        # D4(c): every committed CAS object must be an OCI image index. The
+        # blanket hash-check above proves the bytes are the bytes their
+        # filename claims; this proves they are the *kind* of document this
+        # index records at all. Deliberately outside the `--offline` branch —
+        # document kind is a pure parse, and a governance gate that a flag can
+        # turn off is not a gate.
+        index_digests_by_tag = {
+            tag_name: parse_image_index_digests(object_bytes)
+            for tag_name, object_bytes in object_bytes_by_tag.items()
+        }
+
         if offline:
             warnings.append("G-15 registry checks skipped (--offline)")
         else:
-            for tag_name in sorted(object_bytes_by_tag):
-                observation_object = parse_observation_object(object_bytes_by_tag[tag_name])
-                for platform_entry in observation_object.platforms:
+            for tag_name in sorted(index_digests_by_tag):
+                for manifest_digest in index_digests_by_tag[tag_name]:
                     # digest-hex fullmatch before it ever reaches a
                     # RegistryPort call (validate_entry.py's rule) — a CAS
-                    # object's `platforms[*].digest` is PR-submitted content,
+                    # object's `manifests[*].digest` is PR-submitted content,
                     # not yet schema-validated at this point in the pipeline.
-                    check_digest_in_scope(
-                        root.repository, parse_digest(platform_entry.digest), registry
-                    )
+                    check_digest_in_scope(root.repository, parse_digest(manifest_digest), registry)
             ownership = check_ownership(root.repository, root.name, registry)
             if ownership == "mismatch":
                 raise ValidationError(

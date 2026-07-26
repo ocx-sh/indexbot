@@ -53,7 +53,7 @@ _CAS_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[a-f0-9]{64}")
 
 _CAS_EXTENSIONS: Final[frozenset[str]] = frozenset({"json", "md", "svg", "png"})
 """Every extension `cli/announce.py` writes under a package's `o/sha256/`
-tree: `.json` observation objects plus the `.md` readme and `.svg`/`.png`
+tree: `.json` image indices plus the `.md` readme and `.svg`/`.png`
 logo desc blobs (`announce._cas_path`/`_logo_extension`; CONTRACTS.md §7
 `core/desc.py`, ADR-6 FP-4)."""
 
@@ -110,7 +110,7 @@ def _every_path_in_refresh_scope(
     """True iff every changed path is one of `root_paths` itself or a CAS
     object belonging to one of those exact packages — i.e. the diff contains
     nothing beyond what `cli/announce.py` writes for those roots (its
-    `files_by_path`: the root, the tags' observation objects, the readme/logo
+    `files_by_path`: the root, the tags' image indices, the readme/logo
     desc blobs).
 
     A CAS path under a package whose root is *not* in `root_paths` is out of

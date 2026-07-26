@@ -1,1 +1,1 @@
-{"platforms": [{"platform": {"architecture": "amd64", "os": "linux"}, "digest": "sha256:manifest-1.2.0"}]}
+{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:557c64653060f3ecc62c266793392953fcb64d5b43e2ffc94c22bcbd358fbec9", "size": 512, "platform": {"architecture": "amd64", "os": "linux"}}]}

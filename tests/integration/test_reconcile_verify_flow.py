@@ -5,11 +5,13 @@ Drives the REAL adapter stack — real `GhcrRegistry` (re-observing each committ
 tag over a real socket) and real `GitHubApi` (the anomaly-issue write) — against
 a canonical tree materialized by `build_git_tree`:
 
-- A clean sweep (fake-GHCR serves exactly the manifests the committed tree was
-  seeded from) exits `ExitCode.OK` and performs ZERO forge writes: verify-only
-  reconcile never touches `p/`, never files an issue when nothing is wrong.
-- A pinned-tag digest mutation (fake-GHCR serves a *different* manifest for the
-  committed `1.0.0` tag) exits `ExitCode.ANOMALY`, files exactly one anomaly
+- A clean sweep (fake-GHCR serves exactly the image index the committed tree
+  was seeded from) exits `ExitCode.OK` and performs ZERO forge writes:
+  verify-only reconcile never touches `p/`, never files an issue when nothing
+  is wrong — and stays clean over a repository that also carries the reserved
+  tags `ocx package push` writes beside every version tag (ADR R3/D7).
+- A pinned-tag digest mutation (fake-GHCR serves a *different* image index for
+  the committed `1.0.0` tag) exits `ExitCode.ANOMALY`, files exactly one anomaly
   issue via `create_or_update_issue`, and writes NO `p/` tree — FP-3's
   verify-only, one-issue-on-anomaly contract. Because `reconcile.run` *raises*
   `AnomalyError` out through `main()`, this is also the flow that exercises
@@ -35,10 +37,13 @@ from indexbot.adapters.github_api import GitHubApi
 from indexbot.cli.main import main
 from indexbot.exit_codes import ExitCode
 from tests.integration.fixtures.canonical import (
-    CANONICAL_MANIFEST,
+    CANONICAL_LEAF,
     CANONICAL_REPO_PATH,
     CANONICAL_SPEC,
     CANONICAL_TAG,
+    LEAF_BYTES,
+    LEAF_DIGEST,
+    seed_registry,
 )
 from tests.integration.harness.git_tree import build_git_tree
 
@@ -56,21 +61,28 @@ _REPOSITORY = "ocx-sh/index"
 _FAKE_PULL_TOKEN = "fake-pull-token"  # noqa: S105
 _FORGE_WRITE_SENTINEL = "ghp_forge_write_token_must_never_reach_ghcr"
 
-# A bare single-platform manifest that differs from `CANONICAL_MANIFEST` (a
-# different config digest and architecture): re-observing the committed `1.0.0`
-# tag against this yields a different content digest than the tree was seeded
-# with — a pinned-tag mutation.
-_MUTATED_MANIFEST: dict[str, object] = {
+# An image index that differs from `CANONICAL_INDEX` — its one descriptor
+# declares `linux/arm64`. Re-observing the committed `1.0.0` tag against this
+# yields a different content digest than the tree was seeded with: a pinned-tag
+# mutation.
+_MUTATED_INDEX: dict[str, object] = {
     "schemaVersion": 2,
-    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-    "config": {
-        "mediaType": "application/vnd.oci.image.config.v1+json",
-        "digest": f"sha256:{'1' * 64}",
-        "size": 0,
-        "platform": {"architecture": "arm64", "os": "linux"},
-    },
-    "layers": [],
+    "mediaType": "application/vnd.oci.image.index.v1+json",
+    "manifests": [
+        {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": LEAF_DIGEST,
+            "size": len(LEAF_BYTES),
+            "platform": {"architecture": "arm64", "os": "linux"},
+        }
+    ],
 }
+
+_DESC_TAG = "__ocx.desc"
+_CANONICAL_TAG_FORM = f"sha256.{LEAF_DIGEST.removeprefix('sha256:')}"
+"""The two reserved tag names `ocx package push` writes beside every version
+tag (D7). Both resolve to bare image manifests, which `observe_one_tag`
+refuses (D4(a)) — so a sweep that reached them at all would escalate."""
 
 
 def _capturing_client(sink: list[dict[str, str]]) -> httpx.Client:
@@ -116,7 +128,7 @@ def test_clean_sweep_exits_ok_with_zero_forge_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     build_git_tree(index_tree, CANONICAL_SPEC)
-    fake_ghcr.add_manifest(CANONICAL_REPO_PATH, CANONICAL_TAG, CANONICAL_MANIFEST)
+    seed_registry(fake_ghcr)
 
     sent_headers: list[dict[str, str]] = []
     with _capturing_client(sent_headers) as client:
@@ -138,10 +150,10 @@ def test_pinned_tag_mutation_files_one_issue_and_engages_summary_floor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    # Seed the committed tree from CANONICAL_MANIFEST (content digest D1)...
+    # Seed the committed tree from CANONICAL_INDEX (content digest D1)...
     build_git_tree(index_tree, CANONICAL_SPEC)
-    # ...but serve a DIFFERENT manifest for the same pinned tag now (digest D2).
-    fake_ghcr.add_manifest(CANONICAL_REPO_PATH, CANONICAL_TAG, _MUTATED_MANIFEST)
+    # ...but serve a DIFFERENT image index for the same pinned tag now (digest D2).
+    seed_registry(fake_ghcr, _MUTATED_INDEX)
 
     issues_path = fake_forge.repo_path("issues")
     fake_forge.stub_json("GET", issues_path, [], params={"state": "open"})
@@ -179,3 +191,42 @@ def test_pinned_tag_mutation_files_one_issue_and_engages_summary_floor(
     assert forge_headers, "expected the forge to have received the anomaly-issue calls"
     for headers in forge_headers:
         assert not any(_FAKE_PULL_TOKEN in value for value in headers.values())
+
+
+def test_reconcile_sweeps_a_repo_carrying_canonical_tags_clean(
+    fake_ghcr: FakeGhcrServer,
+    fake_forge: FakeForgeServer,
+    index_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR R3: a real ocx-published repository carries more than version tags.
+
+    `ocx package push` writes a canonical `sha256.<hex>` tag and a `__ocx.desc`
+    tag beside every version tag, and both resolve to bare image manifests that
+    `observe_one_tag` refuses outright. The sweep re-observes the tags the
+    committed root *claims*, never the registry's tag list, so those reserved
+    names must not enter the sweep at all — asserted directly against the
+    fake's request log, not inferred from the exit code, since a sweep that did
+    list tags would escalate `tag-unrecordable` and file an issue.
+    """
+    build_git_tree(index_tree, CANONICAL_SPEC)
+    seed_registry(fake_ghcr)
+    for reserved in (_CANONICAL_TAG_FORM, _DESC_TAG):
+        fake_ghcr.add_manifest(CANONICAL_REPO_PATH, reserved, CANONICAL_LEAF)
+    fake_ghcr.set_tags(CANONICAL_REPO_PATH, [CANONICAL_TAG, _CANONICAL_TAG_FORM, _DESC_TAG])
+
+    sent_headers: list[dict[str, str]] = []
+    with _capturing_client(sent_headers) as client:
+        _wire_adapters(monkeypatch, index_tree, fake_ghcr, fake_forge, client)
+        exit_code = main(["reconcile"])
+
+    assert exit_code == ExitCode.OK
+    assert fake_forge.requests == []
+
+    served = fake_ghcr.requests
+    assert not any(path.endswith("/tags/list") for _method, path in served)
+    for reserved in (_CANONICAL_TAG_FORM, _DESC_TAG):
+        assert not any(path.endswith(f"/manifests/{reserved}") for _method, path in served)
+    # The claimed tag WAS swept, so the negatives above are about scope, not
+    # about the sweep having quietly done nothing.
+    assert any(path.endswith(f"/manifests/{CANONICAL_TAG}") for _method, path in served)

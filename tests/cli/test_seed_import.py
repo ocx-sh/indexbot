@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 
 import pytest
@@ -31,7 +32,14 @@ def run(
     )
 
 
-_BARE_MANIFEST_AMD64: dict[str, object] = {"platform": {"architecture": "amd64", "os": "linux"}}
+_INDEX_AMD64: dict[str, object] = {
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.index.v1+json",
+    "manifests": [
+        {"platform": {"architecture": "amd64", "os": "linux"}, "digest": "sha256:" + "9" * 64}
+    ],
+}
+"""The only manifest shape this index records — an OCI image index (D4(a))."""
 
 _CATALOG_MD = """---
 title: CMake
@@ -110,7 +118,7 @@ def _registry(
 ) -> FakeRegistry:
     return FakeRegistry(
         tags=tags if tags is not None else {_REPO: ["3.28.1"]},
-        manifests=manifests if manifests is not None else {(_REPO, "3.28.1"): _BARE_MANIFEST_AMD64},
+        manifests=manifests if manifests is not None else {(_REPO, "3.28.1"): _INDEX_AMD64},
     )
 
 
@@ -142,9 +150,12 @@ def test_happy_path_writes_root_and_cas_objects() -> None:
     assert content_digest.startswith("sha256:")
 
     cas_hex = content_digest.removeprefix("sha256:")
-    observation_bytes = files.read_bytes(f"p/kitware/cmake/o/sha256/{cas_hex}.json")
-    assert observation_bytes is not None
-    assert json.loads(observation_bytes)["platforms"][0]["platform"]["architecture"] == "amd64"
+    cas_bytes = files.read_bytes(f"p/kitware/cmake/o/sha256/{cas_hex}.json")
+    # The registry's OCI image index, stored verbatim — never re-serialized,
+    # so the filename hex is the registry's own digest for those same bytes.
+    assert cas_bytes == _registry().get_manifest(_REPO, "3.28.1").raw
+    assert cas_bytes is not None
+    assert hashlib.sha256(cas_bytes).hexdigest() == cas_hex
 
     readme_digest = root["desc"]["readme"]
     readme_hex = readme_digest.removeprefix("sha256:")
@@ -265,8 +276,8 @@ def test_shared_content_digest_dedups_to_one_cas_object() -> None:
     registry = _registry(
         tags={_REPO: ["3.28.1", "latest"]},
         manifests={
-            (_REPO, "3.28.1"): _BARE_MANIFEST_AMD64,
-            (_REPO, "latest"): _BARE_MANIFEST_AMD64,
+            (_REPO, "3.28.1"): _INDEX_AMD64,
+            (_REPO, "latest"): _INDEX_AMD64,
         },
     )
     run(_args(), registry=registry, files=files, clock=FixedClock())

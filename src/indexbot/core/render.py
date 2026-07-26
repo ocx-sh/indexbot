@@ -32,9 +32,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from indexbot.core.validate_entry import cas_relpath, parse_observation_object
+from indexbot.core.validate_entry import cas_relpath
 from indexbot.core.version_order import find_latest_version
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ class FileWrite:
 def _live_tag_content_digests(root: PackageRoot) -> frozenset[str]:
     """Content digests of every *live* (non-yanked) tag (ADR-1 D8) — shared
     by `_reachable_digests` (CAS pruning) and `_catalog_platforms` (platform
-    union across observation objects), this module's only two genuinely
+    union across the tags' image indices), this module's only two genuinely
     different consumers of the same live-tag digest iteration
     (quality-core.md DRY: extraction justified by 2+ real callers)."""
     return frozenset(entry.content for entry in root.tags.values() if entry.yanked is None)
@@ -137,24 +137,46 @@ def _cas_url(
 
 
 def _catalog_platforms(source: SourcePackage) -> list[str]:
-    """`f"{os}/{architecture}"` union across every live tag's observation
-    object, deduped + sorted (frozen `/data/catalog/catalog.json` contract's
+    """`f"{os}/{architecture}"` union across every live tag's image index,
+    deduped + sorted (frozen `/data/catalog/catalog.json` contract's
     `platforms` field).
 
-    Parses each live tag's CAS bytes via `parse_observation_object` (the
-    file's existing codec, `core/validate_entry.py`) — malformed CAS bytes
-    or a live-tag digest missing from `content_by_digest` propagate as
-    `ValidationError`/`KeyError` rather than being silently skipped, matching
-    `_cas_url`'s documented trust posture: render trusts a `SourcePackage`
-    whose reachability invariants were already checked upstream
-    (`check_no_dangling_references`, `check_content_digest_self_consistent`),
-    and adds no new defensive branches of its own.
+    Each live tag's CAS bytes are the registry's OCI image index verbatim,
+    so this reads `manifests[]` directly. A descriptor contributes a platform
+    only when it names one: `platform.os` and `platform.architecture` both
+    present as strings, `os` not `"unknown"` (ADR R4). Everything else is
+    skipped — no `platform` key at all, a `platform` that is not an object,
+    one missing or mistyping either field, and the `"os": "unknown"`
+    attestation shape. These are the referrer/attestation descriptors a real
+    registry serves alongside the runnable images; a platform matrix that
+    listed them would advertise `unknown/unknown` as an installable target.
+
+    This is the one read in this module that does *not* trust its input. The
+    upstream gates (`cli/validate.py`'s image-index shape gate,
+    `parse_image_index_digests`) check `manifests[]` down to each
+    descriptor's `digest`, and stop there — `platform` is unvalidated
+    publisher bytes all the way to here, so a missing `architecture` key
+    would otherwise `KeyError` out of `build_render_plan`, which `cli/
+    render.py` calls with every package in one list: one publisher, whole
+    site render dead, and outside `IndexBotError` so without an exit code or
+    a step summary. Structural faults those gates *do* cover — malformed CAS
+    bytes, an index with no `manifests` key, a live-tag digest missing from
+    `content_by_digest` — still propagate as `JSONDecodeError`/`KeyError`,
+    matching `_cas_url`'s trust posture.
     """
     platforms: set[str] = set()
     for digest in _live_tag_content_digests(source.root):
-        observation = parse_observation_object(source.content_by_digest[f"{digest}.json"])
-        for entry in observation.platforms:
-            platforms.add(f"{entry.platform.os}/{entry.platform.architecture}")
+        index = cast("dict[str, object]", json.loads(source.content_by_digest[f"{digest}.json"]))
+        for descriptor in cast("list[dict[str, object]]", index["manifests"]):
+            platform = descriptor.get("platform")
+            if not isinstance(platform, dict):
+                continue
+            # Honest value type: JSON keys are strings, values are anything.
+            fields = cast("dict[str, object]", platform)
+            os_name, arch = fields.get("os"), fields.get("architecture")
+            if not isinstance(os_name, str) or not isinstance(arch, str) or os_name == "unknown":
+                continue
+            platforms.add(f"{os_name}/{arch}")
     return sorted(platforms)
 
 
