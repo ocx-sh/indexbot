@@ -47,8 +47,7 @@ _PACKAGE_ROOTS = (
     "p/ns/pkg.name_x-y.json",
 )
 _NOT_PACKAGE_ROOTS = (
-    # The CAS observation object every announce PR adds — the exact file that
-    # broke #57.
+    # The CAS object every announce PR adds — the exact file that broke #57.
     "p/michael-herwig/ocx-e2e-hello/o/sha256/"
     "4ee19e66016380ec603fee8f6b8d8fda85768d779944a942f3d42befe451fe91.json",
     "p/ns/deeper/still/pkg.json",
