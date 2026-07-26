@@ -213,15 +213,18 @@ def test_g03_repository_host_allowlisted() -> None:
         check_repository_allowlisted("oci://registry.evil.example/ocx-contrib/cmake", hosts)
 
 
-def test_g03_shipped_policy_is_exactly_ghcr_io() -> None:
+def test_g03_shipped_policy_is_exactly_the_two_ocx_operated_hosts() -> None:
     """G-03's effective policy for THIS index — the committed
     `.github/index-policy.json`, parsed by the same code the bot runs.
 
     The allowlist became a per-deployment input; this repo IS the public
-    index, and its policy stays exactly `{"ghcr.io"}`. Any PR that widens the
-    committed file fails here, which is the reviewed-diff half of "extend only
-    via reviewed PR" made mechanical."""
-    assert _shipped_registry_hosts() == frozenset({"ghcr.io"})
+    index, and its policy is exactly `{"ghcr.io", "ocx.sh"}`: `ghcr.io` for
+    every third-party mirror, `ocx.sh` for the operator's own first-party
+    repositories (`ocx/cli`, `ocx/mirror`, `regclient/regsync`), which must
+    have index roots or a default-index client 404s terminally on them. Any
+    PR that widens the committed file further fails here, which is the
+    reviewed-diff half of "extend only via reviewed PR" made mechanical."""
+    assert _shipped_registry_hosts() == frozenset({"ghcr.io", "ocx.sh"})
 
 
 def test_g03_shipped_policy_is_servable_by_an_adapter() -> None:

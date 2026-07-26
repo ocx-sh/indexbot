@@ -1,7 +1,7 @@
 """End-to-end verify-only `indexbot reconcile` through `main()` against a
 fixture git tree plus both socket-level fakes (WP-B4, plan Phase 5).
 
-Drives the REAL adapter stack — real `GhcrRegistry` (re-observing each committed
+Drives the REAL adapter stack — real `RegistryV2` (re-observing each committed
 tag over a real socket) and real `GitHubApi` (the anomaly-issue write) — against
 a canonical tree materialized by `build_git_tree`:
 
@@ -32,8 +32,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from indexbot.adapters.ghcr import GhcrRegistry
 from indexbot.adapters.github_api import GitHubApi
+from indexbot.adapters.registry_v2 import RegistryV2
 from indexbot.cli.main import main
 from indexbot.exit_codes import ExitCode
 from tests.integration.fixtures.canonical import (
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from tests.integration.harness.fake_forge import FakeForgeServer
     from tests.integration.harness.fake_ghcr import FakeGhcrServer
 
-_WIRING_GHCR = "indexbot.cli._wiring.GhcrRegistry"
+_WIRING_REGISTRY = "indexbot.cli._wiring.RegistryV2"
 _WIRING_GITHUB = "indexbot.cli._wiring.GitHubApi"
 _REPOSITORY = "ocx-sh/index"
 _FAKE_PULL_TOKEN = "fake-pull-token"  # noqa: S105
@@ -109,7 +109,7 @@ def _wire_adapters(
         ),
     )
     monkeypatch.setattr(
-        _WIRING_GHCR, functools.partial(GhcrRegistry, base_url=ghcr.base_url, client=client)
+        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=ghcr.base_url, client=client)
     )
 
 

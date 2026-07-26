@@ -3,7 +3,7 @@
 `test_validate_end_to_end` is the full loop the whole Track-B safety net is
 built on — seed a canonical git tree, serve its one tag's image index from the
 socket-level `FakeGhcrServer`, run `indexbot validate <root>` through the real
-`main()` (real argparse -> real `_wiring` -> real `GhcrRegistry` adapter -> real
+`main()` (real argparse -> real `_wiring` -> real `RegistryV2` adapter -> real
 `LocalFiles` adapter), and assert a clean `ExitCode.OK`. It confirms the real
 anonymous bearer-token dance ran against the fake, not a re-mock.
 
@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from indexbot.adapters.ghcr import GhcrRegistry
 from indexbot.adapters.github_api import GitHubApi
+from indexbot.adapters.registry_v2 import RegistryV2
 from indexbot.cli.main import main
 from indexbot.exit_codes import ExitCode
 from tests.integration.fixtures.canonical import (
@@ -36,7 +36,7 @@ from tests.integration.harness.fake_forge import FakeForgeServer
 from tests.integration.harness.fake_ghcr import FakeGhcrServer, manifest_wire_bytes
 from tests.integration.harness.git_tree import build_git_tree
 
-_WIRING_GHCR = "indexbot.cli._wiring.GhcrRegistry"
+_WIRING_REGISTRY = "indexbot.cli._wiring.RegistryV2"
 
 
 def test_validate_end_to_end(
@@ -48,9 +48,11 @@ def test_validate_end_to_end(
     # Seam 1 (FilePort root): `_wiring._repo_root()` reads GITHUB_WORKSPACE.
     monkeypatch.setenv("GITHUB_WORKSPACE", str(index_tree))
     # Seam 2 (RegistryPort base URL): `_wiring._run_validate` builds a bare
-    # `GhcrRegistry()`; thread the fake's base URL through the adapter's own
+    # `RegistryV2()`; thread the fake's base URL through the adapter's own
     # `base_url` constructor arg by monkeypatching the wiring's class reference.
-    monkeypatch.setattr(_WIRING_GHCR, functools.partial(GhcrRegistry, base_url=fake_ghcr.base_url))
+    monkeypatch.setattr(
+        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=fake_ghcr.base_url)
+    )
 
     exit_code = main(["validate", CANONICAL_ROOT_PATH])
 

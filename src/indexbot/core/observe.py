@@ -40,7 +40,7 @@ registry is obliged to serve in the first place."""
 _SOURCE_ANNOTATION: Final[str] = "org.opencontainers.image.source"
 """Manifest-level annotation carrying the repository whose CI produced the
 build (`ocx package push --annotation`). Read the same way `core/desc.py`
-reads `__ocx.desc`'s title/keywords annotations, and `adapters/ghcr.py`'s
+reads `__ocx.desc`'s title/keywords annotations, and `adapters/registry_v2.py`'s
 `_embedded_identifier` reads `sh.ocx.name`."""
 
 _SOURCE_SCHEME: Final[str] = "https://"
@@ -81,7 +81,7 @@ class Observation:
 def _source_annotation(raw: _Manifest) -> str | None:
     """`_SOURCE_ANNOTATION`'s value from a fetched manifest, or `None`.
 
-    Same read shape as `adapters/ghcr.py`'s `_embedded_identifier` (a
+    Same read shape as `adapters/registry_v2.py`'s `_embedded_identifier` (a
     non-string annotation value is a malformed manifest, treated as absent),
     plus the `_SOURCE_SCHEME` filter — the one place registry-controlled URL
     text enters this index, so it is also the one place to reject it.

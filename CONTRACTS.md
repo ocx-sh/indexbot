@@ -58,7 +58,7 @@ digested. `desc.digest` comparisons and desc-blob digests are likewise
   should produce, compared byte-for-byte). Keep fixtures as Python
   literals in the test module unless a case is large enough that a checked-in
   file genuinely reads better — most of these don't need one.
-- **respx** (`adapters/ghcr.py`, `adapters/github_api.py`, WP2-C/WP2-D): one
+- **respx** (`adapters/registry_v2.py`, `adapters/github_api.py`, WP2-C/WP2-D): one
   `respx.mock` route per distinct response class per method
   (200/404/401-then-retry/429-with-Retry-After/5xx-exhausted/malformed-JSON).
   Assert on the *port-level* return/exception, not on respx call internals,
@@ -303,7 +303,7 @@ def is_retryable_status(status_code: int) -> bool:
     """True for 429 or any 5xx. False for everything else, including other
     4xx (401/404 are permanent failures for a given request, never retried
     by this policy — 401 gets one token-refresh-and-retry inside
-    `adapters/ghcr.py`, which is a different mechanism, not backoff)."""
+    `adapters/registry_v2.py`, which is a different mechanism, not backoff)."""
 
 def delay_seconds(
     attempt: int, policy: BackoffPolicy, *, jitter: float, retry_after: float | None = None
@@ -311,7 +311,7 @@ def delay_seconds(
     """`attempt` is 1-indexed. If `retry_after` is given and positive, it
     wins outright (the server said exactly how long to wait — G-10).
     Otherwise: `min(policy.max_delay_seconds, policy.base_delay_seconds * 2 ** (attempt - 1)) * (0.5 + jitter)`,
-    `jitter` in `[0, 1)` supplied by the caller (`adapters/ghcr.py` passes
+    `jitter` in `[0, 1)` supplied by the caller (`adapters/registry_v2.py` passes
     `random.random()`; tests pass a fixed float) — keeps this function
     itself deterministic and trivially 100%-coverable without mocking
     `random` or `time`.
@@ -320,7 +320,7 @@ def delay_seconds(
 
 The retry **loop** (attempt counting, calling `httpx`, sleeping, deciding
 when `policy.max_attempts` is exhausted and raising `TransientError`) lives
-in `adapters/ghcr.py` — it is imperative-shell code that happens to consult
+in `adapters/registry_v2.py` — it is imperative-shell code that happens to consult
 this pure module's two functions for its decisions. Do not move the loop
 into `core/backoff.py`; that would require mocking `time.sleep`/`httpx` to
 test it, defeating the whole point of the split.
@@ -696,10 +696,18 @@ Key the map however is convenient (e.g. `"sha256:<hex>.<ext>"`, or a
 on the bare `sha256:<hex>` digest strings stored in `TagEntry.content` /
 `Desc.readme` / `Desc.logo` — that part is frozen, the key encoding is not.
 
-## 9. `adapters/ghcr.py` (WP2-C)
+## 9. `adapters/registry_v2.py` (WP2-C)
 
-Implements `RegistryPort`. Bearer-token dance: GHCR anonymous pull tokens
-via `https://ghcr.io/token?...` — fetch once per repository, cache for the
+Implements `RegistryPort` for any OCI Distribution (Registry v2) host. One
+`RegistryV2` client per host — `ghcr.io` and `ocx.sh` differ only in the URL
+that issues pull tokens (`https://ghcr.io/token` vs. the Artifactory realm
+`OCX_SH_REALM`; the default is `<base_url>/token`) — with
+`RoutedRegistry` picking a client per call from the `oci://<host>/…` URI, so
+`core/` still sees exactly one `RegistryPort`. `cli/_wiring._registry()`
+builds the mapping and `_wiring.REGISTRY_ADAPTER_HOSTS` names its keys.
+
+Bearer-token dance: anonymous pull tokens
+via `GET <realm>?service=<host>&scope=…` — fetch once per repository, cache for the
 adapter instance's lifetime, refresh once (not counted against
 `BackoffPolicy.max_attempts`) on a single 401, fail with `TransientError` on
 a second consecutive 401 for the same request (a persistent auth failure is
@@ -1078,16 +1086,16 @@ Two failures are raised there, both loud and both early:
 1. **No policy file** — fail closed. An index copy that never stated a policy
    says so, rather than silently inheriting the public index's `ghcr.io`.
 2. **A host no `RegistryPort` adapter can serve** — the important one.
-   `adapters/ghcr.py` is the only implementation and `_run_*` constructs it
-   unconditionally: there is no dispatch-by-host. Allowlisting
-   `harbor.corp.internal` today would therefore produce a root that passes
-   every validation check and then cannot be fetched — strictly worse than
-   the honest refusal it replaces. `_wiring.REGISTRY_ADAPTER_HOSTS` is the
-   honest statement of what is implementable, `_registry_hosts` refuses any
-   policy that exceeds it, and the error names the missing piece (implement a
-   `RegistryPort`, add its host, dispatch it). Multi-registry adapter dispatch
-   is out of scope — per-registry auth and a test matrix are its own work; the
-   guard exists so the gap is loud instead of latent.
+   `adapters/registry_v2.py` serves the hosts `_wiring._registry()` wires a
+   client for, and nothing else. Allowlisting `harbor.corp.internal` today
+   would therefore produce a root that passes every validation check and then
+   cannot be fetched — strictly worse than the honest refusal it replaces.
+   `_wiring.REGISTRY_ADAPTER_HOSTS` is the honest statement of what is
+   implementable, `_registry_hosts` refuses any policy that exceeds it, and
+   the error names the missing piece (implement a `RegistryPort`, add its
+   host, dispatch it). `RoutedRegistry` repeats the refusal at call time for
+   a host with no client — unreachable behind the policy check, kept as the
+   backstop for a future wiring bug.
 
 ### Why PR-head validation is not a bypass
 

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 
 class RegistryPort(Protocol):
-    """OCI registry reads. Implemented by `adapters/ghcr.py` (ADR-4 BD-1).
+    """OCI registry reads. Implemented by `adapters/registry_v2.py` (ADR-4 BD-1).
 
     The bearer-token dance (including retry-on-expired-token) and `tags/list`
     pagination are adapter-internal — `core/` only ever sees the resolved

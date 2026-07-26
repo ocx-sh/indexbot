@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 _ACCEPT = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
 _MAX_PAGES = 100
-"""Hard pagination cap (mirrors `adapters/ghcr.py`'s `tags/list` cap,
+"""Hard pagination cap (mirrors `adapters/registry_v2.py`'s `tags/list` cap,
 CONTRACTS.md §9) — bounds an otherwise-unbounded `Link`-header follow loop
 against a pathological or misbehaving response chain."""
 
@@ -278,7 +278,7 @@ class GitHubApi:
         """Raise `TransientError` for response classes this adapter treats as
         give-up-and-retry-later, uniformly across every call site: auth
         rejection (401 — this adapter's token is fixed for its lifetime, no
-        mid-run refresh like `adapters/ghcr.py`'s anonymous pull token, so a
+        mid-run refresh like `adapters/registry_v2.py`'s anonymous pull token, so a
         401 here is not backoff-retryable within the same process — it maps
         straight to the exit-75 "retry later" contract, BD-2); rate limiting
         (429 always; 403 only when `Retry-After` is present, so a bare

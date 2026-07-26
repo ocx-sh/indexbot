@@ -1,23 +1,32 @@
-"""GHCR (`ghcr.io`) `RegistryPort` implementation (CONTRACTS.md §9).
+"""OCI Distribution (Registry v2) `RegistryPort` implementation
+(CONTRACTS.md §9).
+
+One client class, configured per host: `ghcr.io` and `ocx.sh` speak the same
+`/v2/` API with the same anonymous-pull token dance, and differ only in which
+URL issues the token (GHCR: `https://ghcr.io/token`; `ocx.sh` is an
+Artifactory-backed registry whose `WWW-Authenticate` realm sits under
+`/artifactory/...`). `RoutedRegistry` below picks the configured client for a
+`repository` URI's host, so `core/` still sees a single `RegistryPort`.
 
 The only place `httpx` is imported for registry reads (ADR-4 BD-1, functional
 core / imperative shell). Owns three things `core/` never sees the mechanics
 of:
 
 - The anonymous bearer-token dance: an unauthenticated request gets a `401`,
-  a pull token is fetched from `GET /token?service=ghcr.io&scope=repository:
-  <path>:pull` (no credentials required for a public repository), and the
-  original request is retried once with `Authorization: Bearer <token>`. The
-  token is cached per repository path for this instance's lifetime and
-  refreshed (not counted against `BackoffPolicy.max_attempts`) on exactly one
-  fresh `401` — a second consecutive `401` for the same logical request is a
-  persistent auth failure, raised as `TransientError`.
-- A `403` from either the token endpoint or a `/v2/` API call — GHCR's
-  `DENIED` response for a repository that is missing or private, body
-  present or not — is a permanent condition, never a bug and never worth
-  retrying: raised as `ValidationError`, distinct from the `401` dance above
-  (which *can* succeed once a token is attached) and from `TransientError`
-  (which implies retrying later might help).
+  a pull token is fetched from `GET <realm>?service=<host>&scope=
+  repository:<path>:pull` (no credentials required for a publicly readable
+  repository), and the original request is retried once with
+  `Authorization: Bearer <token>`. The token is cached per repository path
+  for this instance's lifetime and refreshed (not counted against
+  `BackoffPolicy.max_attempts`) on exactly one fresh `401` — a second
+  consecutive `401` for the same logical request is a persistent auth
+  failure, raised as `TransientError`.
+- A `403` from either the token endpoint or a `/v2/` API call — the `DENIED`
+  response for a repository that is missing or private, body present or not
+  — is a permanent condition, never a bug and never worth retrying: raised
+  as `ValidationError`, distinct from the `401` dance above (which *can*
+  succeed once a token is attached) and from `TransientError` (which implies
+  retrying later might help).
 - `tags/list` pagination via the RFC 8288 `Link` response header, bounded by
   `max_pages` so a misbehaving/malicious next-link chain can't loop forever.
 - The 429/5xx retry loop — the imperative-shell half of `core/backoff.py`'s
@@ -28,8 +37,8 @@ of:
 in `PackageRoot.repository` (see `core/validate_entry.py`'s
 `check_repository_allowlisted`/`check_repository_shape`, which already ran
 against this same string before any `RegistryPort` call reaches here per BD-1's
-SSRF ordering) — this adapter only ever parses out the `<path>` portion, it
-never re-validates the host.
+SSRF ordering) — `RegistryV2` only ever parses out the `<path>` portion; the
+host is re-read exactly once, by `RoutedRegistry`, to choose a client.
 """
 
 from __future__ import annotations
@@ -53,13 +62,32 @@ if TYPE_CHECKING:
     from indexbot.model import OwnershipProbeResult
 
 GHCR_HOST: Final[str] = "ghcr.io"
-"""The one registry host this adapter can serve.
+"""GitHub Container Registry — the host every third-party mirror lives on.
 
-`cli/_wiring.py` builds its servable-host set from this: a deployment policy
-(`.github/index-policy.json`) that allowlists a host no adapter implements is
-refused at wiring time rather than producing roots that validate and then
-cannot be fetched. Keep it the single source of the literal — `base_url` and
-the token endpoint's `service` parameter both derive from it."""
+`cli/_wiring.py` builds its servable-host set from this and `OCX_SH_HOST`: a
+deployment policy (`.github/index-policy.json`) that allowlists a host no
+adapter implements is refused at wiring time rather than producing roots that
+validate and then cannot be fetched. Keep these the single source of the
+literals — `base_url` and the token endpoint's `service` parameter both
+derive from them."""
+
+OCX_SH_HOST: Final[str] = "ocx.sh"
+"""The index operator's own registry, home of the first-party `ocx/cli`,
+`ocx/mirror` and `regclient/regsync` repositories. Anonymously readable, same
+Registry v2 API as GHCR."""
+
+OCX_SH_REALM: Final[str] = "https://ocx.sh/artifactory/api/docker/sh-ocx-oci-prod/v2/token"
+"""`ocx.sh`'s pull-token endpoint — the `realm` its `/v2/` `401` advertises
+(`WWW-Authenticate: Bearer realm="…",service="ocx.sh"`), which is NOT
+`https://ocx.sh/token` (that path 404s: the registry is Artifactory-backed
+and issues tokens under its own repository path).
+
+Pinned as a constant rather than followed from the response header on the
+fly: a `realm` is a server-supplied URL, and this adapter already refuses to
+follow a server-supplied cross-host pagination link (`_parse_next_link`) for
+the same SSRF reason. If JFrog ever moves it, the token fetch 404s loudly at
+`raise_for_status` — a visible break, not a silent widening of where this bot
+sends requests."""
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 _DEFAULT_MAX_PAGES = 10_000
@@ -149,15 +177,15 @@ def _parse_next_link(link_header: str | None, *, base_url: str) -> str | None:
     return None
 
 
-def _denied_message(repo_path: str) -> str:
-    """`403`/`DENIED` from GHCR (token endpoint or a `/v2/` call), body
-    present or empty — the repository is missing or private and does not
+def _denied_message(host: str, repo_path: str) -> str:
+    """`403`/`DENIED` from the registry (token endpoint or a `/v2/` call),
+    body present or empty — the repository is missing or private and does not
     grant anonymous `:pull`. Permanent, not retryable: distinct from a
     `401`, which the token dance above can still recover from.
     """
     return (
-        f"ghcr.io/{repo_path} is missing or does not allow anonymous pull "
-        "(GHCR denied the request with 403); the repository must exist and grant "
+        f"{host}/{repo_path} is missing or does not allow anonymous pull "
+        "(the registry denied the request with 403); the repository must exist and grant "
         "anonymous :pull access before this bot can observe it"
     )
 
@@ -176,17 +204,35 @@ def _embedded_identifier(manifest: dict[str, object]) -> str | None:
 
 
 @dataclass(slots=True)
-class GhcrRegistry:
-    """`RegistryPort` over `ghcr.io`. One instance per process run — `_tokens`
-    caches one anonymous pull token per repository path for this instance's
-    lifetime (CONTRACTS.md §9)."""
+class RegistryV2:
+    """`RegistryPort` over one Registry v2 host (defaults to `ghcr.io`). One
+    instance per host per process run — `_tokens` caches one anonymous pull
+    token per repository path for this instance's lifetime (CONTRACTS.md §9).
+
+    `host` is the *logical* host (the one in `oci://<host>/<path>`, used for
+    the token request's `service` parameter and for error messages); it is
+    deliberately separate from `base_url`, which the integration harness
+    repoints at a loopback fake while the roots under test still name
+    `ghcr.io`.
+    """
 
     base_url: str = f"https://{GHCR_HOST}"
+    host: str = GHCR_HOST
+    realm: str = ""
     timeout: float = _DEFAULT_TIMEOUT_SECONDS
     policy: BackoffPolicy = field(default_factory=BackoffPolicy)
     max_pages: int = _DEFAULT_MAX_PAGES
     client: httpx.Client = field(default_factory=httpx.Client)
     _tokens: dict[str, str] = field(default_factory=dict[str, str], init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Default the token endpoint to `<base_url>/token` — the Registry v2
+        convention GHCR follows, and the shape the integration harness's fake
+        serves, so repointing `base_url` at a loopback fake moves the token
+        endpoint with it. `ocx.sh` passes its own `realm` explicitly
+        because Artifactory issues tokens from a different path."""
+        if not self.realm:
+            self.realm = f"{self.base_url}/token"
 
     def list_tags(self, repository: str) -> list[str]:
         repo_path = _repo_path(repository)
@@ -287,7 +333,7 @@ class GhcrRegistry:
                 continue
 
             if response.status_code == 403:
-                raise ValidationError(_denied_message(repo_path))
+                raise ValidationError(_denied_message(self.host, repo_path))
 
             if is_retryable_status(response.status_code):
                 if attempt >= self.policy.max_attempts:
@@ -305,11 +351,56 @@ class GhcrRegistry:
 
     def _fetch_token(self, repo_path: str) -> str:
         response = self.client.get(
-            f"{self.base_url}/token",
-            params={"service": GHCR_HOST, "scope": f"repository:{repo_path}:pull"},
+            self.realm,
+            params={"service": self.host, "scope": f"repository:{repo_path}:pull"},
             timeout=self.timeout,
         )
         if response.status_code == 403:
-            raise ValidationError(_denied_message(repo_path))
+            raise ValidationError(_denied_message(self.host, repo_path))
         response.raise_for_status()
         return str(response.json()["token"])
+
+
+@dataclass(slots=True)
+class RoutedRegistry:
+    """`RegistryPort` that picks a per-host `RegistryV2` from the
+    `oci://<host>/<path>` URI it is handed.
+
+    The index serves more than one registry host (`.github/index-policy.json`),
+    and one `validate`/`reconcile` run can touch roots on both — so the choice
+    has to be per call, not per run. `cli/_wiring.py` builds the mapping; its
+    keys are exactly `_wiring.REGISTRY_ADAPTER_HOSTS`.
+
+    A host with no client is a `ValidationError`, not a `KeyError`: it is
+    unreachable in production (`check_repository_allowlisted` refuses any host
+    outside the policy, and `_registry_hosts` refuses any policy host without a
+    client, both before this class ever sees the URI), so this is the
+    defence-in-depth backstop for a future wiring bug — and it must fail the
+    same closed way an out-of-policy host does.
+    """
+
+    by_host: dict[str, RegistryV2]
+
+    def list_tags(self, repository: str) -> list[str]:
+        return self._client(repository).list_tags(repository)
+
+    def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
+        return self._client(repository).get_manifest(repository, reference)
+
+    def get_desc_tag_digest(self, repository: str) -> str | None:
+        return self._client(repository).get_desc_tag_digest(repository)
+
+    def get_blob(self, repository: str, digest: str) -> bytes:
+        return self._client(repository).get_blob(repository, digest)
+
+    def probe_ownership(self, repository: str, expected_name: str) -> OwnershipProbeResult:
+        return self._client(repository).probe_ownership(repository, expected_name)
+
+    def _client(self, repository: str) -> RegistryV2:
+        host = urlsplit(repository).netloc
+        client = self.by_host.get(host)
+        if client is None:
+            raise ValidationError(
+                f"no registry client for host {host!r} (serving {sorted(self.by_host)})"
+            )
+        return client

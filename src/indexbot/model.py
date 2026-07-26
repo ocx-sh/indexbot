@@ -40,7 +40,7 @@ class ManifestFetch:
     response header alone. `digest` is therefore always computed by the
     implementing adapter as `sha256:<hex of raw>` — never copied verbatim
     from a registry-supplied header (see `ports.py`'s docstring for the full
-    doctrine and `adapters/ghcr.py`'s verify-if-present header check).
+    doctrine and `adapters/registry_v2.py`'s verify-if-present header check).
 
     `raw` is the exact wire bytes the registry served (the CAS-verifiable
     input `digest` was computed over); `parsed` is that same content decoded

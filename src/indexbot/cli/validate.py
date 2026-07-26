@@ -14,7 +14,7 @@ Ports are required keyword-only arguments on `run` rather than the bare
 `Callable[[argparse.Namespace], ExitCode]` shape CONTRACTS.md §12 quotes
 verbatim — WP2-M's production wiring is expected to bind the real adapters
 at `_DISPATCH` registration time (e.g.
-`functools.partial(run, files=LocalFiles(...), registry=GhcrRegistry())`),
+`functools.partial(run, files=LocalFiles(...), registry=RegistryV2())`),
 which still satisfies that single-argument dispatch shape once registered.
 Flagged in this work package's `open_questions` in case a different binding
 convention (e.g. a shared `Ports` bundle dataclass) was intended instead.

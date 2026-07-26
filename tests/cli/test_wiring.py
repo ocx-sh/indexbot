@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from indexbot.adapters.ghcr import GHCR_HOST
+from indexbot.adapters.registry_v2 import GHCR_HOST, OCX_SH_HOST, OCX_SH_REALM
 from indexbot.cli import _wiring
 from indexbot.cli import main as main_module
 from indexbot.core.observe import observe
@@ -142,10 +142,22 @@ def test_registry_hosts_rejects_an_unservable_host_alongside_a_servable_one() ->
 
 
 def test_adapter_hosts_matches_the_registry_adapters_that_exist() -> None:
-    """One adapter (`adapters/ghcr.py`), one servable host. This asserts the
-    set stays honest: growing it without shipping an adapter re-opens the gap
-    the guard closes."""
-    assert frozenset({GHCR_HOST}) == _wiring.REGISTRY_ADAPTER_HOSTS
+    """The servable-host set is exactly the hosts `_registry()` wires a client
+    for. This asserts the set stays honest: growing it without wiring a client
+    re-opens the gap the guard closes."""
+    assert frozenset({GHCR_HOST, OCX_SH_HOST}) == _wiring.REGISTRY_ADAPTER_HOSTS
+    assert set(_wiring._registry().by_host) == _wiring.REGISTRY_ADAPTER_HOSTS  # pyright: ignore[reportPrivateUsage]
+
+
+def test_registry_wires_the_ocx_sh_token_endpoint() -> None:
+    """`ocx.sh` is Artifactory-backed: its pull tokens come from the realm its
+    own `401` advertises, not from `https://ocx.sh/token` (which 404s). A
+    client wired with GHCR's `{base_url}/token` default would fail every read
+    against it."""
+    client = _wiring._registry().by_host[OCX_SH_HOST]  # pyright: ignore[reportPrivateUsage]
+    assert client.host == OCX_SH_HOST
+    assert client.base_url == "https://ocx.sh"
+    assert client.realm == OCX_SH_REALM
 
 
 def test_local_policy_hosts_reads_the_checkout_copy() -> None:
@@ -245,7 +257,10 @@ def _patch_adapters(
     def _github_api_double(**_: object) -> FakeGitHub:
         return github_double
 
-    monkeypatch.setattr(_wiring, "GhcrRegistry", lambda: registry or FakeRegistry())
+    # `_registry` (the per-host router factory), not the `RegistryV2` class
+    # itself: every `_run_*` reaches the registry through it, and a fake needs
+    # no host routing — `tests/adapters/test_registry_v2.py` owns the router.
+    monkeypatch.setattr(_wiring, "_registry", lambda: registry or FakeRegistry())
     monkeypatch.setattr(_wiring, "_github_api", lambda: github_double)
     monkeypatch.setattr(_wiring, "GitHubApi", _github_api_double)
     monkeypatch.setattr(_wiring, "LocalFiles", _local_files)

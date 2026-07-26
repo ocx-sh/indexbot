@@ -37,7 +37,7 @@ def test_fake_registry_get_manifest_found() -> None:
 
 def test_fake_registry_get_manifest_digest_is_computed_from_content() -> None:
     # Same input twice -> byte-identical `raw` -> the same digest; never a
-    # value the test configures directly (mirrors `adapters/ghcr.py`'s
+    # value the test configures directly (mirrors `adapters/registry_v2.py`'s
     # digest doctrine, `ports.py`'s `get_manifest` docstring).
     manifest: dict[str, object] = {"platforms": []}
     first = FakeRegistry(manifests={("repo", "a"): manifest}).get_manifest("repo", "a")

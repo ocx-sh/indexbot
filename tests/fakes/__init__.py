@@ -75,7 +75,7 @@ class FakeRegistry:
         return list(self.tags.get(repository, []))
 
     def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
-        """Same digest doctrine as `adapters/ghcr.py`: `digest` is computed
+        """Same digest doctrine as `adapters/registry_v2.py`: `digest` is computed
         from `raw`, never a value tests set directly — so a `core/` consumer
         relying on a locally synthesized/trusted digest fails against this
         fake exactly as it would against the real adapter.

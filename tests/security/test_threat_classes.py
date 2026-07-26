@@ -20,7 +20,11 @@ from indexbot.cli import announce, governance_check
 from indexbot.core.diff import classify_change, diff
 from indexbot.core.observe import Observation
 from indexbot.core.regenerate import regenerate
-from indexbot.core.validate_entry import parse_digest, serialize_package_root
+from indexbot.core.validate_entry import (
+    check_namespace_not_reserved,
+    parse_digest,
+    serialize_package_root,
+)
 from indexbot.errors import ValidationError
 from indexbot.exit_codes import ExitCode
 from indexbot.model import (
@@ -298,3 +302,29 @@ def test_threat_empty_diff_pr_no_merge() -> None:
     root = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
     assert diff(_PKG, root, root, (_observation("1.0.0", _DIGEST_A),)) is None
     assert classify_change(root, root) == "refresh"
+
+
+# --- a fork PR cannot claim the operator's brand namespace ------------------
+
+
+def test_threat_fork_pr_cannot_claim_the_reserved_brand_namespace() -> None:
+    """The fork half of `validate.yml`'s ND-4 carve-out gate, proved against
+    the real check rather than the YAML that calls it.
+
+    A fork PR runs `indexbot validate` WITHOUT `--allow-reserved-namespace`
+    (`SAME_REPO_PR` is false for a head repository that is not this one), so
+    every brand-segment claim it makes is rejected — including the two roots
+    this index itself ships, which is exactly the point: the flag, not the
+    namespace, is what distinguishes them. The same-repo path admits them,
+    and the generic control-path segments stay blocked either way.
+    """
+    for package in ("cli", "mirror"):
+        claim = PackageId(namespace="ocx", package=package)
+        with pytest.raises(ValidationError):
+            check_namespace_not_reserved(claim)  # fork PR: flag withheld
+        check_namespace_not_reserved(claim, allow_reserved=True)  # same-repo PR
+
+    # The carve-out is brand-only: `p/` is a control-path segment, and no PR
+    # provenance unlocks it.
+    with pytest.raises(ValidationError):
+        check_namespace_not_reserved(PackageId(namespace="p", package="thing"), allow_reserved=True)

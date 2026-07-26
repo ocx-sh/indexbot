@@ -2,7 +2,7 @@
 
 The retry *loop* — attempt counting, the actual `httpx` call, `time.sleep`,
 deciding when `policy.max_attempts` is exhausted and raising
-`TransientError` — lives in `adapters/ghcr.py` (imperative shell). This
+`TransientError` — lives in `adapters/registry_v2.py` (imperative shell). This
 module only computes *how long* to wait for a given attempt, which is why it
 is trivially 100%-coverable without mocking `random`/`time`.
 """
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class BackoffPolicy:
-    """Tunables for the retry loop in `adapters/ghcr.py`."""
+    """Tunables for the retry loop in `adapters/registry_v2.py`."""
 
     max_attempts: int = 5
     base_delay_seconds: float = 1.0
@@ -25,7 +25,7 @@ def is_retryable_status(status_code: int) -> bool:
     """True for `429` or any `5xx`.
 
     False for everything else, including other `4xx` — `401` gets one
-    token-refresh-and-retry inside `adapters/ghcr.py`, a different mechanism
+    token-refresh-and-retry inside `adapters/registry_v2.py`, a different mechanism
     from backoff, and `404` is a permanent per-request failure never retried
     by this policy.
     """
@@ -44,7 +44,7 @@ def delay_seconds(
     A positive `retry_after` wins outright — the server said exactly how
     long to wait (G-10). Otherwise:
     `min(max_delay_seconds, base_delay_seconds * 2 ** (attempt - 1)) * (0.5 + jitter)`,
-    with `jitter` in `[0, 1)` supplied by the caller (`adapters/ghcr.py`
+    with `jitter` in `[0, 1)` supplied by the caller (`adapters/registry_v2.py`
     passes `random.random()`; tests pass a fixed float), keeping this
     function itself deterministic.
     """

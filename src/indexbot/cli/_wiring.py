@@ -31,9 +31,15 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
-from indexbot.adapters.ghcr import GHCR_HOST, GhcrRegistry
 from indexbot.adapters.github_api import GitHubApi
 from indexbot.adapters.local_files import LocalFiles
+from indexbot.adapters.registry_v2 import (
+    GHCR_HOST,
+    OCX_SH_HOST,
+    OCX_SH_REALM,
+    RegistryV2,
+    RoutedRegistry,
+)
 from indexbot.adapters.system_clock import SystemClock
 from indexbot.cli import (
     announce,
@@ -90,15 +96,35 @@ def _repo_root() -> Path:
     return Path(os.environ.get("GITHUB_WORKSPACE", "."))
 
 
-REGISTRY_ADAPTER_HOSTS: Final[frozenset[str]] = frozenset({GHCR_HOST})
+REGISTRY_ADAPTER_HOSTS: Final[frozenset[str]] = frozenset({GHCR_HOST, OCX_SH_HOST})
 """Every registry host some `RegistryPort` adapter can actually serve.
 
-There is exactly one adapter (`adapters/ghcr.py`) and no dispatch-by-host:
-every `_run_*` below constructs `GhcrRegistry()` unconditionally. This set is
-the honest statement of that limit, and `_registry_hosts` refuses any policy
-that exceeds it. Adding a second adapter means adding its host here *and*
-teaching the `_run_*` functions to pick one — do not extend this set on its
-own, that would re-open exactly the gap the guard exists to close."""
+Exactly the hosts `_registry()` below wires a client for — `_registry_hosts`
+refuses any deployment policy that exceeds this set. Extending it without
+also wiring a client re-opens exactly the gap the guard exists to close
+(roots that validate and then cannot be fetched), so the two are edited
+together and `tests/cli/test_wiring.py` pins them to each other."""
+
+
+def _registry() -> RoutedRegistry:
+    """One `RegistryV2` per servable host, dispatched per call by the
+    `oci://<host>/…` repository URI.
+
+    Per call, not per run: `validate` is handed whatever roots a PR changed
+    and `reconcile` walks every root in the index, so a single run routinely
+    spans both hosts. Both are the same Registry v2 client — `ocx.sh` differs
+    only in where its anonymous pull token comes from.
+    """
+    return RoutedRegistry(
+        {
+            GHCR_HOST: RegistryV2(),
+            OCX_SH_HOST: RegistryV2(
+                base_url=f"https://{OCX_SH_HOST}",
+                host=OCX_SH_HOST,
+                realm=OCX_SH_REALM,
+            ),
+        }
+    )
 
 
 def _registry_hosts(raw: bytes | None) -> frozenset[str]:
@@ -201,7 +227,7 @@ def _run_announce(args: argparse.Namespace) -> ExitCode:
     )
     return announce.run(
         args,
-        registry=GhcrRegistry(),
+        registry=_registry(),
         index_github=index_github,
         fork_github=fork_github,
         files=LocalFiles(root=_repo_root()),
@@ -215,7 +241,7 @@ def _run_reconcile(args: argparse.Namespace) -> ExitCode:
     return reconcile.run(
         args,
         files=files,
-        registry=GhcrRegistry(),
+        registry=_registry(),
         github=_github_api(),
         allowed_hosts=_local_policy_hosts(files),
     )
@@ -224,7 +250,7 @@ def _run_reconcile(args: argparse.Namespace) -> ExitCode:
 def _run_validate(args: argparse.Namespace) -> ExitCode:
     files = LocalFiles(root=_repo_root())
     return validate.run(
-        args, files=files, registry=GhcrRegistry(), allowed_hosts=_local_policy_hosts(files)
+        args, files=files, registry=_registry(), allowed_hosts=_local_policy_hosts(files)
     )
 
 
@@ -236,7 +262,7 @@ def _run_seed_import(args: argparse.Namespace) -> ExitCode:
     files = LocalFiles(root=_repo_root())
     return seed_import.run(
         args,
-        registry=GhcrRegistry(),
+        registry=_registry(),
         files=files,
         clock=SystemClock(),
         allowed_hosts=_local_policy_hosts(files),

@@ -169,3 +169,42 @@ def test_arm_auto_merge_withdrawal_is_fail_closed() -> None:
     # Serialized per PR: an arm job from an older head must never execute
     # after the withdrawal triggered by a newer one.
     assert re.search(r"(?m)^\s+group: arm-auto-merge-", arm)
+
+
+# --- ND-4 reserved-brand carve-out (fork provenance) -----------------------
+
+
+def test_reserved_namespace_flag_is_gated_on_a_same_repo_pull_request() -> None:
+    """`--allow-reserved-namespace` unlocks ND-4's brand segments (`ocx`,
+    `ocx-sh`, `ocx-contrib`, `ocx-rs`), which the operator's own
+    `p/ocx/cli.json` and `p/ocx/mirror.json` roots need. Handing it to every
+    `pull_request` run would let ANY fork PR claim `p/ocx/**` — publishing
+    under the index's own brand — so it is passed only when the PR's head
+    repository IS this repository. Asserted on the raw YAML: the flag must
+    never appear in a `run:` line outside the guarded array, and the guard
+    must be the provenance comparison, not e.g. an author-login test."""
+    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    job = _job_block(text, "schema-validate-pr")
+
+    assert (
+        "SAME_REPO_PR: ${{ github.event.pull_request.head.repo.full_name"
+        " == github.repository }}" in job
+    )
+    assert re.search(r'(?m)^\s+if \[ "\$SAME_REPO_PR" = "true" \]; then$', job)
+    # The flag reaches the CLI only through the array the guard fills.
+    flag_lines = [
+        line
+        for line in job.splitlines()
+        if "--allow-reserved-namespace" in line and not line.lstrip().startswith("#")
+    ]
+    assert flag_lines == ["            reserved+=(--allow-reserved-namespace)"]
+    assert 'indexbot validate "${reserved[@]}" "${files[@]}"' in job
+
+
+def test_reserved_namespace_gate_lives_in_the_zero_secret_job() -> None:
+    """The gate decides how PR-head content is *validated*, so it belongs in
+    the unprivileged `pull_request` job — never in `governance-gate`, whose
+    entire safety argument is that it runs no PR-head-derived logic."""
+    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    assert "--allow-reserved-namespace" not in _job_block(text, "governance-gate")
+    assert "--allow-reserved-namespace" not in _job_block(text, "arm-auto-merge")

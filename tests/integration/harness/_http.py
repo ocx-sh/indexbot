@@ -47,7 +47,7 @@ def write_response(
 ) -> None:
     """Serialize `response` onto `handler`'s socket. `include_body=False` for a
     HEAD request (headers and `Content-Length` still sent, body suppressed —
-    the shape `adapters/ghcr.py::get_desc_tag_digest` reads)."""
+    the shape `adapters/registry_v2.py::get_desc_tag_digest` reads)."""
     handler.send_response(response.status)
     for key, value in response.headers.items():
         handler.send_header(key, value)

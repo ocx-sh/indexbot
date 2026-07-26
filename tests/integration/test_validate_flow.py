@@ -3,7 +3,7 @@ plus the socket-level `FakeGhcrServer` (WP-B4, plan Phase 5).
 
 A tier distinct from `tests/cli/test_validate.py`'s pure-function/fake-double
 unit tests: every flow here drives the REAL adapter stack — real argparse ->
-real `cli/_wiring` -> real `GhcrRegistry` HTTP adapter (anonymous bearer-token
+real `cli/_wiring` -> real `RegistryV2` HTTP adapter (anonymous bearer-token
 dance included) -> real `LocalFiles` — against a canonical tree materialized by
 `build_git_tree` and manifests served over a real socket by `fake_ghcr`.
 
@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from indexbot.adapters.ghcr import GhcrRegistry
+from indexbot.adapters.registry_v2 import RegistryV2
 from indexbot.cli.main import main
 from indexbot.core.validate_entry import parse_package_root, serialize_package_root
 from indexbot.exit_codes import ExitCode
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
     from tests.integration.harness.fake_ghcr import FakeGhcrServer
 
-_WIRING_GHCR = "indexbot.cli._wiring.GhcrRegistry"
+_WIRING_REGISTRY = "indexbot.cli._wiring.RegistryV2"
 _FAKE_PULL_TOKEN = "fake-pull-token"  # noqa: S105
 """The bearer `FakeGhcrServer`'s `/token` endpoint issues — the ONLY credential
 the anonymous registry adapter is ever supposed to carry to a `/v2/*` endpoint."""
@@ -102,8 +102,8 @@ def test_validate_clean_tree_exits_ok_with_no_credential_leak(
     sent_headers: list[dict[str, str]] = []
     with _capturing_client(sent_headers) as client:
         monkeypatch.setattr(
-            _WIRING_GHCR,
-            functools.partial(GhcrRegistry, base_url=fake_ghcr.base_url, client=client),
+            _WIRING_REGISTRY,
+            functools.partial(RegistryV2, base_url=fake_ghcr.base_url, client=client),
         )
         exit_code = main(["validate", CANONICAL_ROOT_PATH])
 
@@ -131,7 +131,9 @@ def test_validate_tampered_cas_object_is_anomaly_without_summary_floor(
 ) -> None:
     _seed_workspace(index_tree, monkeypatch)
     seed_registry(fake_ghcr)
-    monkeypatch.setattr(_WIRING_GHCR, functools.partial(GhcrRegistry, base_url=fake_ghcr.base_url))
+    monkeypatch.setattr(
+        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=fake_ghcr.base_url)
+    )
 
     # Corrupt the committed CAS object's bytes in place (its filename digest is
     # left untouched, so this is a self-consistency violation, not a dangling
@@ -157,7 +159,9 @@ def test_validate_non_canonical_root_bytes_is_validation_failure(
 ) -> None:
     _seed_workspace(index_tree, monkeypatch)
     seed_registry(fake_ghcr)
-    monkeypatch.setattr(_WIRING_GHCR, functools.partial(GhcrRegistry, base_url=fake_ghcr.base_url))
+    monkeypatch.setattr(
+        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=fake_ghcr.base_url)
+    )
 
     # Re-emit the committed root as compact JSON: it still parses to the exact
     # same PackageRoot, but its bytes are not the canonical pretty-printed
@@ -197,7 +201,9 @@ def test_validate_rejects_a_tag_whose_cas_object_is_not_an_image_index(
     """
     _seed_workspace(index_tree, monkeypatch)
     seed_registry(fake_ghcr)
-    monkeypatch.setattr(_WIRING_GHCR, functools.partial(GhcrRegistry, base_url=fake_ghcr.base_url))
+    monkeypatch.setattr(
+        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=fake_ghcr.base_url)
+    )
 
     cas_dir = _cas_object_path(index_tree).parent
     _cas_object_path(index_tree).unlink()

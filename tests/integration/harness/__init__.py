@@ -1,7 +1,7 @@
 """Socket-level test doubles and canonical git-tree builder.
 
 `FakeGhcrServer` / `FakeForgeServer` are stdlib `http.server` fakes that drive
-the REAL `adapters/ghcr.py` / `adapters/github_api.py` over a real socket;
+the REAL `adapters/registry_v2.py` / `adapters/github_api.py` over a real socket;
 `build_git_tree` seeds a canonical `p/` tree (the root byte-exact against the
 real serializer, each CAS object the registry's own image-index bytes).
 `ScriptedResponse` / `json_response` script individual routes.

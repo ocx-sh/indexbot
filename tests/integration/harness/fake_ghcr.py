@@ -1,6 +1,6 @@
 """Socket-level fake `ghcr.io` registry driving the REAL registry adapter.
 
-Serves exactly the HTTP surface `indexbot.adapters.ghcr.GhcrRegistry` calls,
+Serves exactly the HTTP surface `indexbot.adapters.registry_v2.RegistryV2` calls,
 so an integration test exercises that adapter's anonymous bearer-token dance,
 content-digest recomputation, and media-type handling end to end rather than
 re-mocking them:
@@ -188,7 +188,7 @@ class _GhcrHTTPServer(ThreadingHTTPServer):
 
 
 class FakeGhcrServer:
-    """Context-managed fake `ghcr.io`. Point `GhcrRegistry(base_url=...)` at
+    """Context-managed fake `ghcr.io`. Point `RegistryV2(base_url=...)` at
     `base_url` to drive the real adapter against it."""
 
     def __init__(self, host: str = "127.0.0.1") -> None:
