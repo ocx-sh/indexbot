@@ -534,6 +534,10 @@ def _validate_yml() -> str:
     return (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
 
 
+def _governance_yml() -> str:
+    return (_WORKFLOWS_DIR / "governance.yml").read_text(encoding="utf-8")
+
+
 def _job_block(text: str, job: str) -> str:
     """The YAML text of one job under `jobs:` — from its `  <job>:` header
     (exactly two-space indent) to the next two-space job header or EOF. A
@@ -551,14 +555,18 @@ def _job_block(text: str, job: str) -> str:
 def test_g16_privileged_unprivileged_split() -> None:
     """G-16 (BD-5): `validate.yml`'s unprivileged PR-head job checks out the
     PR head and references no secrets; the privileged `governance-gate` job
-    runs under `pull_request_target`, checks out the base ref only (no head
-    checkout), and holds no PAT secret."""
+    runs under `pull_request_target` — in its own workflow file, so neither
+    trigger can emit a skipped check run under the other's context name —
+    checks out the base ref only (no head checkout), and holds no PAT
+    secret."""
     text = _validate_yml()
     unprivileged = _job_block(text, "schema-validate-pr")
-    privileged = _job_block(text, "governance-gate")
+    governance = _governance_yml()
+    privileged = _job_block(governance, "governance-gate")
 
     # Unprivileged job: runs PR-head content, holds no secrets.
-    assert "github.event_name == 'pull_request'" in unprivileged
+    assert re.search(r"(?m)^  pull_request:\s*$", text)
+    assert not re.search(r"(?m)^  pull_request_target:\s*$", text)
     assert "github.event.pull_request.head.sha" in unprivileged
     assert "secrets." not in unprivileged
 
@@ -566,7 +574,8 @@ def test_g16_privileged_unprivileged_split() -> None:
     # absence of any `ref:` key is the real invariant — a checkout with no
     # `ref` defaults to the base branch tip, never PR head (the sole way to
     # check out head is an explicit `ref:` resolving `pull_request.head`).
-    assert "github.event_name == 'pull_request_target'" in privileged
+    assert re.search(r"(?m)^  pull_request_target:\s*$", governance)
+    assert not re.search(r"(?m)^  pull_request:\s*$", governance)
     assert "actions/checkout@" in privileged
     assert not re.search(r"(?m)^\s*ref:\s", privileged)
     assert "secrets." not in privileged
@@ -653,7 +662,7 @@ def _refresh_pr_github(
 
 def _disposition_of(github: FakeGitHub) -> str:
     """The commit-status state `governance_check.run` set — the exact value it
-    also writes to `$GITHUB_OUTPUT` as `disposition`, which `validate.yml`'s
+    also writes to `$GITHUB_OUTPUT` as `disposition`, which `governance.yml`'s
     `gh pr merge --auto --squash` step gates on (`== 'success'`)."""
     assert governance_check.run(argparse.Namespace(pr_number=1), github=github) == ExitCode.OK
     _context, state, _description = github.statuses["head-sha"][0]
@@ -701,7 +710,7 @@ def test_fp5_machine_lane_rejects_out_of_scope_paths(extra_path: str, _github_ou
     refreshes. A PR from a *legitimate owner* (author_id=1 is in the base-ref
     `owners[]`, so G-19 itself passes) whose refresh diff also touches any
     path outside the announce write-set must not reach the machine lane —
-    the disposition stays `pending`, so `validate.yml`'s
+    the disposition stays `pending`, so `governance.yml`'s
     `gh pr merge --auto --squash` step never arms.
 
     Four of these cases have the scope gate as their *only* defense

@@ -179,7 +179,7 @@ def _github_api() -> GitHubApi:
     in the announce path any more (`announce.yml`/its `index-write`
     Environment/`INDEX_WRITE_TOKEN` are all retired — FP-7). The three
     privileged-job workflows that still call this (`reconcile.yml`,
-    `validate.yml`'s `governance-gate` running `classify-pr`/
+    `governance.yml`'s `governance-gate` running `classify-pr`/
     `governance-check`) all expose the ambient, per-run default
     `GITHUB_TOKEN` (`github.token`) to the process under the same
     `$GITHUB_TOKEN` env var name this function reads — labels/status/
@@ -293,7 +293,7 @@ call site, since every port construction already happens inside each
 `_run_*` function above.
 
 `classify-pr`/`governance-check` both reuse `_github_api()` — matching
-`.github/workflows/validate.yml`'s `governance-gate` job, which exposes only
+`.github/workflows/governance.yml`'s `governance-gate` job, which exposes only
 `GITHUB_TOKEN`/`GITHUB_REPOSITORY` (no write-scoped `RegistryPort`/`FilePort`
 credential; neither module needs one, CONTRACTS.md §12).
 """

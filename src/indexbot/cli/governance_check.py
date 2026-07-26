@@ -4,7 +4,7 @@ revamp, owner-confirmed decision set 2026-07-18).
 
 Re-derives the PR's classification via `cli/classify_pr.classify_pull_request`
 rather than reading a label back (no `GitHubPort.get_labels`-shaped method
-exists, and `.github/workflows/validate.yml` invokes this as its own
+exists, and `.github/workflows/governance.yml` invokes this as its own
 process, separate from `indexbot classify-pr` — single-source-of-truth via
 the shared pure function, not a second hand-rolled diff walk).
 
@@ -33,7 +33,7 @@ a hidden HTML marker (`<!-- indexbot:governance -->`) so a later
 rather than reposting on every re-run.
 
 Writes the resulting commit-status state (`"success"` or `"pending"`) to
-`$GITHUB_OUTPUT` as `disposition` — `.github/workflows/validate.yml`'s
+`$GITHUB_OUTPUT` as `disposition` — `.github/workflows/governance.yml`'s
 `governance-gate` job reads this back (`steps.governance_check.outputs.
 disposition`) to decide whether to arm auto-merge, rather than re-reading the
 label `indexbot classify-pr` applied (G-19 requires the *ownership-checked*

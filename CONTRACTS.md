@@ -903,7 +903,7 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   `schema-validate` is also green" cross-job condition remains deferred, per
   the original entry this replaces — unaffected by G-19/G-20.) Writes the
   resulting commit-status state (`"success"`/`"pending"`) to `$GITHUB_OUTPUT`
-  as `disposition` — `.github/workflows/validate.yml`'s `governance-gate` job
+  as `disposition` — `.github/workflows/governance.yml`'s `arm-auto-merge` job
   arms auto-merge strictly on `steps.governance_check.outputs.disposition ==
   'success'`, never on the raw `classify-pr` label (announce-revamp
   Phase 3 — a label-based check cannot see the G-19 ownership result).

@@ -2,11 +2,13 @@
 
 Covers G-14 (`permissions:` default-deny + SHA-pinned `uses:` across every
 workflow), G-16/FP-7 (the privileged `pull_request_target` governance job
-never checks out PR head), and the `contents: write` split that lets
-`validate.yml` arm auto-merge at all: the write token lives in a job that
-checks nothing out, and never in the job that runs `bot/`'s source. The repo
-has no runtime YAML dependency and the credential process must gain none, so
-these tests hand-parse the specific keys (`permissions:`, `uses:`, `ref:`)
+never checks out PR head), the `contents: write` split that lets
+`governance.yml` arm auto-merge at all (the write token lives in a job that
+checks nothing out, and never in the job that runs `bot/`'s source), and the
+trigger split that keeps a `pull_request_target` run from ever emitting a
+check run named after a branch-protection-required context. The repo has no
+runtime YAML dependency and the credential process must gain none, so these
+tests hand-parse the specific keys (`permissions:`, `uses:`, `ref:`, `on:`)
 with the stdlib only — a line scan, never a YAML library import.
 """
 
@@ -17,14 +19,33 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
+_VALIDATE = _WORKFLOWS_DIR / "validate.yml"
+_GOVERNANCE = _WORKFLOWS_DIR / "governance.yml"
 
 _PERMISSIONS_DEFAULT_DENY_RE = re.compile(r"(?m)^permissions:\s*\{\}\s*$")
 _USES_RE = re.compile(r"^\s*(?:-\s+)?uses:\s*(\S+)")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_TRIGGER_RE = re.compile(r"^  ([a-z_]+):")
 
 
 def _workflow_files() -> list[Path]:
     return sorted(_WORKFLOWS_DIR.glob("*.yml"))
+
+
+def _triggers(text: str) -> set[str]:
+    """The event names in a workflow's `on:` block — the two-space mapping
+    keys between `on:` and the next top-level key. Comment lines (the zizmor
+    suppressions live in there) are indented but never match `^  <name>:`
+    because they start with `#`."""
+    lines = text.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.rstrip() == "on:")
+    events: set[str] = set()
+    for line in lines[start + 1 :]:
+        if re.match(r"^\S", line):
+            break
+        if match := _TRIGGER_RE.match(line):
+            events.add(match.group(1))
+    return events
 
 
 def _uses_refs(text: str) -> list[str]:
@@ -88,17 +109,62 @@ def test_every_workflow_uses_is_sha_pinned() -> None:
             assert _SHA_RE.fullmatch(pin), f"{workflow.name}: {ref!r} is not a 40-hex SHA pin"
 
 
+# --- trigger split (skipped-check-run collision) ---------------------------
+
+
+def test_no_workflow_declares_both_pr_triggers() -> None:
+    """`pull_request` and `pull_request_target` both fire on the SAME PR head
+    commit, so a workflow carrying both must discriminate them with a
+    job-level `if: github.event_name == ...` — and a job skipped by such an
+    `if:` STILL emits a check run, conclusion `skipped`, under its own name.
+    GitHub counts a `skipped` conclusion as satisfying a required status check
+    and resolves duplicate-named contexts to the most recent one, so the
+    privileged run publishes a green-equivalent impostor of whatever required
+    context the unprivileged half owns (live-observed on PR #70's head
+    1d7a9b4e: two `schema-validate-pr` check runs, one `skipped`, one
+    `success`). Keep the two triggers in separate files."""
+    for workflow in _workflow_files():
+        events = _triggers(workflow.read_text(encoding="utf-8"))
+        assert not {"pull_request", "pull_request_target"} <= events, (
+            f"{workflow.name}: declares both PR triggers - a trigger-discriminating"
+            " job `if:` emits skipped check runs under the other half's context name"
+        )
+
+
+def test_required_pr_diff_context_lives_in_a_pull_request_only_workflow() -> None:
+    """`schema-validate-pr` is on `main`'s required-context list and is the
+    sole enforcement point for ND-4's reserved-brand gate. It must live in a
+    workflow whose only trigger is `pull_request`, and no other workflow may
+    define a job by that name."""
+    assert _triggers(_VALIDATE.read_text(encoding="utf-8")) == {"pull_request"}
+    others = [w for w in _workflow_files() if w != _VALIDATE]
+    for workflow in others:
+        assert "\n  schema-validate-pr:" not in workflow.read_text(encoding="utf-8")
+
+
+def test_no_job_if_discriminates_on_the_event_name_in_the_pr_workflows() -> None:
+    """The structural half of the fix: with one trigger per file there is
+    nothing for a `github.event_name` guard to decide, and reintroducing one
+    is how the skipped-check-run collision comes back. Matched on `if:` lines
+    only — the file headers narrate the hazard and name the expression."""
+    for workflow in (_VALIDATE, _GOVERNANCE):
+        text = workflow.read_text(encoding="utf-8")
+        assert not re.search(r"(?m)^\s+if:.*github\.event_name", text), (
+            f"{workflow.name}: a job `if:` discriminates on github.event_name"
+        )
+
+
 # --- G-16 / FP-7 -----------------------------------------------------------
 
 
 def test_pull_request_target_governance_job_never_checks_out_pr_head() -> None:
-    """G-16/FP-7: `validate.yml`'s privileged `governance-gate` job runs under
-    `pull_request_target`, checks out the base ref only (no `ref:` key), never
-    resolves `github.event.pull_request.head`, and holds no PAT secret — the
-    untrusted PR-head content never runs in the credentialed job."""
-    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    """G-16/FP-7: `governance.yml`'s privileged `governance-gate` job runs
+    under `pull_request_target`, checks out the base ref only (no `ref:` key),
+    never resolves `github.event.pull_request.head`, and holds no PAT secret —
+    the untrusted PR-head content never runs in the credentialed job."""
+    text = _GOVERNANCE.read_text(encoding="utf-8")
+    assert _triggers(text) == {"pull_request_target"}
     privileged = _job_block(text, "governance-gate")
-    assert "github.event_name == 'pull_request_target'" in privileged
     assert "actions/checkout@" in privileged
     # No `ref:` key — a checkout with no ref defaults to the base branch tip,
     # never PR head (the only way to check out head is an explicit `ref:`
@@ -111,9 +177,9 @@ def test_unprivileged_pr_head_job_holds_no_secrets() -> None:
     """G-16/FP-7 counterpart: `validate.yml`'s `schema-validate-pr` job — the
     one that checks out PR head — runs on the unprivileged `pull_request`
     trigger and references no secrets (GitHub strips them for fork PRs)."""
-    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    text = _VALIDATE.read_text(encoding="utf-8")
+    assert _triggers(text) == {"pull_request"}
     unprivileged = _job_block(text, "schema-validate-pr")
-    assert "github.event_name == 'pull_request'" in unprivileged
     assert "github.event.pull_request.head.sha" in unprivileged
     assert "secrets." not in unprivileged
 
@@ -126,7 +192,7 @@ def test_governance_gate_never_holds_contents_write() -> None:
     `github.token` to a third-party action via `setup-bot`. It therefore
     holds `contents: read` and must never be "simplified" into holding the
     write token that arming auto-merge needs."""
-    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    text = _GOVERNANCE.read_text(encoding="utf-8")
     privileged = _job_block(text, "governance-gate")
     assert _grant(privileged, "contents: read")
     assert not _grant(privileged, "contents: write")
@@ -140,7 +206,7 @@ def test_arm_auto_merge_job_never_checks_out() -> None:
     `governance-gate`'s ownership-checked `disposition`, and the same output
     drives a `--disable-auto` branch, because arming a PR whose head later
     moves outside its author's owned roots must be revocable."""
-    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    text = _GOVERNANCE.read_text(encoding="utf-8")
     arm = _job_block(text, "arm-auto-merge")
     assert _grant(arm, "contents: write")
     assert not _uses_refs(arm)
@@ -160,12 +226,11 @@ def test_arm_auto_merge_withdrawal_is_fail_closed() -> None:
     a notice that asserts the opposite. The job also must not inherit the
     default `success()` of its `needs:`, or a governance-gate that errors
     skips the withdrawal entirely."""
-    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    text = _GOVERNANCE.read_text(encoding="utf-8")
     arm = _job_block(text, "arm-auto-merge")
     assert _runs(arm, r"pr view .*--json autoMergeRequest")
     assert not re.search(r"(?m)^(?!\s*#).*\bgh pr merge[^\n]*--disable-auto[^\n]*\|\|", arm)
     assert re.search(r"(?m)^\s+if:.*!cancelled\(\)", arm)
-    assert re.search(r"(?m)^\s+if:.*github\.event_name == 'pull_request_target'", arm)
     # Serialized per PR: an arm job from an older head must never execute
     # after the withdrawal triggered by a newer one.
     assert re.search(r"(?m)^\s+group: arm-auto-merge-", arm)
@@ -183,7 +248,7 @@ def test_reserved_namespace_flag_is_gated_on_a_same_repo_pull_request() -> None:
     repository IS this repository. Asserted on the raw YAML: the flag must
     never appear in a `run:` line outside the guarded array, and the guard
     must be the provenance comparison, not e.g. an author-login test."""
-    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    text = _VALIDATE.read_text(encoding="utf-8")
     job = _job_block(text, "schema-validate-pr")
 
     assert (
@@ -203,8 +268,9 @@ def test_reserved_namespace_flag_is_gated_on_a_same_repo_pull_request() -> None:
 
 def test_reserved_namespace_gate_lives_in_the_zero_secret_job() -> None:
     """The gate decides how PR-head content is *validated*, so it belongs in
-    the unprivileged `pull_request` job — never in `governance-gate`, whose
-    entire safety argument is that it runs no PR-head-derived logic."""
-    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
-    assert "--allow-reserved-namespace" not in _job_block(text, "governance-gate")
-    assert "--allow-reserved-namespace" not in _job_block(text, "arm-auto-merge")
+    the unprivileged `pull_request` workflow — never in `governance.yml`,
+    whose entire safety argument is that it runs no PR-head-derived logic."""
+    for workflow in _workflow_files():
+        if workflow == _VALIDATE:
+            continue
+        assert "--allow-reserved-namespace" not in workflow.read_text(encoding="utf-8")

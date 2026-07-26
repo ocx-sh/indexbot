@@ -4,12 +4,12 @@
 Reads the PR's changed-file list and diff *via the GitHub API only*
 (`GitHubPort.get_pull_request_info`) — this module never checks out the PR
 head, matching `governance-gate`'s `pull_request_target` trust boundary
-(`.github/workflows/validate.yml`'s own top-of-file commentary; ADR-4 BD-5).
+(`.github/workflows/governance.yml`'s own top-of-file commentary; ADR-4 BD-5).
 
 `classify_pull_request` is exported (not just an internal helper of `run`)
 because `cli/governance_check.py` needs the exact same worst-classification-
 wins aggregate to decide its own commit-status disposition, and
-`validate.yml` invokes `indexbot governance-check` as a *separate* process
+`governance.yml` invokes `indexbot governance-check` as a *separate* process
 from `indexbot classify-pr` (no shared in-memory state, and no
 `GitHubPort.get_labels`-shaped method exists on `ports.GitHubPort` to read
 `classify-pr`'s label back) — re-deriving via the same pure aggregation
@@ -61,7 +61,7 @@ logo desc blobs (`announce._cas_path`/`_logo_extension`; CONTRACTS.md §7
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Populate `parser` with `classify-pr`'s CLI surface — `--pr-number` is
     a trusted GitHub Actions expression value (`github.event.pull_request.number`,
-    `.github/workflows/validate.yml`'s `governance-gate` job), not an
+    `.github/workflows/governance.yml`'s `governance-gate` job), not an
     untrusted `client_payload` field, so no `cli/_common.read_validated_env`
     regex/length-cap discipline applies here (ADR-4 BD-4 scopes that to
     `repository_dispatch` payloads only)."""
@@ -152,7 +152,7 @@ def classify_pull_request(info: PullRequestInfo, github: GitHubPort) -> ChangeCl
     its own — ADR-6 FP-5: machine-lane content consists only of authorized
     package refreshes. Ignoring the rest of the diff instead would let an
     owner of one package attach arbitrary repository content to a
-    refresh-classified PR and ride `validate.yml`'s `gh pr merge --auto`.
+    refresh-classified PR and ride `governance.yml`'s `gh pr merge --auto`.
     """
     root_paths = [path for path in info.changed_paths if _is_package_root_path(path)]
     if not root_paths:

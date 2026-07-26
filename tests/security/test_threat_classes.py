@@ -160,13 +160,13 @@ def _job_block(text: str, job: str) -> str:
 
 
 def test_threat_pr_target_no_head_checkout() -> None:
-    """Static parse of `validate.yml`: the `pull_request_target` governance
+    """Static parse of `governance.yml`: the `pull_request_target` governance
     job's `actions/checkout` carries no `ref:` (base-ref only) — it never
     resolves `github.event.pull_request.head`, so hostile PR-head content
     never runs in the credentialed job (ADR-6 FP-7)."""
-    text = (_WORKFLOWS_DIR / "validate.yml").read_text(encoding="utf-8")
+    text = (_WORKFLOWS_DIR / "governance.yml").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^  pull_request_target:\s*$", text)
     privileged = _job_block(text, "governance-gate")
-    assert "github.event_name == 'pull_request_target'" in privileged
     assert "actions/checkout@" in privileged
     # No `ref:` key at all — a checkout with no ref defaults to the base tip,
     # never PR head (the only way to reach head is an explicit `ref:` at
