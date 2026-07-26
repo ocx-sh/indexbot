@@ -190,7 +190,7 @@ def test_golden_plan_execution_against_real_filesystem(tmp_path: Path) -> None:
     assert result == ExitCode.OK
 
     config = json.loads((tmp_path / "site/.vitepress/dist/config.json").read_text(encoding="utf-8"))
-    assert config == {"format_version": 1}
+    assert config == {"format_version": 1, "name_segments": 2}
 
     root_copy = (tmp_path / "site/.vitepress/dist/p/kitware/cmake.json").read_bytes()
     assert root_copy == serialize_package_root(_root())

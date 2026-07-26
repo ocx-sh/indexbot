@@ -454,7 +454,7 @@ def test_build_render_plan_respects_format_version_param() -> None:
     plan = build_render_plan(_case_no_desc(), format_version=7)
     config = next(fw for fw in plan if fw.path == "config.json")
     assert isinstance(config.content, str)
-    assert json.loads(config.content) == {"format_version": 7}
+    assert json.loads(config.content) == {"format_version": 7, "name_segments": 2}
 
 
 def test_build_render_plan_package_index_digest_matches_root_raw_sha256() -> None:

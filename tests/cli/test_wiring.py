@@ -355,7 +355,7 @@ def test_render_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result == ExitCode.OK
     written = files.read_text("dist/config.json")
     assert written is not None
-    assert json.loads(written) == {"format_version": 1}
+    assert json.loads(written) == {"format_version": 1, "name_segments": 2}
 
 
 def test_seed_import_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:

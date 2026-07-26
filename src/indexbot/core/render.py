@@ -43,6 +43,19 @@ if TYPE_CHECKING:
     from indexbot.model import PackageId, PackageRoot
 
 
+NAME_SEGMENTS = 2
+"""Segment count a package name has under this index, counted on the part
+*after* `ocx.sh/` — published in `config.json` so a client knows the shape of
+name this deployment can hold without having to ask.
+
+It restates `schema/root.schema.json`'s `^ocx\\.sh/<ns>/<pkg>$` pattern; the
+two must move together. A client that reads it resolves a flat name like
+`ocx.sh/go-task` as plain OCI instead of reading the unavoidable 404 as an
+authoritative refusal. Optional on the wire and purely additive — a client
+that predates the field ignores it and behaves exactly as before, which is
+also why it is not a security control."""
+
+
 @dataclass(frozen=True, slots=True)
 class SourcePackage:
     """One package's fully-loaded source-tree state — `cli/render.py`'s input
@@ -276,7 +289,11 @@ def build_render_plan(
     dist_files: list[FileWrite] = [
         FileWrite(
             path="config.json",
-            content=json.dumps({"format_version": format_version}, indent=2) + "\n",
+            content=json.dumps(
+                {"format_version": format_version, "name_segments": NAME_SEGMENTS},
+                indent=2,
+            )
+            + "\n",
         )
     ]
     for source in ordered:
