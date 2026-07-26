@@ -249,8 +249,15 @@ def _run_reconcile(args: argparse.Namespace) -> ExitCode:
 
 def _run_validate(args: argparse.Namespace) -> ExitCode:
     files = LocalFiles(root=_repo_root())
+    # `--base-dir` is optional: absent, `validate` sees no base-ref bytes and
+    # treats every reserved-segment root as a fresh claim (fail-closed).
+    base_dir = cast("str | None", args.base_dir)
     return validate.run(
-        args, files=files, registry=_registry(), allowed_hosts=_local_policy_hosts(files)
+        args,
+        files=files,
+        registry=_registry(),
+        allowed_hosts=_local_policy_hosts(files),
+        base_files=LocalFiles(root=Path(base_dir)) if base_dir else None,
     )
 
 

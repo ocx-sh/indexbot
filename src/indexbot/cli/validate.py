@@ -30,6 +30,7 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+from indexbot.core.diff import classify_change
 from indexbot.core.registry_checks import check_digest_in_scope, check_ownership
 from indexbot.core.validate_entry import (
     check_digest_self_consistent,
@@ -55,7 +56,7 @@ from indexbot.exit_codes import ExitCode
 if TYPE_CHECKING:
     import argparse
 
-    from indexbot.model import PackageId
+    from indexbot.model import PackageId, PackageRoot
     from indexbot.ports import FilePort, RegistryPort
 
 
@@ -93,6 +94,15 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
             "— control-path and generic reserved segments (p, admin, ...) stay blocked"
         ),
     )
+    parser.add_argument(
+        "--base-dir",
+        default=None,
+        help=(
+            "directory holding the base-ref copy of each validated root, so an announce-shaped "
+            "update to a root already committed under a reserved segment is not treated as a "
+            "new claim (ADR-2 ND-4 gates claiming, not updating)"
+        ),
+    )
 
 
 def _package_id_from_root_path(path: str) -> PackageId:
@@ -111,6 +121,44 @@ def _package_id_from_root_path(path: str) -> PackageId:
     namespace, filename = parts[1], parts[2]
     package = filename.removesuffix(".json")
     return parse_package_id(f"{namespace}/{package}")
+
+
+def _is_announce_shaped_update(path: str, root: PackageRoot, base_files: FilePort | None) -> bool:
+    """True iff `path` is ALREADY committed on the base ref and this PR's
+    change to it is announce-shaped.
+
+    ADR-2 ND-4's reserved segments exist so a stranger cannot *claim*
+    `p/ocx/**`. An announce that only moves `tags` (and the bot-derived
+    `desc`/`source` that ride with them) on a root already committed under
+    such a segment is not a claim, and gating it broke the operator's own
+    re-announce lane: `ocx package announce --fork` can only ever open a
+    FORK PR, which is exactly where `--allow-reserved-namespace` is withheld.
+
+    The scope is `core/diff.classify_change`'s own `"refresh"` verdict, not a
+    second hand-rolled field list — the same predicate G-04/G-05 already use
+    to decide the machine lane. That bounds the exemption to precisely the
+    fields an announce touches: `repository`, `owners`, `status`,
+    `deprecated_message`, `created`, `upstream`, `superseded_by`, or a yank
+    marker differing makes this `"human-review-required"`, so a fork PR that
+    repoints a first-party root's `repository` (redirecting every future
+    pull) or writes itself into `owners[]` is still rejected here, by a
+    REQUIRED check — not merely routed to a human lane behind
+    `governance/review-required`, which is not a required check and cannot
+    block a careless merge. `name` needs no clause: `check_name_matches_path`
+    already pins it to the path.
+
+    Fail-closed by construction: no `--base-dir`, or no such root at the base
+    ref, means "new claim", which is what ND-4 is for. This predicate answers
+    "is this an update?" only — the caller still narrows the admitted set to
+    `RESERVED_BRAND_SEGMENTS`, so no base-ref state ever unlocks a
+    control-path or generic segment.
+    """
+    if base_files is None:
+        return False
+    base_raw = base_files.read_bytes(path)
+    if base_raw is None:
+        return False
+    return classify_change(parse_package_root(base_raw), root) == "refresh"
 
 
 def _cas_prefix(namespace: str, package: str) -> str:
@@ -139,6 +187,7 @@ def _validate_one(
     allowed_hosts: frozenset[str],
     offline: bool,
     allow_reserved: bool,
+    base_files: FilePort | None,
 ) -> FileReport:
     """Runs the full structural pipeline for one changed root, catching
     `ValidationError`/`AnomalyError` into a `FileReport` (first failure wins
@@ -175,7 +224,27 @@ def _validate_one(
                 "control-path and generic segments still blocked)",
                 file=sys.stderr,
             )
-        check_namespace_not_reserved(package_id, allow_reserved=allow_reserved)
+        try:
+            check_namespace_not_reserved(package_id, allow_reserved=allow_reserved)
+        except ValidationError:
+            # ND-4 gates CLAIMING a reserved segment, not UPDATING a root
+            # already committed under one. Re-raise unless this is an
+            # announce-shaped update to such a root — see
+            # `_is_announce_shaped_update` for why that scope, and why it is
+            # narrower than "the path exists at the base ref".
+            if not _is_announce_shaped_update(path, root, base_files):
+                raise
+            # Exactly the carve-out `--allow-reserved-namespace` opens, never
+            # wider: brand segments only. Control-path (`p`, `o`) and generic
+            # (`admin`, `root`, ...) segments stay blocked no matter what the
+            # base ref holds — the collision they guard is with the URL layout
+            # itself, not with a brand, so "already committed" is no argument.
+            check_namespace_not_reserved(package_id, allow_reserved=True)
+            print(
+                f"{path}: reserved segment admitted — announce-shaped update to a root "
+                "already committed on the base ref (ADR-2 ND-4 gates claiming, not updating)",
+                file=sys.stderr,
+            )
         # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
         # call reachable below.
         check_repository_allowlisted(root.repository, allowed_hosts)
@@ -293,6 +362,7 @@ def run(
     files: FilePort,
     registry: RegistryPort,
     allowed_hosts: frozenset[str],
+    base_files: FilePort | None = None,
 ) -> ExitCode:
     """`indexbot validate <path> [<path> ...] [--offline] [--allow-reserved-namespace]`
     (CONTRACTS.md §12).
@@ -321,6 +391,7 @@ def run(
             allowed_hosts=allowed_hosts,
             offline=offline,
             allow_reserved=allow_reserved,
+            base_files=base_files,
         )
         for path in paths
     ]

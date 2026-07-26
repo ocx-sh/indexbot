@@ -263,7 +263,22 @@ def test_reserved_namespace_flag_is_gated_on_a_same_repo_pull_request() -> None:
         if "--allow-reserved-namespace" in line and not line.lstrip().startswith("#")
     ]
     assert flag_lines == ["            reserved+=(--allow-reserved-namespace)"]
-    assert 'indexbot validate "${reserved[@]}" "${files[@]}"' in job
+    assert 'indexbot validate --base-dir "$BASE_DIR" "${reserved[@]}" "${files[@]}"' in job
+
+
+def test_base_ref_bytes_are_materialized_outside_the_workspace() -> None:
+    """ND-4 gates CLAIMING, not UPDATING, and `indexbot validate` can only
+    tell those apart from the base-ref bytes of each changed root. They are
+    written under `$RUNNER_TEMP`, never into the checkout: the PR-head tree is
+    what `validate` byte-compares against its own canonical serialization, and
+    a base-ref copy landing inside it would be validated as if it were part of
+    the PR. A root absent at the base ref must be left unwritten, so `validate`
+    sees nothing and falls back to "new claim"."""
+    job = _job_block(_VALIDATE.read_text(encoding="utf-8"), "schema-validate-pr")
+    assert 'base_dir="$RUNNER_TEMP/indexbot-base"' in job
+    assert 'git cat-file -e "$BASE_SHA:$file" 2>/dev/null || continue' in job
+    assert 'git show "$BASE_SHA:$file" > "$base_dir/$file"' in job
+    assert "BASE_DIR: ${{ steps.base.outputs.dir }}" in job
 
 
 def test_reserved_namespace_gate_lives_in_the_zero_secret_job() -> None:

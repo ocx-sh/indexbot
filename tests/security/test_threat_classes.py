@@ -10,6 +10,8 @@ Doubles come from `tests/fakes`; no sockets (B4 owns socket flows).
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -17,6 +19,7 @@ import pytest
 
 from indexbot.adapters.local_files import LocalFiles
 from indexbot.cli import announce, governance_check
+from indexbot.cli import validate as validate_cli
 from indexbot.core.diff import classify_change, diff
 from indexbot.core.observe import Observation
 from indexbot.core.regenerate import regenerate
@@ -37,7 +40,7 @@ from indexbot.model import (
     TagEntry,
     Yank,
 )
-from tests.fakes import FakeGitHub, FixedClock, InMemoryFiles
+from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
@@ -328,3 +331,85 @@ def test_threat_fork_pr_cannot_claim_the_reserved_brand_namespace() -> None:
     # provenance unlocks it.
     with pytest.raises(ValidationError):
         check_namespace_not_reserved(PackageId(namespace="p", package="thing"), allow_reserved=True)
+
+
+# --- a fork PR may REFRESH a reserved root, never re-aim it -----------------
+
+_RESERVED_PATH = "p/ocx/cli.json"
+_RESERVED_REPOSITORY = "oci://ghcr.io/ocx-sh/ocx"
+_RESERVED_INDEX_BYTES = json.dumps(
+    {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{"platform": {"architecture": "amd64", "os": "linux"}, "digest": _DIGEST_A}],
+    }
+).encode("utf-8")
+_RESERVED_DIGEST = "sha256:" + hashlib.sha256(_RESERVED_INDEX_BYTES).hexdigest()
+_RESERVED_CAS_PATH = f"p/ocx/cli/o/sha256/{_RESERVED_DIGEST.removeprefix('sha256:')}.json"
+
+
+def _reserved_root(
+    *,
+    repository: str = _RESERVED_REPOSITORY,
+    owners: tuple[Owner, ...] = (Owner(github="alice", github_id=1),),
+    tags: dict[str, TagEntry] | None = None,
+) -> PackageRoot:
+    return PackageRoot(
+        name="ocx.sh/ocx/cli",
+        repository=repository,
+        owners=owners,
+        status="active",
+        deprecated_message=None,
+        created="2026-07-17",
+        desc=None,
+        upstream=None,
+        tags={} if tags is None else tags,
+    )
+
+
+def _fork_pr_validate(head: PackageRoot, base: PackageRoot | None) -> ExitCode:
+    """`indexbot validate` under fork-PR posture: `--allow-reserved-namespace`
+    withheld (`SAME_REPO_PR` false), `--base-dir` populated with whatever the
+    base ref holds for this path — `None` meaning the path is not on the base
+    ref at all."""
+    return validate_cli.run(
+        argparse.Namespace(paths=[_RESERVED_PATH], offline=True, allow_reserved_namespace=False),
+        files=InMemoryFiles(
+            files={
+                _RESERVED_PATH: serialize_package_root(head),
+                _RESERVED_CAS_PATH: _RESERVED_INDEX_BYTES,
+            }
+        ),
+        registry=FakeRegistry(),
+        allowed_hosts=frozenset({"ghcr.io"}),
+        base_files=InMemoryFiles(
+            files={} if base is None else {_RESERVED_PATH: serialize_package_root(base)}
+        ),
+    )
+
+
+def test_threat_fork_pr_may_refresh_but_never_re_aim_a_reserved_root() -> None:
+    """ADR-2 ND-4 gates CLAIMING a brand segment, not UPDATING a root already
+    committed under one — otherwise the operator's own `ocx package announce
+    --fork` lane can never re-announce `ocx/cli`, since that command can open
+    nothing but fork PRs.
+
+    The exemption is scoped to `core/diff.classify_change`'s `"refresh"`, so
+    the interesting attacks stay closed against a REQUIRED check rather than
+    merely landing in the human lane behind the non-required
+    `governance/review-required` status: repointing `repository` (which
+    redirects every future pull of `ocx.sh/ocx/cli`), writing an attacker into
+    `owners[]`, and claiming the segment outright when no such root exists on
+    the base ref.
+    """
+    base = _reserved_root()
+    refresh = _reserved_root(tags={"1.0.0": TagEntry(content=_RESERVED_DIGEST, observed=_TS)})
+    assert _fork_pr_validate(refresh, base) == ExitCode.OK
+
+    assert _fork_pr_validate(_reserved_root(), None) == ExitCode.VALIDATION_FAILURE
+    repointed = _reserved_root(repository="oci://ghcr.io/mallory/cli")
+    assert _fork_pr_validate(repointed, base) == ExitCode.VALIDATION_FAILURE
+    self_owned = _reserved_root(
+        owners=(Owner(github="alice", github_id=1), Owner(github="mallory", github_id=999))
+    )
+    assert _fork_pr_validate(self_owned, base) == ExitCode.VALIDATION_FAILURE

@@ -844,6 +844,24 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   identical finding taxonomy). `"mismatch"` or any `ValidationError` -> exit
   1. `"unconfirmed"` -> print a WARN to stderr, exit 0 (ADR-4 Risk 2,
   unchanged).
+  Also takes `--base-dir DIR` (optional): the directory the PR gate
+  materializes each changed root's BASE-ref bytes into. ADR-2 ND-4 gates
+  *claiming* a reserved segment, not *updating* a root already committed
+  under one — so when `check_namespace_not_reserved` rejects a segment, the
+  rejection is retracted iff (a) the same path exists at the base ref and
+  (b) `core/diff.classify_change(base, head) == "refresh"`, and even then
+  only for `RESERVED_BRAND_SEGMENTS` (the exact set
+  `--allow-reserved-namespace` opens; control-path and generic segments are
+  never admitted by any amount of base-ref state). Without `--base-dir`,
+  or with no such root at the base ref, every reserved segment is a fresh
+  claim — fail-closed. This is what makes `ocx package announce --fork`
+  usable for the operator's own first-party roots: that command can open
+  nothing but FORK PRs, and a fork PR never receives
+  `--allow-reserved-namespace`. Repointing `repository`, editing `owners[]`,
+  flipping `status`/`deprecated_message`, or moving a yank marker are all
+  outside `"refresh"`, so they stay rejected by this REQUIRED check rather
+  than merely routed to the human lane behind the non-required
+  `governance/review-required` status.
 - **`cli/render.py`** (reshaped by `plan_site_redesign` WP-bot): `FilePort.list_files("p/")`
   under `--index-dir` -> parse every root + every CAS object into
   `SourcePackage` -> `render.build_render_plan` -> write the returned file

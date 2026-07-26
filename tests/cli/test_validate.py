@@ -633,3 +633,139 @@ def test_run_allow_reserved_namespace_does_not_admit_control_path_segment() -> N
         _args([path], allow_reserved_namespace=True), files=files, registry=FakeRegistry()
     )
     assert result == ExitCode.VALIDATION_FAILURE
+
+
+# --- ND-4 gates CLAIMING, not UPDATING (the fork re-announce lane) ---------
+
+_RESERVED_PATH = "p/ocx/cli.json"
+_RESERVED_NAME = "ocx.sh/ocx/cli"
+_RESERVED_INDEX_BYTES = json.dumps(_index()).encode("utf-8")
+_RESERVED_DIGEST = _content_digest(_RESERVED_INDEX_BYTES)
+_RESERVED_CAS = {
+    f"p/ocx/cli/o/sha256/{_RESERVED_DIGEST.removeprefix('sha256:')}.json": _RESERVED_INDEX_BYTES
+}
+
+
+def _reserved_root(
+    *,
+    repository: str = _REPOSITORY,
+    owners: tuple[Owner, ...] = (Owner(github="alice", github_id=1),),
+    status: str = "active",
+    tags: dict[str, TagEntry] | None = None,
+) -> PackageRoot:
+    """A first-party root under the reserved `ocx` brand segment — the shape
+    `p/ocx/cli.json` actually has on `main`."""
+    return PackageRoot(
+        name=_RESERVED_NAME,
+        repository=repository,
+        owners=owners,
+        status=status,  # type: ignore[arg-type]
+        deprecated_message=None,
+        created="2026-07-17",
+        desc=None,
+        upstream=None,
+        tags={} if tags is None else tags,
+    )
+
+
+def _fork_validate(head: PackageRoot, base: PackageRoot | None) -> ExitCode:
+    """`indexbot validate` exactly as the FORK half of the PR gate invokes it:
+    no `--allow-reserved-namespace` (withheld for a head repo that is not this
+    repo), plus the base-ref bytes the workflow materializes into
+    `--base-dir`. `base=None` models a path that does not exist at the base
+    ref at all — a new claim."""
+    return validate.run(
+        _args([_RESERVED_PATH], offline=True),
+        files=InMemoryFiles(files={_RESERVED_PATH: serialize_package_root(head), **_RESERVED_CAS}),
+        registry=_PoisonRegistry(),
+        allowed_hosts=_ALLOWED_HOSTS,
+        base_files=InMemoryFiles(
+            files={} if base is None else {_RESERVED_PATH: serialize_package_root(base)}
+        ),
+    )
+
+
+def test_add_arguments_base_dir_defaults_to_none() -> None:
+    parser = argparse.ArgumentParser()
+    validate.add_arguments(parser)
+    assert parser.parse_args(["p/kitware/cmake.json"]).base_dir is None
+
+
+def test_add_arguments_registers_base_dir() -> None:
+    parser = argparse.ArgumentParser()
+    validate.add_arguments(parser)
+    parsed = parser.parse_args(["p/kitware/cmake.json", "--base-dir", "base-ref"])
+    assert parsed.base_dir == "base-ref"
+
+
+def test_fork_pr_may_refresh_a_reserved_root_already_on_the_base_ref(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The lane this exemption exists for: `ocx package announce --fork` can
+    open nothing but fork PRs, and a fork PR never gets
+    `--allow-reserved-namespace`. Moving `tags` on `p/ocx/cli.json`, which is
+    already committed, is not a claim."""
+    base = _reserved_root()
+    head = _reserved_root(
+        tags={"1.0.0": TagEntry(content=_RESERVED_DIGEST, observed="2026-07-17T00:00:00Z")}
+    )
+    assert _fork_validate(head, base) == ExitCode.OK
+    assert "reserved segment admitted" in capsys.readouterr().err
+
+
+def test_fork_pr_still_cannot_claim_a_new_reserved_root() -> None:
+    """The control ND-4 actually exists for: no such root at the base ref
+    means this PR is claiming the brand segment, not updating it."""
+    assert _fork_validate(_reserved_root(), None) == ExitCode.VALIDATION_FAILURE
+
+
+def test_fork_pr_cannot_repoint_an_existing_reserved_root() -> None:
+    """The sharpest scoping case: `repository` redirects every future pull,
+    so repointing it is not announce-shaped and stays rejected by this
+    REQUIRED check — never merely routed to the human lane behind
+    `governance/review-required`, which is not required and cannot block a
+    careless merge."""
+    base = _reserved_root()
+    head = _reserved_root(repository="oci://ghcr.io/attacker/cli")
+    assert _fork_validate(head, base) == ExitCode.VALIDATION_FAILURE
+
+
+def test_fork_pr_cannot_write_itself_into_an_existing_reserved_roots_owners() -> None:
+    base = _reserved_root()
+    head = _reserved_root(
+        owners=(Owner(github="alice", github_id=1), Owner(github="mallory", github_id=999))
+    )
+    assert _fork_validate(head, base) == ExitCode.VALIDATION_FAILURE
+
+
+def test_fork_pr_cannot_change_an_existing_reserved_roots_status() -> None:
+    base = _reserved_root()
+    head = _reserved_root(status="deprecated")
+    assert _fork_validate(head, base) == ExitCode.VALIDATION_FAILURE
+
+
+def test_the_exemption_never_widens_a_control_path_segment() -> None:
+    """`p`/`admin`-class segments are not brand segments: no PR provenance and
+    no base-ref presence admits them, because the collision they guard is with
+    the URL layout itself."""
+    path = "p/admin/cmake.json"
+    root = PackageRoot(
+        name="ocx.sh/admin/cmake",
+        repository=_REPOSITORY,
+        owners=(Owner(github="alice", github_id=1),),
+        status="active",
+        deprecated_message=None,
+        created="2026-07-17",
+        desc=None,
+        upstream=None,
+        tags={},
+    )
+    serialized = serialize_package_root(root)
+    result = validate.run(
+        _args([path], offline=True),
+        files=InMemoryFiles(files={path: serialized}),
+        registry=_PoisonRegistry(),
+        allowed_hosts=_ALLOWED_HOSTS,
+        base_files=InMemoryFiles(files={path: serialized}),
+    )
+    assert result == ExitCode.VALIDATION_FAILURE

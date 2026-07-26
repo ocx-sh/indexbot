@@ -346,6 +346,34 @@ def test_validate_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert main_module.main(["validate", _ROOT_PATH, "--offline"]) == ExitCode.OK
 
 
+def test_validate_base_dir_wires_a_second_file_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--base-dir` gives `validate` the base-ref bytes it needs to tell an
+    update to a reserved root from a fresh claim (ADR-2 ND-4). Without the
+    wiring, `p/ocx/cli.json` is rejected here even though the identical root
+    is on the base ref — the fork re-announce lane's whole failure mode."""
+    reserved_path = "p/ocx/cli.json"
+    root = PackageRoot(
+        name="ocx.sh/ocx/cli",
+        repository=_REPO,
+        owners=(_OWNER,),
+        status="active",
+        deprecated_message=None,
+        created="2026-07-17",
+        desc=None,
+        tags={},
+    )
+    files = InMemoryFiles(files={reserved_path: serialize_package_root(root)})
+    _patch_adapters(monkeypatch, files=files)
+
+    # `_patch_adapters` hands every `LocalFiles(...)` the same double, so the
+    # base-dir port sees the same committed root — an announce-shaped no-op.
+    assert (
+        main_module.main(["validate", reserved_path, "--offline", "--base-dir", "base"])
+        == ExitCode.OK
+    )
+    assert main_module.main(["validate", reserved_path, "--offline"]) == ExitCode.VALIDATION_FAILURE
+
+
 def test_render_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     files = InMemoryFiles()
     _patch_adapters(monkeypatch, files=files)
