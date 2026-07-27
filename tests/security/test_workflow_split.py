@@ -236,6 +236,43 @@ def test_arm_auto_merge_withdrawal_is_fail_closed() -> None:
     assert re.search(r"(?m)^\s+group: arm-auto-merge-", arm)
 
 
+# --- #67: the machine lane's deploy trigger --------------------------------
+
+
+def test_deploy_on_merge_dispatches_render_deploy_without_any_write_token() -> None:
+    """#67: an armed merge is performed with GITHUB_TOKEN, whose push starts
+    no workflow run, so `render-deploy`'s `push` trigger never fires for the
+    machine lane. `deploy-on-merge` outlives the merge and fires
+    `workflow_dispatch` — a documented exception to that recursion guard —
+    instead. It must stay the weakest job in the file: `actions: write` to
+    press the button and `pull-requests: read` to see the merge, never
+    `contents: write` (it must not be able to merge anything itself), and no
+    `uses:`/secret at all, same posture as `arm-auto-merge`."""
+    text = _GOVERNANCE.read_text(encoding="utf-8")
+    job = _job_block(text, "deploy-on-merge")
+    assert _grant(job, "actions: write")
+    assert not _grant(job, "contents: write")
+    assert not _uses_refs(job)
+    assert "secrets." not in job
+    assert _runs(job, r"workflow run render-deploy\.yml .*--ref main")
+    # Only ever for a PR the ownership-checked gate cleared for the machine
+    # lane — a human-lane PR merges under a human identity, which fires
+    # `push` on its own.
+    assert re.search(r"(?m)^\s+if:.*disposition == 'success'", job)
+
+
+def test_deploy_on_merge_never_shares_arm_auto_merges_concurrency_group() -> None:
+    """This job waits minutes; `arm-auto-merge` must not queue behind it. A
+    shared group would park a withdrawal for a newly non-machine-lane head
+    behind a poll for the previous one — the exact stale-arm window
+    `arm-auto-merge`'s own serialization exists to close. Its own group, and
+    `cancel-in-progress` so a `synchronize` supersedes the poll rather than
+    stacking a second one."""
+    job = _job_block(_GOVERNANCE.read_text(encoding="utf-8"), "deploy-on-merge")
+    assert re.search(r"(?m)^\s+group: deploy-on-merge-", job)
+    assert re.search(r"(?m)^\s+cancel-in-progress: true", job)
+
+
 # --- ND-4 reserved-brand carve-out (fork provenance) -----------------------
 
 
