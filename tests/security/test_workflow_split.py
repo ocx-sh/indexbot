@@ -273,6 +273,52 @@ def test_deploy_on_merge_never_shares_arm_auto_merges_concurrency_group() -> Non
     assert re.search(r"(?m)^\s+cancel-in-progress: true", job)
 
 
+def test_deploy_poll_survives_a_transient_api_failure() -> None:
+    """Fail-OPEN, the deliberate opposite of `arm-auto-merge`'s unguarded
+    reads. `arm-auto-merge` runs BEFORE the merge and must go red rather than
+    leave a stale arm standing; `deploy-on-merge` runs after, so an unguarded
+    `gh` call under `set -e` turns a single 502 or secondary rate-limit — in
+    up to 100 polls plus a dispatch — into a red X on an already-merged PR,
+    the one outcome this file's own comments say must never happen (and far
+    likelier than the timeout that path already softened to a warning). A
+    failed poll read must leave the loop running, the dispatch must not abort
+    the step, and no path in it may exit non-zero."""
+    job = _job_block(_GOVERNANCE.read_text(encoding="utf-8"), "deploy-on-merge")
+    assert re.search(r"(?m)^(?!\s*#).*\bgh pr view[^\n]*--json state[^\n]*\|\|", job), (
+        "deploy-on-merge's poll read is unguarded - one transient API error aborts it under set -e"
+    )
+    assert re.search(r"(?m)^(?!\s*#).*\bif gh workflow run render-deploy\.yml", job), (
+        "the dispatch is unguarded - a rejected workflow_dispatch reddens an already-merged PR"
+    )
+    # `exit 0` is the loop's own success path; anything non-zero is a red X on
+    # a PR that has already landed.
+    assert not re.search(r"(?m)^(?!\s*#).*\bexit [1-9]", job), (
+        "deploy-on-merge must never exit non-zero - the merge has already happened"
+    )
+
+
+def test_run_level_conclusion_flip_is_documented_in_the_header() -> None:
+    """A cancelled JOB sets the whole RUN's conclusion, so a superseded
+    `deploy-on-merge` poll makes an otherwise clean governance run conclude
+    `cancelled` (live: run 30246486520 — gate success, arm success, poll
+    cancelled). Nothing requires that conclusion today, but an undocumented
+    flip is indistinguishable from a governance run that never withdrew a
+    stale arm. Either the cancellation goes away or the header says the
+    run-level conclusion is not an audit signal and names what to read
+    instead."""
+    text = _GOVERNANCE.read_text(encoding="utf-8")
+    if not re.search(r"(?m)^\s+cancel-in-progress: true", text):
+        return  # nothing cancels any more; the paragraph may retire with it
+    header = text.split("\non:", 1)[0]
+    assert re.search(r"(?im)^#.*\bRUN-level conclusion\b", header), (
+        "governance.yml's header does not document the run-conclusion flip"
+    )
+    assert "30246486520" in header, "the flip is documented without its live evidence"
+    assert "gh run view" in header, (
+        "the header must name the per-job conclusions as the signal to read instead"
+    )
+
+
 # --- ND-4 reserved-brand carve-out (fork provenance) -----------------------
 
 
