@@ -646,15 +646,24 @@ still shares the digest (emergent aliasing, ADR-1 D3, applies to
 reachability too).
 
 Returned file list:
-- `config.json`: `{"format_version": format_version}`, exactly (D7 —
-  nothing else, ever).
+- `config.json`: `{"format_version": format_version, "name_segments":
+  NAME_SEGMENTS}`. D7's "nothing else, ever" governs what a *client must be
+  able to act on* — the version pin is the only gate — not the literal key
+  count; `name_segments` publishes the name shape this deployment can hold so
+  a client need not probe for it. Both keys are emitted unconditionally.
 - One `p/<namespace>/<package>.json` per package: `content = source.root_raw`
   verbatim (never re-serialize through the dataclass — see §5's rationale).
 - Every reachable `p/<namespace>/<package>/o/sha256/<hex>.<ext>` — copied
   verbatim from `content_by_digest`.
 - `c/index.json`: `{"format_version": format_version, "packages": {"<ns>/<pkg>": "sha256:<hex>", ...}}`
-  — one entry per package in `ordered`, keyed on the bare `<namespace>/<package>`
-  id (not the `ocx.sh/`-prefixed `name`). The digest is `sha256` of
+  — the versioned **envelope**, never a bare `{"<ns>/<pkg>": ...}` map at the
+  document root. The listing lives under `packages`; `format_version` is the
+  same pin `config.json` carries, so a catalog names its own grammar. (A
+  client that read the root object as the listing itself is reading a shape
+  this bot has never emitted — `ocx-sh/ocx` did exactly that until 2026-07-27,
+  which is why this sentence exists.) One entry per package in `ordered`,
+  keyed on the bare `<namespace>/<package>` id (not the `ocx.sh/`-prefixed
+  `name`). The digest is `sha256` of
   `source.root_raw`'s **exact committed bytes** — explicitly **not** a
   re-serialization through `serialize_package_root` (which would be
   byte-identical today and is still the wrong input: what this digest

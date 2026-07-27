@@ -253,9 +253,13 @@ def _generated_timestamp(ordered: Sequence[SourcePackage]) -> str | None:
 
 
 def _package_index(ordered: Sequence[SourcePackage], *, format_version: int) -> str:
-    """`c/index.json` — a bare package listing: every package id in
-    `ordered` mapped to its root's content digest (CONTRACTS.md §8). The
-    digest sources from `source.root_raw`'s exact committed bytes, never a
+    """`c/index.json` — a versioned package listing: `format_version` beside a
+    `packages` map of every package id in `ordered` to its root's content
+    digest (CONTRACTS.md §8). The envelope, not a bare map: the version pin
+    travels with the listing exactly as it does in `config.json`, so a client
+    reading a catalog knows which grammar produced it without a second fetch.
+
+    The digest sources from `source.root_raw`'s exact committed bytes, never a
     re-serialization through the dataclass — the same "root bytes are never
     digested for wire-contract purposes, only referenced" rationale as
     `validate_entry.serialize_package_root`; here it's simply hashed for a
