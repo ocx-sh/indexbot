@@ -209,7 +209,7 @@ def run(
             )
         observations.append(observation)
 
-    desc_update = check_desc_change(current.repository, current.desc, registry)
+    desc_update = check_desc_change(current.repository, current.desc, registry, name=current.name)
     new_desc = current.desc if desc_update is None else desc_update.desc
 
     target = regenerate(current, tuple(observations), new_desc, clock)

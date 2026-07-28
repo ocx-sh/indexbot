@@ -456,7 +456,7 @@ class DescUpdate:
     logo_bytes: bytes | None
 
 def check_desc_change(
-    repository: str, current: Desc | None, registry: RegistryPort
+    repository: str, current: Desc | None, registry: RegistryPort, *, name: str
 ) -> DescUpdate | None:
     """Compares `registry.get_desc_tag_digest(repository)` against
     `current.digest` (or `None` if `current is None`). Returns `None`
@@ -473,8 +473,22 @@ def check_desc_change(
     `sha256:<hex>` digest strings. A missing logo layer -> `logo_bytes = None`,
     `desc.logo = None`. A missing `sh.ocx.keywords` annotation ->
     `desc.keywords = ()`.
+
+    `name` is the entry's logical name, used only for the title fallback.
     """
 ```
+
+- **`desc.title` is never the empty string.** The
+  `org.opencontainers.image.title` annotation is optional on the publisher's
+  side, but `schema/root.schema.json` gives `desc.title` `minLength: 1`, and
+  nothing validates a real `p/**` root against that schema until
+  `schema:validate:rendered` runs *after* merge — where a violation blocks the
+  site deploy for every package. The fallback chain is annotation, then the
+  last `/`-segment of `name`, then of `repository`. It is the same chain
+  `ocx`'s `announce::pipeline::title` applies, and the parity is load-bearing:
+  two tools that disagree on a title write different roots for identical
+  registry state, so each would see the other's root as changed and the C6
+  unchanged-is-a-no-op short-circuit would never settle.
 
 ### `core/regenerate.py`
 

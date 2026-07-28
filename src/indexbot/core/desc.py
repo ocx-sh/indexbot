@@ -48,6 +48,39 @@ class DescUpdate:
     logo_bytes: bytes | None
 
 
+def _last_segment(path: str) -> str:
+    """The part after the last `/`, or the whole string when it holds none.
+    A trailing slash yields the empty string, which the caller's chain skips."""
+    return path.rsplit("/", 1)[-1]
+
+
+def _title(annotations: _Manifest, name: str, repository: str) -> str:
+    """The catalog title, never empty.
+
+    `org.opencontainers.image.title` is optional on the publisher's side, but
+    `schema/root.schema.json` gives `desc.title` `minLength: 1`. Defaulting an
+    absent annotation to `""` therefore produces a root that passes every
+    PR-time check and then fails `schema:validate:rendered` after merge —
+    blocking the site deploy for *every* package, not just this one.
+
+    The fallback chain matches `ocx`'s `announce::pipeline::title` exactly
+    (annotation, then the last segment of the logical name, then of the
+    physical repository). Byte-parity matters beyond tidiness: the two tools
+    write the same root for the same registry state, and a title they disagree
+    on would make each see the other's root as changed, so the C6
+    unchanged-is-a-no-op short-circuit would flip-flop between them forever.
+    """
+    annotated = cast(str, annotations.get(_TITLE_ANNOTATION, ""))
+    for candidate in (annotated, _last_segment(name)):
+        if candidate:
+            return candidate
+    # Terminal, and always non-empty: `root.schema.json`'s `repository` pattern
+    # ends in an alphanumeric path segment, so no trailing-slash input reaches
+    # here. `ocx` carries a fourth rung (its `Physical::display`) that has no
+    # counterpart on this side.
+    return _last_segment(repository)
+
+
 def _parse_keywords(raw: object) -> tuple[str, ...]:
     """Comma-separated `sh.ocx.keywords` -> stripped, empty-dropped tuple —
     matches `ocx/scripts/catalog-generate.py`'s `parse_keywords` exactly."""
@@ -66,7 +99,7 @@ def _cas_digest(content: bytes) -> str:
 
 
 def check_desc_change(
-    repository: str, current: Desc | None, registry: RegistryPort
+    repository: str, current: Desc | None, registry: RegistryPort, *, name: str
 ) -> DescUpdate | None:
     """Compares `registry.get_desc_tag_digest(repository)` against
     `current.digest` (or `None` if `current is None`). Returns `None` (no
@@ -85,6 +118,9 @@ def check_desc_change(
     `sha256:<hex>` digest strings. A missing logo layer -> `logo_bytes =
     None`, `desc.logo = None`. A missing `sh.ocx.keywords` annotation ->
     `desc.keywords = ()`.
+
+    `name` is the entry's logical name; it feeds `_title`'s fallback chain
+    so an absent title annotation never yields the schema-illegal `""`.
     """
     observed_digest = registry.get_desc_tag_digest(repository)
     current_digest = current.digest if current is not None else None
@@ -99,7 +135,7 @@ def check_desc_change(
 
     manifest = registry.get_manifest(repository, _DESC_TAG).parsed
     annotations = cast(_Manifest, manifest.get("annotations") or {})
-    title = cast(str, annotations.get(_TITLE_ANNOTATION, ""))
+    title = _title(annotations, name, repository)
     description = cast(str, annotations.get(_DESCRIPTION_ANNOTATION, ""))
     keywords = _parse_keywords(annotations.get(_KEYWORDS_ANNOTATION))
 
