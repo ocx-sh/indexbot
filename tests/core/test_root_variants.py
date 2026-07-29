@@ -1,8 +1,11 @@
 """`root.variants` end to end: derived by `core/regenerate.py`, spelled by
 `core/validate_entry.py`'s codec, and never a second source of truth.
 
-The projection test (`..._matches_the_derivation`) is the load-bearing one:
-it is what makes the recorded field safe to read instead of re-deriving.
+The stored field is vestigial — `core/render.py` derives the catalog's
+`variants` from `tags` instead of reading it. It stays parsed and byte-
+preserved on rewrite until ocx stops writing it and the keys are swept; the
+round-trip tests below are the guard on that, since a root whose bytes
+changed would open a pull request per package on its next announce.
 """
 
 from __future__ import annotations
@@ -234,7 +237,7 @@ def _catalog_row(root: PackageRoot) -> dict[str, object]:
     return packages[0]
 
 
-def test_the_catalog_grid_row_carries_the_recorded_variants() -> None:
+def test_the_catalog_grid_row_carries_the_variants_the_tags_imply() -> None:
     # The grid's `latestVersion` deliberately skips variant-prefixed tags, so
     # without this key a browsing user cannot tell a package that ships
     # variants from one that does not.
@@ -247,10 +250,17 @@ def test_the_catalog_grid_row_omits_variants_when_there_are_none() -> None:
     assert "variants" not in row
 
 
-def test_the_catalog_row_reads_the_root_rather_than_re_deriving() -> None:
-    # A root whose recorded field disagrees with its own tags is not a state
-    # the bot can produce (`regenerate` re-derives), but it is the only way to
-    # tell "read the field" from "parse the tags again" — and reading the
-    # field is the entire reason the root records it.
+def test_the_catalog_row_derives_variants_rather_than_reading_the_root() -> None:
+    # The discriminating test. A root whose recorded field disagrees with its
+    # own tags is not a state the bot can produce (`regenerate` re-derives and
+    # `check_variants_match_tags` rejects it), but it is the only way to tell
+    # "parse the tags" from "read the field" — and the field is vestigial.
     row = _catalog_row(_root({"slim-3.13.1": _entry(_DIGEST_B)}, variants=("musl",)))
-    assert row["variants"] == ["musl"]
+    assert row["variants"] == ["slim"]
+
+
+def test_the_catalog_row_derives_variants_for_a_root_that_stores_none() -> None:
+    # Once ocx stops writing the field (stage 2) every announced root looks
+    # like this. Before the derivation it rendered no `variants` key at all.
+    row = _catalog_row(_root({"3.13.1": _entry(_DIGEST_A), "slim-3.13.1": _entry(_DIGEST_B)}))
+    assert row["variants"] == ["slim"]

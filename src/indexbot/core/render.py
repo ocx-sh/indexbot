@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from indexbot.core.validate_entry import cas_relpath
-from indexbot.core.version_order import find_latest_version
+from indexbot.core.version_order import find_latest_version, variant_names
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -199,8 +199,19 @@ def _catalog_entry(source: SourcePackage) -> dict[str, object]:
     explicit divergence from `ocx-sh/ocx`'s website). Yanked tags are
     excluded from `tagCount`/`platforms` (plan Phase 2 WP-list).
 
-    `variants` is **read off the root**, never re-derived here — the whole
-    reason the root records it. Note `latestVersion` deliberately skips
+    `variants` is **derived here** from `root.tags` via the one implementation
+    of the rule (`core/version_order.py`'s `variant_names`) — the same call
+    `core/validate_entry.py`'s `check_variants_match_tags` makes. The root's
+    stored `variants` field is a projection of the same `tags` this row
+    already holds, so reading it would only add a second source of truth; it
+    is vestigial and scheduled for removal (ocx stops writing it, then the
+    stored keys are swept). Until then it is still parsed and still preserved
+    verbatim on rewrite — that byte preservation is what keeps an announce
+    from rewriting every root that carries it.
+
+    Derived over **all** tags, yanked included, matching `variant_names(root.
+    tags)` upstream: a yank-filtered set here would be a different value from
+    the one the PR gate enforces. Note `latestVersion` deliberately skips
     variant-prefixed tags (`find_latest_version`), so without this key the
     grid could not tell a package that ships variants from one that does not.
     Omitted when empty, matching the wire spelling, so every catalog row for
@@ -213,7 +224,8 @@ def _catalog_entry(source: SourcePackage) -> dict[str, object]:
     ext_lookup = _cas_ext_lookup(source.content_by_digest)
     logo_digest = desc.logo if desc is not None else None
     readme_digest = desc.readme if desc is not None else None
-    variants = {"variants": list(root.variants)} if root.variants else {}
+    derived_variants = variant_names(root.tags)
+    variants = {"variants": list(derived_variants)} if derived_variants else {}
 
     return {
         "namespace": namespace,
