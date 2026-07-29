@@ -197,6 +197,22 @@ def test_a_variant_the_tags_do_not_support_is_rejected() -> None:
     assert "slim" in str(excinfo.value)
 
 
+def test_a_present_field_that_omits_a_variant_its_tags_imply_is_rejected() -> None:
+    # The under-claiming direction. Every other rejection test here is a root
+    # claiming MORE than its tags support, so relaxing the check to
+    # `set(root.variants) <= set(derived)` — accept any subset — passes the
+    # whole module. Absence asserts nothing and is legal; a *present* field is
+    # a claim about the whole set and is held to it in both directions.
+    with pytest.raises(ValidationError) as excinfo:
+        check_variants_match_tags(
+            _root(
+                {"slim-3.13.1": _entry(_DIGEST_B), "musl-3.13.1": _entry(_DIGEST_A)},
+                variants=("slim",),
+            )
+        )
+    assert "musl" in str(excinfo.value)
+
+
 def test_a_root_storing_no_variants_is_accepted_even_when_its_tags_imply_some() -> None:
     # The stage-2 shape: once ocx stops writing the field, this is what every
     # announce from a variant-shipping package looks like. Demanding presence
