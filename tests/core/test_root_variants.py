@@ -197,10 +197,12 @@ def test_a_variant_the_tags_do_not_support_is_rejected() -> None:
     assert "slim" in str(excinfo.value)
 
 
-def test_a_variant_the_tags_imply_but_the_field_omits_is_rejected() -> None:
-    with pytest.raises(ValidationError) as excinfo:
-        check_variants_match_tags(_root({"slim-3.13.1": _entry(_DIGEST_B)}))
-    assert "slim" in str(excinfo.value)
+def test_a_root_storing_no_variants_is_accepted_even_when_its_tags_imply_some() -> None:
+    # The stage-2 shape: once ocx stops writing the field, this is what every
+    # announce from a variant-shipping package looks like. Demanding presence
+    # would red all of them. An absent field asserts nothing, so there is
+    # nothing to tamper with, and the catalog derives the truth anyway.
+    check_variants_match_tags(_root({"slim-3.13.1": _entry(_DIGEST_B)}))
 
 
 def test_the_check_is_the_gate_a_hand_authored_root_cannot_pass() -> None:

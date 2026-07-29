@@ -233,23 +233,29 @@ def check_upstream_repository_url_scheme(root: PackageRoot) -> None:
 
 
 def check_variants_match_tags(root: PackageRoot) -> None:
-    """`variants` must equal the derivation over this root's own `tags`.
+    """A *present* `variants` must equal the derivation over this root's own
+    `tags`. An absent or empty one is always accepted.
 
-    The field is a projection, and this is what makes that a *guarantee*
-    rather than a description. Neither existing gate can express it: the
-    schema can constrain the shape but not the relationship, and the byte
-    gate is a parse -> serialize round-trip, so it accepts any well-formed
-    value a human typed. Without this check, a hand-authored root could claim
-    a variant set no derivation could produce and survive until the next
-    announce silently overwrote it.
+    What this guarantees: no root asserts a variant set its own tags cannot
+    produce. Neither existing gate can express that — the schema constrains
+    the shape but not the relationship, and the byte gate is a parse ->
+    serialize round-trip, so it accepts any well-formed value a human typed.
+    Without this check a hand-authored root could claim a variant set no
+    derivation could produce and survive until the next announce silently
+    overwrote it. That is the anti-tamper property, and it is untouched.
+
+    Why absence is safe: an absent field asserts nothing, so there is nothing
+    to tamper with, and `core/render.py` derives the catalog's `variants`
+    from `tags` regardless of what the root stores. Requiring presence would
+    instead red every announce from a variant-shipping package the moment
+    `ocx` stops writing the field — the field is being retired, and a gate
+    that demands a vestigial key is the thing that would break.
 
     Calls `version_order.variant_names` — the same function `regenerate`
     writes with, so the gate and the writer cannot disagree by construction.
-    A root predating the field passes trivially: no variant tags, empty
-    recorded set.
     """
     derived = variant_names(root.tags)
-    if root.variants != derived:
+    if root.variants and root.variants != derived:
         raise ValidationError(
             f"variants {list(root.variants)} does not match the set derived from tags "
             f"{list(derived)} — the field is a projection of `tags`, not an independent claim"
