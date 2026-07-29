@@ -455,17 +455,20 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
 
 
 def test_g13_pinned_tag_mutation_is_anomaly() -> None:
-    """G-13: `check_tag_mutations` flags a digest change on a pinned `X.Y.Z`
-    tag; a floating `latest` is never flagged."""
-    committed = _root(tags={"3.28.1": TagEntry(content=_DIGEST_A, observed=_TS)})
-    findings = check_tag_mutations(_PKG, committed, (_observation("3.28.1", _DIGEST_B),))
+    """G-13: `check_tag_mutations` flags a digest change on a build-pinned
+    `X.Y.Z_<build>` tag; the rolling cascade targets a publish legitimately
+    repoints — `latest` and the build-less `3.28.1` — are never flagged."""
+    pinned = "3.28.1_20260216120000"
+    committed = _root(tags={pinned: TagEntry(content=_DIGEST_A, observed=_TS)})
+    findings = check_tag_mutations(_PKG, committed, (_observation(pinned, _DIGEST_B),))
     assert findings == (
         AnomalyFinding(
-            package_id=_PKG, tag="3.28.1", committed_content=_DIGEST_A, fresh_content=_DIGEST_B
+            package_id=_PKG, tag=pinned, committed_content=_DIGEST_A, fresh_content=_DIGEST_B
         ),
     )
-    floating = _root(tags={"latest": TagEntry(content=_DIGEST_A, observed=_TS)})
-    assert check_tag_mutations(_PKG, floating, (_observation("latest", _DIGEST_B),)) == ()
+    for tag in ("latest", "3.28.1"):
+        floating = _root(tags={tag: TagEntry(content=_DIGEST_A, observed=_TS)})
+        assert check_tag_mutations(_PKG, floating, (_observation(tag, _DIGEST_B),)) == ()
 
 
 # --- G-14 ------------------------------------------------------------------

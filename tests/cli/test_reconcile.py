@@ -275,11 +275,12 @@ def test_pinned_tag_mutation_escalates_to_anomaly() -> None:
         files,
         "kitware",
         "cmake",
-        _root(tags={"3.28.1": TagEntry(content=committed_digest, observed="T0")}),
+        _root(tags={"3.28.1_20260216120000": TagEntry(content=committed_digest, observed="T0")}),
     )
     _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
-    # Registry now resolves "3.28.1" to different content entirely.
-    _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    # Registry now resolves the build-pinned tag to different content entirely
+    # — the force-repoint this control exists to catch.
+    _committed_tag(registry, _CMAKE_REPO, "3.28.1_20260216120000")
     github = FakeGitHub()
 
     with pytest.raises(AnomalyError, match="pinned-tag-mutation"):

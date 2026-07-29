@@ -1,8 +1,14 @@
 """One canonical package the integration flows seed and serve.
 
-`acme/widget` at `oci://ghcr.io/ocx-contrib/widget`, one tag `1.0.0` resolving
-to a single-platform (`linux/amd64`) OCI **image index** — the only document
-kind this index records (ADR D4(a)).
+`acme/widget` at `oci://ghcr.io/ocx-contrib/widget`, one tag
+`1.0.0_20260728` resolving to a single-platform (`linux/amd64`) OCI **image
+index** — the only document kind this index records (ADR D4(a)).
+
+The tag carries a build fragment deliberately: that is the shape
+`core/anomaly.py` anomaly-checks (`core/version_order.is_build_pinned_version`),
+so every flow seeded from this fixture exercises the tamper-detection path
+rather than skipping it. `CANONICAL_ROLLING_TAG` is the cascade alias the same
+publish repoints — the exempt shape — for flows that need to contrast the two.
 
 `CANONICAL_SPEC` seeds the git tree; `CANONICAL_REPO_PATH` + `CANONICAL_TAG` +
 `CANONICAL_INDEX` script the paired `FakeGhcrServer`; both derive the same CAS
@@ -29,7 +35,8 @@ if TYPE_CHECKING:
 CANONICAL_PACKAGE_ID = "acme/widget"
 CANONICAL_REPO_PATH = "ocx-contrib/widget"
 CANONICAL_REPOSITORY = f"oci://ghcr.io/{CANONICAL_REPO_PATH}"
-CANONICAL_TAG = "1.0.0"
+CANONICAL_TAG = "1.0.0_20260728"
+CANONICAL_ROLLING_TAG = "1.0.0"
 CANONICAL_ROOT_PATH = "p/acme/widget.json"
 
 CANONICAL_LEAF: dict[str, object] = {
@@ -64,6 +71,17 @@ CANONICAL_SPEC: dict[str, PackageSpec] = {
         repository=CANONICAL_REPOSITORY, tags={CANONICAL_TAG: CANONICAL_INDEX}
     )
 }
+
+ROLLING_SPEC: dict[str, PackageSpec] = {
+    CANONICAL_PACKAGE_ID: PackageSpec(
+        repository=CANONICAL_REPOSITORY, tags={CANONICAL_ROLLING_TAG: CANONICAL_INDEX}
+    )
+}
+"""`CANONICAL_SPEC` with the cascade alias in place of the build-pinned tag.
+
+Serving a different image index for this one is a *correct* publish, not
+tamper — the contrast case a flow needs to prove the sweep does not alarm on
+one."""
 
 
 def seed_registry(

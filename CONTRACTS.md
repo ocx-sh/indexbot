@@ -263,13 +263,15 @@ _VERSION_RE: Final[re.Pattern[str]] = re.compile(
     r"^(?:([a-z][a-z0-9.]*)-)?((0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?)?)$"
 )
 
-def is_full_release_version(tag: str) -> bool:
-    """True iff `tag` is an unprefixed, fully-qualified 3-component version
-    (`_VERSION_RE` matches, group(1) [variant prefix] is `None`, AND groups
-    4 and 5 [minor, patch] are both not `None`). `latest`, a bare major
-    (`3`), a major.minor (`3.28`), and any variant-prefixed tag are all
-    `False` — see `core/anomaly.py`'s use of this predicate (§7) for why the
-    distinction matters.
+def is_build_pinned_version(tag: str) -> bool:
+    """True iff `tag` parses as an OCX version (`_OCX_VERSION_RE`, the whole
+    grammar `Version::parse` spells, `latest` refused as a variant prefix)
+    AND carries a build fragment: `3.28.1_20260216`, `slim-3.12.13_20260728`,
+    `1.0.0-rc1_20260728`. The build fragment is what makes a tag immutable —
+    `ocx package push` writes it once and repoints every rolling ancestor at
+    it. `latest`, a bare major (`3`), `3.28`, `3.28.1`, a bare variant name,
+    and any opaque tag are all `False`: those are the cascade targets, and
+    moving them is what a publish *is*. See `core/anomaly.py` (§7).
     """
 
 def find_latest_version(tags: Mapping[str, TagEntry]) -> str | None:
@@ -588,23 +590,30 @@ def check_tag_mutations(
     package_id: PackageId, committed: PackageRoot, fresh: tuple[Observation, ...]
 ) -> tuple[AnomalyFinding, ...]:
     """Empty tuple = clean. For every tag present in both `committed.tags`
-    and `fresh` that `core/version_order.is_full_release_version` classifies
-    `True` (pinned — an exact, unprefixed `X.Y.Z`), a different content
-    digest between `committed` and `fresh` is one `AnomalyFinding`. Tags
-    classified `False` (`latest`, partial versions, variant-prefixed) are
-    floating and are never flagged regardless of digest change — that is
-    the expected cascade-push behavior (ADR-1 D2/D3).
+    and `fresh` that `core/version_order.is_build_pinned_version` classifies
+    `True` (pinned — a version carrying a build fragment,
+    `3.28.1_20260216`), a different content digest between `committed` and
+    `fresh` is one `AnomalyFinding`. Tags classified `False` — `latest`,
+    `3`, `3.28`, `3.28.1`, a bare variant name, any opaque tag — are the
+    rolling cascade targets and are never flagged regardless of digest
+    change: moving them is what a publish *is* (ADR-1 D2/D3,
+    `crates/ocx_lib/src/package/cascade.rs`).
 
-    **Open question, flagged loudly rather than silently resolved**: neither
-    ADR-1 nor ADR-4 states the pinned-vs-floating predicate explicitly.
-    ADR-4's G-13 disposition table delegates it to ADR-1, but ADR-1 D2/D3
-    only describes the cascade *convention*, not which tag *shapes* are
-    anomaly-checked. This contract's default (exact `X.Y.Z` only is pinned)
-    is the Contracts stage's best-effort reading, not a confirmed decision —
-    a wrong default here either misses real tamper (too permissive) or
-    fires false-positive anomalies on legitimate cascade pushes (too
-    strict). Confirm with the owner before Phase 3's E2E gate (ADR-4's own
-    Validation checklist already has an open item for exactly this).
+    **Resolved 2026-07-29** (was §13 item 3). The predicate shipped as the
+    exact inverse of this — it checked `X.Y.Z` and skipped `X.Y.Z_<build>`,
+    which `_VERSION_RE` could not even express. On the live index that left
+    all 49 immutable tags exempt and all 71 checked tags ones the cascade is
+    supposed to move: a force-repointed build tag swept clean, and the next
+    legitimate republish of any package would have filed a tamper issue
+    against its own rolling tags.
+
+    Rolling tags stay exempt outright rather than getting a weaker check
+    (forward-only, or "must land on a digest some build tag also carries").
+    Neither is decidable from what the sweep observes: it re-observes only
+    the tags the committed root already claims, so the newly published build
+    tag a legitimate cascade points at is not in the observation set, and
+    tag ordering is not carried either. Doing it properly means listing tags
+    from the registry — a different sweep, not a tightening of this one.
     """
 ```
 
@@ -962,13 +971,13 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
    explicit owner-authorized exemption; everything else vanished-upstream is
    an anomaly, never a silent drop. No longer decided by `core/regenerate.py`
    (which never runs in the verify-only sweep at all any more, §12).
-3. **Pinned-vs-floating anomaly predicate** (`core/anomaly.py`, §7): ADR-4
-   delegates this to ADR-1, which does not actually state it. Default: exact
-   `X.Y.Z` only is pinned. This is the highest-stakes open question in this
-   document — a wrong default either misses tamper or false-positives on
-   routine cascade pushes. ADR-4's own Validation checklist already flags
-   it; treat as blocking before Phase 3's E2E gate, not before Phase 2 build
-   (Phase 2 can build and test against the stated default).
+3. **Pinned-vs-floating anomaly predicate** (`core/anomaly.py`, §7) —
+   **resolved, 2026-07-29**: a tag is pinned iff it carries a build fragment
+   (`3.28.1_20260216`, prefix and prerelease included). The rolling cascade
+   targets `3.28.1` / `3.28` / `3` / `latest` are exempt. The stated default
+   ("exact `X.Y.Z` only is pinned") was the exact inverse of OCX's cascade
+   semantics and shipped that way — both failure modes this item warned
+   about were live simultaneously on the nightly sweep. See §7.
 4. **Issue-creation on `GitHubPort`** (`cli/reconcile.py`, §12) — **resolved,
    fork-PR announce revamp 2026-07-18**: `create_or_update_issue` promoted
    onto `ports.GitHubPort` (§3/§10), implemented in `GitHubApi` (unchanged

@@ -39,10 +39,12 @@ from indexbot.exit_codes import ExitCode
 from tests.integration.fixtures.canonical import (
     CANONICAL_LEAF,
     CANONICAL_REPO_PATH,
+    CANONICAL_ROLLING_TAG,
     CANONICAL_SPEC,
     CANONICAL_TAG,
     LEAF_BYTES,
     LEAF_DIGEST,
+    ROLLING_SPEC,
     seed_registry,
 )
 from tests.integration.harness.git_tree import build_git_tree
@@ -62,9 +64,10 @@ _FAKE_PULL_TOKEN = "fake-pull-token"  # noqa: S105
 _FORGE_WRITE_SENTINEL = "ghp_forge_write_token_must_never_reach_ghcr"
 
 # An image index that differs from `CANONICAL_INDEX` — its one descriptor
-# declares `linux/arm64`. Re-observing the committed `1.0.0` tag against this
-# yields a different content digest than the tree was seeded with: a pinned-tag
-# mutation.
+# declares `linux/arm64`. Re-observing a committed tag against this yields a
+# different content digest than the tree was seeded with. On the build-pinned
+# `CANONICAL_TAG` that is a force-repoint (anomaly); on `CANONICAL_ROLLING_TAG`
+# it is what every legitimate republish does (clean).
 _MUTATED_INDEX: dict[str, object] = {
     "schemaVersion": 2,
     "mediaType": "application/vnd.oci.image.index.v1+json",
@@ -191,6 +194,37 @@ def test_pinned_tag_mutation_files_one_issue_and_engages_summary_floor(
     assert forge_headers, "expected the forge to have received the anomaly-issue calls"
     for headers in forge_headers:
         assert not any(_FAKE_PULL_TOKEN in value for value in headers.values())
+
+
+def test_rolling_tag_repointed_by_a_legitimate_publish_files_nothing(
+    fake_ghcr: FakeGhcrServer,
+    fake_forge: FakeForgeServer,
+    index_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The false-positive direction, end to end.
+
+    Same registry-side digest change as the test above, on a tag whose whole
+    purpose is to move: `1.0.0` is the cascade alias the next
+    `1.0.0_<build>` push repoints (`crates/ocx_lib/src/package/cascade.rs`).
+    A sweep that alarms here files a tamper issue against a correct publish and
+    reds the publisher's next mirror run, so this must exit OK with the forge
+    untouched — and the forge is asserted untouched directly, not inferred, so
+    a sweep that filed nothing because it swept nothing cannot pass.
+    """
+    build_git_tree(index_tree, ROLLING_SPEC)
+    seed_registry(fake_ghcr, _MUTATED_INDEX, tag=CANONICAL_ROLLING_TAG)
+
+    sent_headers: list[dict[str, str]] = []
+    with _capturing_client(sent_headers) as client:
+        _wire_adapters(monkeypatch, index_tree, fake_ghcr, fake_forge, client)
+        exit_code = main(["reconcile"])
+
+    assert exit_code == ExitCode.OK
+    assert fake_forge.requests == []
+    assert any(
+        path.endswith(f"/manifests/{CANONICAL_ROLLING_TAG}") for _method, path in fake_ghcr.requests
+    ), "the rolling tag was never observed — a clean exit here would prove nothing"
 
 
 def test_reconcile_sweeps_a_repo_carrying_canonical_tags_clean(
