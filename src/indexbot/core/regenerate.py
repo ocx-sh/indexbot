@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from indexbot.core.version_order import find_latest_version, variant_names
+from indexbot.core.version_order import find_latest_version
 from indexbot.model import PackageRoot, TagEntry
 
 if TYPE_CHECKING:
@@ -70,11 +70,19 @@ def regenerate(
     fields this function computes rather than copies, because (like `desc`,
     which the caller supplies) it is registry-derived, not human-governed.
 
-    `variants`: the other one — a pure projection of the *new* tag names via
-    `core/version_order.py`'s `variant_names`. Computed from `new_tags` rather
-    than carried over for the same reason `source` is: a variant whose last
-    tag disappeared upstream must disappear from the root in the same run, or
-    the field becomes a claim the tags no longer support.
+    `variants`: **never recorded** — always empty, which the serializer spells
+    as the key being absent. The field is retired. `core/render.py` derives the
+    catalog's `variants` from `tags` (#110), and `check_variants_match_tags`
+    accepts an absent one while still holding a present one to the derivation
+    (#112), so nothing reads what this function would write.
+
+    Removing rather than carrying over is the load-bearing half. This is not
+    the only publisher — `ocx package announce` writes the same roots and has
+    stopped recording the field. If this function carried a committed value
+    through, the two writers would alternate: one restores the key, the next
+    opens a pull request whose entire diff is deleting it again, with no tag
+    having moved. Both writers must remove it for the byte-identity that C6's
+    unchanged short-circuit depends on to hold across them.
     """
     new_tags: dict[str, TagEntry] = {}
     for observation in observations:
@@ -98,6 +106,6 @@ def regenerate(
         upstream=current.upstream,
         superseded_by=current.superseded_by,
         source=_source_of_latest_version(new_tags, observations),
-        variants=variant_names(new_tags),
+        variants=(),
         tags=new_tags,
     )

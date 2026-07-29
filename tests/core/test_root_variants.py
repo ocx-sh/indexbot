@@ -73,39 +73,9 @@ def _entry(digest: str) -> TagEntry:
 # --- derivation ------------------------------------------------------------
 
 
-def test_regenerate_records_the_observed_variant_set() -> None:
-    result = regenerate(
-        _root({}),
-        (_observation("3.13.1", _DIGEST_A), _observation("slim-3.13.1", _DIGEST_B)),
-        None,
-        FixedClock(fixed="T1"),
-    )
-    assert result.variants == ("slim",)
-
-
-def test_regenerate_records_nothing_when_only_the_default_variant_ships() -> None:
-    result = regenerate(
-        _root({}),
-        (_observation("3.13.1", _DIGEST_A), _observation("latest", _DIGEST_A)),
-        None,
-        FixedClock(fixed="T1"),
-    )
-    assert result.variants == ()
-
-
-def test_regenerate_drops_a_variant_whose_last_tag_disappeared_upstream() -> None:
-    # Carrying the field over verbatim would leave the root claiming a variant
-    # its own `tags` no longer supports.
-    current = _root(
-        {"3.13.1": _entry(_DIGEST_A), "slim-3.13.1": _entry(_DIGEST_B)}, variants=("slim",)
-    )
-    result = regenerate(current, (_observation("3.13.1", _DIGEST_A),), None, FixedClock(fixed="T1"))
-    assert result.variants == ()
-
-
-def test_recorded_variants_match_the_derivation_over_the_recorded_tags() -> None:
-    # The invariant that makes the field safe to read instead of re-derive:
-    # whatever a consumer computes from `tags` is what the root already says.
+def test_regenerate_records_no_variants_even_when_the_tags_carry_several() -> None:
+    # The field is retired. Tags that would derive `("musl", "slim")` must
+    # still produce an empty set, which serializes as an omitted key.
     observations = (
         _observation("3.13.1", _DIGEST_A),
         _observation("slim-3.13.1", _DIGEST_B),
@@ -115,8 +85,28 @@ def test_recorded_variants_match_the_derivation_over_the_recorded_tags() -> None
         _observation("nightly", _DIGEST_A),
     )
     result = regenerate(_root({}), observations, None, FixedClock(fixed="T1"))
-    assert result.variants == variant_names(result.tags)
-    assert result.variants == ("musl", "slim")
+    assert variant_names(result.tags) == ("musl", "slim"), "the tags must still imply a variant set"
+    assert result.variants == ()
+    assert b"variants" not in serialize_package_root(result)
+
+
+def test_regenerate_drops_a_committed_variants_key() -> None:
+    # The load-bearing half, and the reason this is a removal rather than
+    # simply not computing: `ocx package announce` writes these same roots and
+    # also removes the field. If either writer carried a committed value
+    # through, the two would alternate — one restores the key, the next opens
+    # a pull request whose only diff is deleting it, with no tag having moved.
+    current = _root(
+        {"3.13.1": _entry(_DIGEST_A), "slim-3.13.1": _entry(_DIGEST_B)}, variants=("slim",)
+    )
+    result = regenerate(
+        current,
+        (_observation("3.13.1", _DIGEST_A), _observation("slim-3.13.1", _DIGEST_B)),
+        None,
+        FixedClock(fixed="T1"),
+    )
+    assert result.variants == ()
+    assert b"variants" not in serialize_package_root(result)
 
 
 def test_regenerate_is_idempotent_for_variants() -> None:

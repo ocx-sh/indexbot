@@ -186,13 +186,17 @@ class PackageRoot:
     human-governed vendor attribution — for a mirror the two name different
     repositories on purpose.
 
-    `variants` defaults to `()` — the variant names observed across `tags`
-    (`core/version_order.py`'s `variant_names`), re-derived on every run like
-    `source`. A *projection* of `tags`, never a second source of truth: a
-    consumer may recompute it and must get the same answer. Empty means the
-    package ships only the default variant, and serializes as an omitted key
+    `variants` defaults to `()` and is **retired** — no writer records it any
+    more. `regenerate` always leaves it empty and `ocx package announce`
+    removes it, because two publishers disagreeing about whether to write a
+    derived field makes them alternate: one restores the key, the next opens a
+    pull request that only deletes it. It stays in the model so a root still
+    carrying the key parses and round-trips byte-identically until its next
+    announce drops it. The variant names a consumer wants are derived from
+    `tags` (`core/version_order.py`'s `variant_names`), which is what
+    `core/render.py` puts in the catalog. Empty serializes as an omitted key
     rather than `[]`, so every root published before this field existed stays
-    byte-identical and no announce rewrites it.
+    byte-identical.
     """
 
     name: str

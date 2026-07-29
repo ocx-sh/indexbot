@@ -251,8 +251,11 @@ def check_variants_match_tags(root: PackageRoot) -> None:
     `ocx` stops writing the field — the field is being retired, and a gate
     that demands a vestigial key is the thing that would break.
 
-    Calls `version_order.variant_names` — the same function `regenerate`
-    writes with, so the gate and the writer cannot disagree by construction.
+    Calls `version_order.variant_names` — the same function `core/render.py`
+    derives the catalog's value with, so the gate and the only remaining reader
+    cannot disagree by construction. No writer computes it any more: neither
+    `regenerate` nor `ocx package announce` records the field, so in practice
+    this check now only ever sees a hand-authored one.
     """
     derived = variant_names(root.tags)
     if root.variants and root.variants != derived:
