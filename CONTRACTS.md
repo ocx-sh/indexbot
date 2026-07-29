@@ -1011,7 +1011,11 @@ form, never digested itself):**
   exactly: `name`, `repository`, `owners`, `status`, `deprecated_message`,
   `created`, `desc`, `upstream` (omitted entirely when `None` — schema
   forbids `null` there), `superseded_by` (omitted entirely when `None`,
-  identical omit-when-absent contract), `tags`. Nested objects
+  identical omit-when-absent contract), `source` (same contract),
+  `variants` (same contract, and **omitted when empty**, never `[]` — the
+  schema's `minItems: 1` refuses the other spelling, which is what keeps
+  every root predating the field byte-identical so no announce rewrites it),
+  `tags` — always last. Nested objects
   (`owners[]`, `desc`, `tags[*]`, `tags[*].yanked`) use their own dataclass's
   declared field order the same way — see `validate_entry.py`'s
   `_*_to_dict` helpers for the exact per-type key list.

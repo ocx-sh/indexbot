@@ -53,4 +53,12 @@ yanked tag, and a non-ASCII `desc.title` — `\uXXXX`-escape coverage;
 `with-source.json` adds the optional `source` field, positioned between
 `superseded_by` and `tags`, alongside an `upstream.repository_url` naming a
 *different* repository — the mirror-vs-vendor distinction the two fields
-carry.
+carry; `with-variants.json` adds the optional `variants` field in the slot
+after `source`, and doubles as a **projection vector**: its `variants` value
+is exactly what `core/version_order.py`'s `variant_names` returns for its own
+`tags`, so a port that records something else fails on these bytes. Its tag
+set is chosen to make that falsifiable — a bare `slim` rolling tag (not a
+version, contributes nothing on its own), a prerelease-bearing
+`musl-3.13.1-rc1` (which the narrower `_VERSION_RE` would reject, dropping
+`musl`), and an unprefixed `3.13.1`/`latest` pair (the default variant, which
+has no name and must not appear).

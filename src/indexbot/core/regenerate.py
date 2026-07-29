@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from indexbot.core.version_order import find_latest_version
+from indexbot.core.version_order import find_latest_version, variant_names
 from indexbot.model import PackageRoot, TagEntry
 
 if TYPE_CHECKING:
@@ -66,9 +66,15 @@ def regenerate(
     `observations` (removed upstream) is dropped.
 
     `source`: re-derived from `observations`, never carried over from
-    `current` — see `_source_of_latest_version`. It is the one non-`tags`
-    field this function computes rather than copies, because (like `desc`,
+    `current` — see `_source_of_latest_version`. It is one of two non-`tags`
+    fields this function computes rather than copies, because (like `desc`,
     which the caller supplies) it is registry-derived, not human-governed.
+
+    `variants`: the other one — a pure projection of the *new* tag names via
+    `core/version_order.py`'s `variant_names`. Computed from `new_tags` rather
+    than carried over for the same reason `source` is: a variant whose last
+    tag disappeared upstream must disappear from the root in the same run, or
+    the field becomes a claim the tags no longer support.
     """
     new_tags: dict[str, TagEntry] = {}
     for observation in observations:
@@ -92,5 +98,6 @@ def regenerate(
         upstream=current.upstream,
         superseded_by=current.superseded_by,
         source=_source_of_latest_version(new_tags, observations),
+        variants=variant_names(new_tags),
         tags=new_tags,
     )

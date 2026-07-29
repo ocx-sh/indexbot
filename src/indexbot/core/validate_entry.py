@@ -41,6 +41,7 @@ from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
 from indexbot.core.policy import INDEX_POLICY_PATH
+from indexbot.core.version_order import variant_names
 from indexbot.errors import AnomalyError, ValidationError
 from indexbot.model import (
     Desc,
@@ -228,6 +229,30 @@ def check_upstream_repository_url_scheme(root: PackageRoot) -> None:
         raise ValidationError(
             f"upstream.repository_url {root.upstream.repository_url!r} must use "
             f"http or https scheme, got {scheme!r}"
+        )
+
+
+def check_variants_match_tags(root: PackageRoot) -> None:
+    """`variants` must equal the derivation over this root's own `tags`.
+
+    The field is a projection, and this is what makes that a *guarantee*
+    rather than a description. Neither existing gate can express it: the
+    schema can constrain the shape but not the relationship, and the byte
+    gate is a parse -> serialize round-trip, so it accepts any well-formed
+    value a human typed. Without this check, a hand-authored root could claim
+    a variant set no derivation could produce and survive until the next
+    announce silently overwrote it.
+
+    Calls `version_order.variant_names` — the same function `regenerate`
+    writes with, so the gate and the writer cannot disagree by construction.
+    A root predating the field passes trivially: no variant tags, empty
+    recorded set.
+    """
+    derived = variant_names(root.tags)
+    if root.variants != derived:
+        raise ValidationError(
+            f"variants {list(root.variants)} does not match the set derived from tags "
+            f"{list(derived)} — the field is a projection of `tags`, not an independent claim"
         )
 
 
@@ -539,6 +564,8 @@ def serialize_package_root(root: PackageRoot) -> bytes:
         data["superseded_by"] = root.superseded_by
     if root.source is not None:
         data["source"] = root.source
+    if root.variants:
+        data["variants"] = list(root.variants)
     data["tags"] = {tag: _tag_entry_to_dict(entry) for tag, entry in root.tags.items()}
     text = json.dumps(data, indent=2, sort_keys=False) + "\n"
     return text.encode("utf-8")
@@ -569,6 +596,12 @@ def parse_package_root(raw: bytes) -> PackageRoot:
         upstream = None if upstream_raw is None else _upstream_from_dict(upstream_raw)
         superseded_by = data.get("superseded_by")
         source = data.get("source")
+        # An absent key and an empty array both mean "no variants"; the
+        # serializer only ever emits the former, so `[]` on the wire
+        # round-trips to an omitted key. That normalization is deliberate —
+        # one spelling for one state — and is exactly what the byte gate
+        # rejects a hand-authored `"variants": []` for.
+        variants = tuple(data.get("variants") or ())
         tags = {name: _tag_entry_from_dict(t) for name, t in data["tags"].items()}
         return PackageRoot(
             name=data["name"],
@@ -581,6 +614,7 @@ def parse_package_root(raw: bytes) -> PackageRoot:
             upstream=upstream,
             superseded_by=superseded_by,
             source=source,
+            variants=variants,
             tags=tags,
         )
     except (KeyError, TypeError, AttributeError) as exc:

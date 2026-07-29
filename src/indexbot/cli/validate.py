@@ -43,6 +43,7 @@ from indexbot.core.validate_entry import (
     check_superseded_by,
     check_tag_timestamps_z_anchored,
     check_upstream_repository_url_scheme,
+    check_variants_match_tags,
     parse_digest,
     parse_image_index_digests,
     parse_package_id,
@@ -218,6 +219,7 @@ def _validate_one(
         check_upstream_repository_url_scheme(root)
         check_tag_timestamps_z_anchored(root)
         check_no_reserved_tags(root)
+        check_variants_match_tags(root)
         if allow_reserved:
             print(
                 f"{path}: --allow-reserved-namespace used (brand-segment carve-out — "

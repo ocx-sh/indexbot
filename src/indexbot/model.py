@@ -185,6 +185,14 @@ class PackageRoot:
     `superseded_by`. Distinct from `upstream.repository_url`, which is
     human-governed vendor attribution — for a mirror the two name different
     repositories on purpose.
+
+    `variants` defaults to `()` — the variant names observed across `tags`
+    (`core/version_order.py`'s `variant_names`), re-derived on every run like
+    `source`. A *projection* of `tags`, never a second source of truth: a
+    consumer may recompute it and must get the same answer. Empty means the
+    package ships only the default variant, and serializes as an omitted key
+    rather than `[]`, so every root published before this field existed stays
+    byte-identical and no announce rewrites it.
     """
 
     name: str
@@ -197,4 +205,5 @@ class PackageRoot:
     upstream: Upstream | None = None
     superseded_by: str | None = None
     source: str | None = None
+    variants: tuple[str, ...] = ()
     tags: dict[str, TagEntry] = field(default_factory=_empty_tags)

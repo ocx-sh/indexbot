@@ -197,7 +197,15 @@ def _catalog_entry(source: SourcePackage) -> dict[str, object]:
     """One `/data/catalog/catalog.json` `packages[]` row — summary only, CAS
     URL refs for logo/readme rather than duplicated blob bytes (ADR-3's
     explicit divergence from `ocx-sh/ocx`'s website). Yanked tags are
-    excluded from `tagCount`/`platforms` (plan Phase 2 WP-list)."""
+    excluded from `tagCount`/`platforms` (plan Phase 2 WP-list).
+
+    `variants` is **read off the root**, never re-derived here — the whole
+    reason the root records it. Note `latestVersion` deliberately skips
+    variant-prefixed tags (`find_latest_version`), so without this key the
+    grid could not tell a package that ships variants from one that does not.
+    Omitted when empty, matching the wire spelling, so every catalog row for
+    a package with no variants is byte-identical to before the field existed.
+    """
     namespace, package = source.package_id.namespace, source.package_id.package
     root = source.root
     desc = root.desc
@@ -205,6 +213,7 @@ def _catalog_entry(source: SourcePackage) -> dict[str, object]:
     ext_lookup = _cas_ext_lookup(source.content_by_digest)
     logo_digest = desc.logo if desc is not None else None
     readme_digest = desc.readme if desc is not None else None
+    variants = {"variants": list(root.variants)} if root.variants else {}
 
     return {
         "namespace": namespace,
@@ -217,6 +226,7 @@ def _catalog_entry(source: SourcePackage) -> dict[str, object]:
         "description": desc.description if desc is not None else "",
         "keywords": list(desc.keywords) if desc is not None else [],
         "latestVersion": find_latest_version(root.tags),
+        **variants,
         "tagCount": live_tag_count,
         "platforms": _catalog_platforms(source),
         "logoUrl": _cas_url(namespace, package, logo_digest, ext_lookup),
