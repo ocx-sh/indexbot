@@ -26,6 +26,9 @@ _PERMISSIONS_DEFAULT_DENY_RE = re.compile(r"(?m)^permissions:\s*\{\}\s*$")
 _USES_RE = re.compile(r"^\s*(?:-\s+)?uses:\s*(\S+)")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _TRIGGER_RE = re.compile(r"^  ([a-z_]+):")
+# Cron work here is repository-specific (deploy, reconcile, PR triage, mutation
+# baseline); a fork running any of it is waste at best and noise at worst.
+_UPSTREAM_GUARD = "github.repository_owner == 'ocx-sh'"
 
 
 def _workflow_files() -> list[Path]:
@@ -67,6 +70,19 @@ def _runs(job_text: str, pattern: str) -> bool:
     it — same mutation hazard as `_grant`. The lookahead excludes comment
     lines; the command may be bare or inside a `$(...)` capture."""
     return re.search(rf"(?m)^(?!\s*#).*\bgh {pattern}", job_text) is not None
+
+
+def _job_names(text: str) -> list[str]:
+    """Every job name — the two-space mapping keys after `jobs:`, which is the
+    last top-level key in every workflow here (same assumption `_job_block`
+    already makes about where a job block ends)."""
+    lines = text.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.rstrip() == "jobs:")
+    return [
+        match.group(1)
+        for line in lines[start + 1 :]
+        if (match := re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line))
+    ]
 
 
 def _job_block(text: str, job: str) -> str:
@@ -372,3 +388,45 @@ def test_reserved_namespace_gate_lives_in_the_zero_secret_job() -> None:
         if workflow == _VALIDATE:
             continue
         assert "--allow-reserved-namespace" not in workflow.read_text(encoding="utf-8")
+
+
+# --- cron is upstream-only -------------------------------------------------
+
+
+def test_scheduled_jobs_carry_the_upstream_guard() -> None:
+    """A fork inherits every `schedule:` in this tree and GitHub keeps firing
+    it there, off the fork's own copy of the YAML: ocx-contrib/index (the
+    announce bot's fork) ran `render-deploy` every 15 minutes and failed all
+    33 times, because no fork holds the Cloudflare secrets, and `ci`,
+    `reconcile` and `stale` burned fork minutes on work scoped to this
+    repository. Every job a `schedule` event can reach therefore either
+    carries the upstream owner guard or excludes the schedule event outright.
+    Jobs with `needs:` are exempt: a skipped dependency skips them too."""
+    for workflow in _workflow_files():
+        text = workflow.read_text(encoding="utf-8")
+        if "schedule" not in _triggers(text):
+            continue
+        for name in _job_names(text):
+            job = _job_block(text, name)
+            if re.search(r"(?m)^\s{4}needs:", job):
+                continue
+            condition = re.search(r"(?m)^\s{4}if:\s*(.+)$", job)
+            assert condition and (
+                _UPSTREAM_GUARD in condition.group(1)
+                or "github.event_name != 'schedule'" in condition.group(1)
+            ), f"{workflow.name}: job `{name}` runs on cron in every fork of this repo"
+
+
+def test_the_upstream_guard_binds_the_owner_not_the_repository() -> None:
+    """`github.repository_owner`, never `github.repository`: a repository
+    rename would leave a `github.repository == ...` guard false on THIS repo,
+    and the whole cron surface — deploys included — would go quietly dead
+    with no failing check anywhere (the failure mode of issue #67, reached by
+    a different route)."""
+    for workflow in _workflow_files():
+        for line in workflow.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("#") or "if:" not in line:
+                continue
+            assert "github.repository ==" not in line, (
+                f"{workflow.name}: guard binds github.repository, not the owner"
+            )
