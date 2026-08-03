@@ -386,6 +386,66 @@ def test_5xx_exhausted_raises_transient(monkeypatch: pytest.MonkeyPatch) -> None
     assert route.call_count == 5  # BackoffPolicy() default max_attempts
 
 
+# --- transport failures (timeout / reset) --------------------------------
+#
+# A `httpx.TransportError` never reaches `is_retryable_status` — it is an
+# exception, not a status — so it gets its own arm of `_send`'s backoff loop.
+
+
+@respx.mock
+def test_transport_timeout_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(registry_v2.time, "sleep", sleeps.append)
+    monkeypatch.setattr(registry_v2.random, "random", lambda: 0.5)
+    route = respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/v1.0.0").mock(
+        side_effect=[httpx.ReadTimeout("read timed out"), httpx.Response(200, json={"ok": True})]
+    )
+    registry = RegistryV2()
+    assert registry.get_manifest(_REPOSITORY, "v1.0.0").parsed == {"ok": True}
+    assert route.call_count == 2
+    # Same exponential/jitter formula as a 429 without Retry-After: a
+    # transport failure carries no server-supplied delay to honour.
+    assert sleeps == [1.0]
+
+
+@respx.mock
+def test_transport_timeout_exhausted_raises_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry_v2.time, "sleep", _no_sleep)
+    route = respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/v1.0.0").mock(
+        side_effect=httpx.ReadTimeout("read timed out")
+    )
+    registry = RegistryV2()
+    # TransientError, not a bare httpx traceback: `main()` only maps
+    # `IndexBotError` to an exit code and a step summary.
+    with pytest.raises(TransientError, match="transport failure"):
+        registry.get_manifest(_REPOSITORY, "v1.0.0")
+    assert route.call_count == 5  # BackoffPolicy() default max_attempts
+
+
+@respx.mock
+def test_transport_failure_during_token_fetch_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry_v2.time, "sleep", _no_sleep)
+    token_route = respx.get(f"{_BASE}/token").mock(
+        side_effect=[
+            httpx.ConnectError("connection reset"),
+            httpx.Response(200, json={"token": "tok-1"}),
+        ]
+    )
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/v1.0.0").mock(
+        side_effect=[
+            httpx.Response(401),
+            httpx.Response(401),
+            httpx.Response(200, json={"ok": True}),
+        ]
+    )
+    registry = RegistryV2()
+    # The failed fetch left no token, so the retry is unauthenticated and 401s
+    # again — reaching the success only because `auth_retried` stayed False
+    # until the fetch actually landed.
+    assert registry.get_manifest(_REPOSITORY, "v1.0.0").parsed == {"ok": True}
+    assert token_route.call_count == 2
+
+
 # --- get_desc_tag_digest -------------------------------------------------
 
 

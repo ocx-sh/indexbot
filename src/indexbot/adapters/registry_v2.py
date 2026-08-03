@@ -29,9 +29,15 @@ of:
   retrying later might help).
 - `tags/list` pagination via the RFC 8288 `Link` response header, bounded by
   `max_pages` so a misbehaving/malicious next-link chain can't loop forever.
-- The 429/5xx retry loop — the imperative-shell half of `core/backoff.py`'s
-  pure timing decisions (CONTRACTS.md §7): this module calls `time.sleep`
-  directly, `core/backoff.py` only computes *how long*.
+- The retry loop — the imperative-shell half of `core/backoff.py`'s pure
+  timing decisions (CONTRACTS.md §7): this module calls `time.sleep`
+  directly, `core/backoff.py` only computes *how long*. It spends one
+  `BackoffPolicy` budget on two failure kinds: retryable *statuses*
+  (429/5xx, via `is_retryable_status`) and transport *failures* (timeout,
+  connection reset, protocol error), which are exceptions and so never reach
+  a status test at all. Both exhaust into `TransientError`; a bare `httpx`
+  exception must never escape this module, because `cli/main.py` only maps
+  `IndexBotError` onto an exit code and a step summary.
 
 `repository` arguments are always the full `oci://<host>/<path>` URI stored
 in `PackageRoot.repository` (see `core/validate_entry.py`'s
@@ -89,7 +95,16 @@ the same SSRF reason. If JFrog ever moves it, the token fetch 404s loudly at
 `raise_for_status` — a visible break, not a silent widening of where this bot
 sends requests."""
 
-_DEFAULT_TIMEOUT_SECONDS = 10.0
+_DEFAULT_TIMEOUT_SECONDS = 30.0
+"""Per-request deadline handed to every `httpx` call.
+
+Raised from 10s after a GHCR manifest GET stalled past it and failed a
+REQUIRED announce check. A manifest is a few KiB, so a request that has not
+answered inside 30s is a stall, not a slow transfer — and `_send` now spends
+its `BackoffPolicy` budget on the retry rather than surfacing the timeout,
+so the generous per-attempt deadline costs nothing on the happy path.
+"""
+
 _DEFAULT_MAX_PAGES = 10_000
 _TAGS_PAGE_SIZE = 100
 
@@ -313,7 +328,8 @@ class RegistryV2:
         params: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         """One logical request: token dance (401 -> refresh -> retry once)
-        wrapped in the 429/5xx backoff loop."""
+        wrapped in the backoff loop, which covers both retryable *statuses*
+        (429/5xx) and transport *failures* (timeout, reset, protocol error)."""
         auth_retried = False
         attempt = 1
         while True:
@@ -321,15 +337,36 @@ class RegistryV2:
             token = self._tokens.get(repo_path)
             if token is not None:
                 request_headers["Authorization"] = f"Bearer {token}"
-            response = self.client.request(
-                method, url, headers=request_headers, params=params, timeout=self.timeout
-            )
 
-            if response.status_code == 401:
-                if auth_retried:
-                    raise TransientError(f"persistent 401 for {method} {url}")
-                auth_retried = True
-                self._tokens[repo_path] = self._fetch_token(repo_path)
+            try:
+                response = self.client.request(
+                    method, url, headers=request_headers, params=params, timeout=self.timeout
+                )
+
+                if response.status_code == 401:
+                    if auth_retried:
+                        raise TransientError(f"persistent 401 for {method} {url}")
+                    self._tokens[repo_path] = self._fetch_token(repo_path)
+                    # Set only after the fetch lands: a token fetch that dies
+                    # on a transport failure must leave the 401 lane re-armed,
+                    # or the retry below sends unauthenticated again and trips
+                    # "persistent 401" instead of spending its budget.
+                    auth_retried = True
+                    continue
+            except httpx.TransportError as exc:
+                # A timeout / connection reset / protocol error is an
+                # exception, not a status, so `is_retryable_status` never sees
+                # it. Without this it escapes the loop, past `main()`'s
+                # `IndexBotError` handler, and fails the run with a bare
+                # traceback — no `ExitCode.TRANSIENT`, no step summary. Same
+                # attempt budget as a 429/5xx; `TransientError` when spent.
+                if attempt >= self.policy.max_attempts:
+                    raise TransientError(
+                        f"transport failure for {method} {url} after {attempt} attempts: {exc!r}"
+                    ) from exc
+                jitter = random.random()  # noqa: S311 # nosec B311 - retry-jitter, not crypto
+                time.sleep(delay_seconds(attempt, self.policy, jitter=jitter))
+                attempt += 1
                 continue
 
             if response.status_code == 403:

@@ -751,7 +751,22 @@ Manifest/blob fetch retry loop (the imperative-shell half of §7's
 satisfies `backoff.is_retryable_status`, sleep
 `backoff.delay_seconds(attempt, policy, jitter=random.random(), retry_after=parsed_retry_after_header)`
 (via `time.sleep`) and retry, up to `policy.max_attempts`; on exhaustion
-raise `TransientError`. A malformed-JSON body on an otherwise-200 response
+raise `TransientError`.
+
+The same loop and the same attempt budget cover `httpx.TransportError` —
+read/connect timeout, connection reset, protocol error — raised by the call
+itself, including the nested token fetch. These are exceptions, so
+`is_retryable_status` never sees them; without an explicit arm they escape
+the adapter and reach `cli/main.py`, which only maps `IndexBotError` onto an
+exit code and a step summary, so a network blip fails a run with a bare
+traceback and no `ExitCode.TRANSIENT` (observed 2026-08-03 on a REQUIRED
+`schema-validate-pr` check). They carry no server-supplied `Retry-After`, so
+the delay is always the exponential/jitter form. A transport failure during
+the token fetch leaves the 401 lane re-armed — the retry would otherwise
+send unauthenticated, 401 again, and trip "persistent 401" instead of
+spending its budget.
+
+A malformed-JSON body on an otherwise-200 response
 is **not** retryable — raise a plain `ValueError`-derived parse error
 (propagates as an unhandled bug per `cli/main.py`'s contract, since a 200
 with unparseable JSON from GHCR is not a condition the bot has a defined
