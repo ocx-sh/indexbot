@@ -475,6 +475,29 @@ def test_build_render_plan_package_index_empty_for_no_packages() -> None:
     assert json.loads(index_file.content) == {"format_version": 1, "packages": {}}
 
 
+def test_catalog_updated_null_for_tagless_package() -> None:
+    # `_latest_activity`'s `default=None` branch: a root that has never
+    # carried a tag yields `updated: null` (and a null catalog `generated`).
+    packages = [
+        _package(
+            namespace="kitware",
+            package="cmake",
+            repository="oci://ghcr.io/ocx-contrib/cmake",
+            created="2026-01-01",
+            tags={},
+            desc=None,
+            content_by_digest={},
+        )
+    ]
+    plan = build_render_plan(packages)
+    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
+    assert isinstance(catalog_file.content, str)
+    catalog = json.loads(catalog_file.content)
+    assert catalog["generated"] is None
+    assert catalog["packages"][0]["created"] == "2026-01-01"
+    assert catalog["packages"][0]["updated"] is None
+
+
 def test_build_render_plan_catalog_generated_null_for_no_packages() -> None:
     plan = build_render_plan([])
     catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")

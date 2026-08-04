@@ -8,6 +8,8 @@
       "status": "active",
       "deprecatedMessage": null,
       "supersededBy": null,
+      "created": "2026-02-01",
+      "updated": "2026-07-17T00:00:00Z",
       "title": "regsync",
       "description": "Utility to sync images between registries.",
       "keywords": [

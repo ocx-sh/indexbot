@@ -193,6 +193,21 @@ def _catalog_platforms(source: SourcePackage) -> list[str]:
     return sorted(platforms)
 
 
+def _latest_activity(root: PackageRoot) -> str | None:
+    """Lexicographic max over this root's tag `observed` values plus every
+    yanked tag's `yanked.at` — the per-package "last activity" timestamp
+    (catalog `updated` field), and the per-package term `_generated_timestamp`
+    folds over. Same Z-anchored fixed-width timestamp invariant as
+    `_generated_timestamp` (enforced upstream, never re-checked here).
+    `None` when the root has never carried a tag."""
+    timestamps: list[str] = []
+    for entry in root.tags.values():
+        timestamps.append(entry.observed)
+        if entry.yanked is not None:
+            timestamps.append(entry.yanked.at)
+    return max(timestamps, default=None)
+
+
 def _catalog_entry(source: SourcePackage) -> dict[str, object]:
     """One `/data/catalog/catalog.json` `packages[]` row — summary only, CAS
     URL refs for logo/readme rather than duplicated blob bytes (ADR-3's
@@ -234,6 +249,10 @@ def _catalog_entry(source: SourcePackage) -> dict[str, object]:
         "status": root.status,
         "deprecatedMessage": root.deprecated_message,
         "supersededBy": root.superseded_by,
+        # Catalog sort keys (site "newest"/"recently updated" sorts):
+        # announced date from the root, last activity from the tags.
+        "created": root.created,
+        "updated": _latest_activity(root),
         "title": desc.title if desc is not None else root.name,
         "description": desc.description if desc is not None else "",
         "keywords": list(desc.keywords) if desc is not None else [],
@@ -265,12 +284,9 @@ def _generated_timestamp(ordered: Sequence[SourcePackage]) -> str | None:
     `cli/validate.py`'s PR gate) plus `schema/root.schema.json`'s
     `tagEntry.observed`/`yanked.at` pattern — never re-validated here.
     """
-    timestamps: list[str] = []
-    for source in ordered:
-        for entry in source.root.tags.values():
-            timestamps.append(entry.observed)
-            if entry.yanked is not None:
-                timestamps.append(entry.yanked.at)
+    timestamps = [
+        activity for source in ordered if (activity := _latest_activity(source.root)) is not None
+    ]
     return max(timestamps, default=None)
 
 

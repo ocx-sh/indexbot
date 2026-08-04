@@ -8,6 +8,8 @@
       "status": "active",
       "deprecatedMessage": null,
       "supersededBy": null,
+      "created": "2026-06-01",
+      "updated": "2026-07-20T00:00:00Z",
       "title": "ocx.sh/astral-sh/uv",
       "description": "",
       "keywords": [],

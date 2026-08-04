@@ -8,6 +8,8 @@
       "status": "active",
       "deprecatedMessage": null,
       "supersededBy": null,
+      "created": "2026-04-01",
+      "updated": "2026-07-17T00:00:00Z",
       "title": "ocx.sh/mvdan/shfmt",
       "description": "",
       "keywords": [],
