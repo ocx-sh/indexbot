@@ -254,15 +254,22 @@ def run(
         return ExitCode.OK
 
     fork = cast(str, args.fork)
+    index_repo = cast(str, args.index_repo)
     fork_owner, _, _fork_repo = fork.partition("/")
     branch = _branch_name(package_id)
     github = cast("GitHubPort", fork_github)
-    # ponytail: assumes the fork's default branch is also "main" (the common
-    # GitHub fork convention) — upgrade to a `--fork-base` override if a
-    # publisher's fork ever uses a different default branch name.
-    base_sha = github.get_ref_sha(branch) or github.get_ref_sha(BASE_REF)
+    # Root content above is generated from UPSTREAM index main
+    # (`index_github.get_file_contents(root_path, BASE_REF)`) + live registry
+    # truth, so a fresh announce branch must be cut from upstream's main tip,
+    # not the fork's — a stale fork main would produce a stale merge-base and
+    # risk a spurious CONFLICTING PR against any concurrent upstream change to
+    # the same root. Fork networks share object storage, so creating a fork
+    # ref at an upstream SHA works. An already-open announce branch (on the
+    # fork) is reused as-is — its own tip is the right base for a second
+    # commit on the same PR.
+    base_sha = github.get_ref_sha(branch) or index_github.get_ref_sha(BASE_REF)
     if base_sha is None:
-        raise ValidationError(f"base ref {BASE_REF!r} does not exist on {fork!r}")
+        raise ValidationError(f"base ref {BASE_REF!r} does not exist on {index_repo!r}")
 
     commit_files: dict[str, bytes | None] = dict(files_by_path)
     github.commit_files(

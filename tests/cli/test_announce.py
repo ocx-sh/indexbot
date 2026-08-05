@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -91,6 +91,22 @@ class _NoWriteFiles(InMemoryFiles):
 
     def write_bytes(self, path: str, content: bytes) -> None:
         raise AssertionError("short-circuit must skip write_bytes")
+
+
+@dataclass
+class _RecordingCommitGitHub(FakeGitHub):
+    """`FakeGitHub` that records the `base_sha` passed to `commit_files` — the
+    fake's own staleness check can't distinguish a fresh branch's base_sha
+    value (any non-`None` value succeeds), so this is the only way to pin
+    exactly which ref a fresh announce branch was cut from."""
+
+    committed_base_sha: str | None = field(default=None, init=False)
+
+    def commit_files(
+        self, *, branch: str, base_sha: str, message: str, files: Mapping[str, bytes | None]
+    ) -> str:
+        self.committed_base_sha = base_sha
+        return super().commit_files(branch=branch, base_sha=base_sha, message=message, files=files)
 
 
 def _args(
@@ -755,6 +771,58 @@ def test_fork_mode_reuses_existing_announce_branch_as_commit_base() -> None:
     assert result == ExitCode.OK
 
 
+def test_fork_mode_fresh_branch_bases_on_upstream_main_not_fork_main() -> None:
+    # Regression: root content is generated from UPSTREAM index main + live
+    # registry truth, so a fresh announce branch must be cut from upstream's
+    # main tip, not the fork's — a stale fork main produces a stale
+    # merge-base (live case: PR #592, upstream landed a concurrent change
+    # between fork sync and announce, turning the announce PR CONFLICTING).
+    manifest_digest = "sha256:" + "1" * 64
+    current = _root({})
+    index_github = FakeGitHub(
+        files={(_ROOT_PATH, "main"): serialize_package_root(current)},
+        refs={"main": "upstream-main-sha"},
+    )
+    fork_github = _RecordingCommitGitHub(refs={"main": "stale-fork-main-sha"})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
+    )
+
+    result = _run(
+        _args(tags="3.28.1", out=None, fork="alice/index"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=fork_github,
+        files=InMemoryFiles(),
+        clock=FixedClock(),
+    )
+
+    assert result == ExitCode.OK
+    assert fork_github.committed_base_sha == "upstream-main-sha"
+
+
+def test_fork_mode_missing_upstream_base_ref_raises_even_if_fork_main_exists() -> None:
+    # Pins the new source of truth: a fork's own main ref must never
+    # substitute for a missing upstream main ref, even though it used to
+    # (pre-fix) satisfy the fallback.
+    current = _root({})
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index("sha256:" + "1" * 64)}
+    )
+
+    with pytest.raises(ValidationError, match="main"):
+        _run(
+            _args(tags="3.28.1", out=None, fork="alice/index"),
+            registry=registry,
+            index_github=index_github,
+            fork_github=fork_github,
+            files=InMemoryFiles(),
+            clock=FixedClock(),
+        )
+
+
 def test_fork_mode_missing_base_ref_raises_validation_error() -> None:
     manifest_digest = "sha256:" + "1" * 64
     current = _root({})
@@ -778,7 +846,10 @@ def test_fork_mode_missing_base_ref_raises_validation_error() -> None:
 def test_fork_mode_never_writes_to_index_repo_files() -> None:
     manifest_digest = "sha256:" + "1" * 64
     current = _root({})
-    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    index_github = FakeGitHub(
+        files={(_ROOT_PATH, "main"): serialize_package_root(current)},
+        refs={"main": "index-main-sha"},
+    )
     fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
@@ -861,7 +932,10 @@ def test_changed_tag_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None:
     # commit + PR happen as before.
     old_content = _observed_content_digest("3.28.1", "sha256:" + "1" * 64)
     current = _root({"3.28.1": TagEntry(content=old_content, observed="T0")})
-    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    index_github = FakeGitHub(
+        files={(_ROOT_PATH, "main"): serialize_package_root(current)},
+        refs={"main": "index-main-sha"},
+    )
     fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
     new_manifest = "sha256:" + "2" * 64
     registry = FakeRegistry(
@@ -894,7 +968,10 @@ def test_changed_desc_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None
     manifest_digest = "sha256:" + "1" * 64
     content_digest = _observed_content_digest("3.28.1", manifest_digest)
     current = _root({"3.28.1": TagEntry(content=content_digest, observed="T0")})  # desc None
-    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    index_github = FakeGitHub(
+        files={(_ROOT_PATH, "main"): serialize_package_root(current)},
+        refs={"main": "index-main-sha"},
+    )
     fork_github = FakeGitHub(refs={"main": "fork-main-sha"})
     registry = FakeRegistry(
         tags={_REPO: ["3.28.1"]},

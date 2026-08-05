@@ -839,7 +839,13 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   paths; `--fork`: `commit_files` against a *second*, keyword-only
   `fork_github` port scoped to `--fork`, then `open_or_update_pull_request`
   on `index_github` with the new `head_owner` parameter (§3) set to the
-  fork's owner. No index-side credential is ever read by this module itself
+  fork's owner. Announce branch base ref: an already-open announce branch
+  (`fork_github.get_ref_sha(branch)`) is reused as-is; a fresh branch is cut
+  from **upstream** index main (`index_github.get_ref_sha(BASE_REF)`), never
+  the fork's own main — root content is generated from upstream main + live
+  registry truth, so a stale fork main would produce a stale merge-base (fork
+  networks share object storage, so creating a fork ref at an upstream SHA
+  works). No index-side credential is ever read by this module itself
   — `cli/_wiring.py` decides token presence per port. Server-side privileged
   verification (G-19 ownership, claim re-derivation) happens in CI, never
   here — see `cli/governance_check.py` and `cli/validate.py` below.
