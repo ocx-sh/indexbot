@@ -384,6 +384,11 @@ def test_base_ref_bytes_are_materialized_outside_the_workspace() -> None:
     assert 'git cat-file -e "$BASE_SHA:$file" 2>/dev/null || continue' in job
     assert 'git show "$BASE_SHA:$file" > "$base_dir/$file"' in job
     assert "BASE_DIR: ${{ steps.base.outputs.dir }}" in job
+    # The changed-files step's three-dot diff needs the MERGE-BASE commit in
+    # the clone, not just the two endpoints — a shallow "optimization" here
+    # fails the required check on every PR whose branch point scrolled out
+    # of the fetch window.
+    assert "fetch-depth: 0" in job
 
 
 def test_reserved_namespace_gate_lives_in_the_zero_secret_job() -> None:

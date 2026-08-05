@@ -35,7 +35,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _VALIDATE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "validate.yml"
 
 _CHANGED_FILES_DIFF_RE = re.compile(
-    r"""git diff --name-only --diff-filter=ACMR "\$BASE_SHA" HEAD -- '([^']+)'"""
+    r"""git diff --name-only --diff-filter=d "(\$BASE_SHA\.\.\.HEAD)" -- '([^']+)'"""
 )
 _BARE_PATHSPEC = "p/*/*.json"
 """The broken shell-glob spelling, kept as the regression witness below."""
@@ -80,11 +80,20 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout
 
 
-def _workflow_pathspec() -> str:
-    """The single pathspec literal `validate.yml`'s changed-files step runs."""
+def _workflow_diff() -> tuple[str, str]:
+    """The range template and pathspec literal `validate.yml`'s changed-files
+    step runs. Capturing the range and EXECUTING it below is what binds the
+    three-dot spelling to behavior — a static regex alone would pin the
+    spelling without proving what it selects, this module's founding sin."""
     matches = _CHANGED_FILES_DIFF_RE.findall(_VALIDATE_WORKFLOW.read_text(encoding="utf-8"))
     assert len(matches) == 1, f"expected exactly one changed-files git diff, found {matches}"
-    return str(matches[0])
+    range_template, pathspec = matches[0]
+    return str(range_template), str(pathspec)
+
+
+def _workflow_pathspec() -> str:
+    """The single pathspec literal `validate.yml`'s changed-files step runs."""
+    return _workflow_diff()[1]
 
 
 def _fixture_repo(tmp_path: Path) -> tuple[Path, str]:
@@ -108,9 +117,11 @@ def _fixture_repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _changed(repo: Path, base_sha: str, pathspec: str) -> Sequence[str]:
-    stdout = _git(
-        repo, "diff", "--name-only", "--diff-filter=ACMR", base_sha, "HEAD", "--", pathspec
-    )
+    """Run the diff exactly as the workflow spells it — the captured range
+    template with `$BASE_SHA` substituted, the captured `--diff-filter=d`."""
+    range_template, _ = _workflow_diff()
+    range_arg = range_template.replace("$BASE_SHA", base_sha)
+    stdout = _git(repo, "diff", "--name-only", "--diff-filter=d", range_arg, "--", pathspec)
     return stdout.split()
 
 
@@ -140,3 +151,76 @@ def test_bare_shell_glob_pathspec_over_selects_cas_objects(tmp_path: Path) -> No
     assert set(over_selected) > set(_PACKAGE_ROOTS)
     assert any("/o/sha256/" in path for path in over_selected)
     assert _workflow_pathspec() != _BARE_PATHSPEC
+
+
+def test_three_dot_diff_ignores_roots_the_base_advanced(tmp_path: Path) -> None:
+    """Regression witness for the stale-announce-branch false positive
+    (PRs #351/#423/#538), two halves.
+
+    An announce branch is cut from main, then ANOTHER announce merges to
+    main before this one validates. Three-dot (merge-base..HEAD) selects
+    only the root this branch authored. Two-dot compares trees, so it also
+    selects the OTHER package's root — whose stale head-side bytes a squash
+    merge can never land — and hands it to `indexbot validate` to fail on.
+    The second half proves the fixture discriminates; the first proves the
+    workflow's spelling is immune.
+    """
+    repo = tmp_path / "index"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    other_root = repo / "p" / "other" / "pkg.json"
+    other_root.parent.mkdir(parents=True)
+    other_root.write_text('{"tag": "old"}\n', encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "merge-base")
+
+    _git(repo, "checkout", "-q", "-b", "announce")
+    own_root = repo / "p" / "mine" / "pkg.json"
+    own_root.parent.mkdir(parents=True)
+    own_root.write_text("{}\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "announce: curate mine/pkg")
+
+    _git(repo, "checkout", "-q", "main")
+    other_root.write_text('{"tag": "new"}\n', encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "announce: curate other/pkg")
+    base_sha = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "checkout", "-q", "announce")
+
+    three_dot = _changed(repo, base_sha, _workflow_pathspec())
+    assert three_dot == ["p/mine/pkg.json"]
+
+    two_dot = _git(
+        repo,
+        "diff",
+        "--name-only",
+        "--diff-filter=d",
+        base_sha,
+        "HEAD",
+        "--",
+        _workflow_pathspec(),
+    ).split()
+    assert sorted(two_dot) == ["p/mine/pkg.json", "p/other/pkg.json"]
+
+
+def test_typechange_root_is_still_selected(tmp_path: Path) -> None:
+    """A root swapped for a symlink is diff status `T` — the one status the
+    old `ACMR` allowlist silently dropped, skipping `indexbot validate` while
+    the required check went green. `--diff-filter=d` must keep it."""
+    repo = tmp_path / "index"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    root = repo / "p" / "ns" / "pkg.json"
+    root.parent.mkdir(parents=True)
+    root.write_text("{}\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    root.unlink()
+    root.symlink_to("../../schema")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "swap root for symlink")
+
+    assert _changed(repo, base_sha, _workflow_pathspec()) == ["p/ns/pkg.json"]
