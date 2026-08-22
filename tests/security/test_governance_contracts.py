@@ -395,6 +395,22 @@ def test_nd4_index_segment_is_reserved() -> None:
         check_namespace_not_reserved(PackageId(namespace="foo", package="index"))
 
 
+def test_nd4_c_segment_is_reserved() -> None:
+    """ADR-2 ND-4, WP-11 security review S1: `/c/index.json` (the
+    enumeration index, `adr_enumeration_index.md`) is a published top-level
+    wire-contract URL -- a package claiming `p/c/<pkg>.json` or `p/<ns>/c.json`
+    would sit beside it. `c` was the last deployed top-level control path not
+    yet in the reservation group; this pins that it is, in both the
+    namespace and package position `check_namespace_not_reserved` checks (a
+    `PackageId` does not otherwise distinguish which position collided) --
+    same convention as `test_nd4_index_segment_is_reserved` above."""
+    assert "c" in RESERVED_NAMESPACE_SEGMENTS
+    with pytest.raises(ValidationError, match="c"):
+        check_namespace_not_reserved(PackageId(namespace="c", package="foo"))
+    with pytest.raises(ValidationError, match="c"):
+        check_namespace_not_reserved(PackageId(namespace="foo", package="c"))
+
+
 # --- G-10 ------------------------------------------------------------------
 
 
