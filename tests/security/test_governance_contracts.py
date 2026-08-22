@@ -15,7 +15,12 @@ an existing suite already pins the exact invariant (`test_validate_entry.py`,
 `test_classify_pr.py`, `test_anomaly.py`, `test_governance_check.py`,
 `test_diff.py`) the named test here is a deliberate, self-contained DAMP
 wrapper asserting the same invariant under its contract id — the duplication
-is the deliverable, not accidental drift.
+is the deliverable, not accidental drift. ADR-2 ND-4 (reserved namespace
+segments) carries its own named test alongside the G-* contracts, same
+convention as FP-5 above — it is not itself a G-number, but WP-11's security
+review made a currently-unreserved segment a live URL-routing collision, and
+this suite is the one this repo's per-contract test bar requires that change
+land beside.
 """
 
 from __future__ import annotations
@@ -45,8 +50,10 @@ from indexbot.core.regenerate import regenerate
 from indexbot.core.registry_checks import check_ownership
 from indexbot.core.render import SourcePackage, build_render_plan
 from indexbot.core.validate_entry import (
+    RESERVED_NAMESPACE_SEGMENTS,
     cas_relpath,
     check_name_matches_path,
+    check_namespace_not_reserved,
     check_repository_allowlisted,
     serialize_package_root,
 )
@@ -366,6 +373,26 @@ def test_g09_human_governed_fields_preserved() -> None:
     ):
         assert getattr(target, field) == getattr(current, field), field
     assert set(target.tags) == {"1.0.0"}  # tags regenerated from observations, not carried over
+
+
+# --- ADR-2 ND-4 (reserved namespace segments) -------------------------------
+
+
+def test_nd4_index_segment_is_reserved() -> None:
+    """ADR-2 ND-4, WP-11 security review B-1a: `@ocx-sh/catalog`'s dogfood
+    switchover made `index` a real, deployed top-level URL path
+    (`dist/index/<label>/**`, the per-source wire mirror `mirror.ts`
+    writes) -- a package claiming `p/index/<pkg>.json` would render to
+    `dist/index/<pkg>.html` and collide with it. `index` was not previously
+    in the control-path reservation group; this pins that it is, in both
+    the namespace and package position `check_namespace_not_reserved`
+    checks (a `PackageId` does not otherwise distinguish which position
+    collided)."""
+    assert "index" in RESERVED_NAMESPACE_SEGMENTS
+    with pytest.raises(ValidationError, match="index"):
+        check_namespace_not_reserved(PackageId(namespace="index", package="foo"))
+    with pytest.raises(ValidationError, match="index"):
+        check_namespace_not_reserved(PackageId(namespace="foo", package="index"))
 
 
 # --- G-10 ------------------------------------------------------------------

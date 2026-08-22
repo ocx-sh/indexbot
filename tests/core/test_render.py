@@ -351,9 +351,11 @@ def _case_attestation_descriptor() -> list[SourcePackage]:
     image-index gate stops at each descriptor's `digest`), so these are raw
     publisher bytes and a partial object must be skipped, not crash the
     whole-index render. None of the three names a target anything can run
-    on, so none may reach the catalog's `platforms` matrix; the golden's
-    `catalog.json` shows them absent. Authored from the ADR before any
-    golden was regenerated.
+    on, so none may reach the catalog's `platforms` matrix -- but that
+    matrix is no longer this module's concern (WP-11 moved it to
+    `@ocx-sh/catalog`'s viewmodel emitter, which owns the platform-skip
+    assertion now). This module's own golden only pins that the CAS bytes
+    still copy verbatim regardless of what `manifests[]` shapes they carry.
     """
     tags = {"2.0.0": TagEntry(content=_digest("t"), observed="2026-07-17T00:00:00Z")}
     content_by_digest = {
@@ -427,27 +429,17 @@ def test_render_attestation_descriptor_skips_platformless_and_unknown() -> None:
     )
 
 
-def test_catalog_platforms_skips_platformless_unknown_and_partial_descriptors() -> None:
-    # The golden above pins the whole tree; this pins the one claim the
-    # scenario exists for, readably and independently of the byte compare.
-    plan = build_render_plan(_case_attestation_descriptor())
-    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
-    assert isinstance(catalog_file.content, str)
-    catalog = json.loads(catalog_file.content)
-    assert catalog["packages"][0]["platforms"] == ["linux/amd64", "linux/arm64"]
-
-
 def test_build_render_plan_sorts_packages_by_package_id() -> None:
-    # Passed out of alphabetical order; "kitware/cmake" < "mvdan/shfmt".
+    # Passed out of alphabetical order; "kitware/cmake" < "mvdan/shfmt" —
+    # c/index.json's insertion order follows `ordered`, so this is visible
+    # in its own serialized key order (json.dumps preserves dict insertion
+    # order).
     packages = _case_no_desc() + _case_normal()
     plan = build_render_plan(packages)
-    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
-    assert isinstance(catalog_file.content, str)
-    catalog = json.loads(catalog_file.content)
-    assert [p["name"] for p in catalog["packages"]] == [
-        "ocx.sh/kitware/cmake",
-        "ocx.sh/mvdan/shfmt",
-    ]
+    index_file = next(fw for fw in plan if fw.path == "c/index.json")
+    assert isinstance(index_file.content, str)
+    index = json.loads(index_file.content)
+    assert list(index["packages"].keys()) == ["kitware/cmake", "mvdan/shfmt"]
 
 
 def test_build_render_plan_respects_format_version_param() -> None:
@@ -473,36 +465,6 @@ def test_build_render_plan_package_index_empty_for_no_packages() -> None:
     index_file = next(fw for fw in plan if fw.path == "c/index.json")
     assert isinstance(index_file.content, str)
     assert json.loads(index_file.content) == {"format_version": 1, "packages": {}}
-
-
-def test_catalog_updated_null_for_tagless_package() -> None:
-    # `_latest_activity`'s `default=None` branch: a root that has never
-    # carried a tag yields `updated: null` (and a null catalog `generated`).
-    packages = [
-        _package(
-            namespace="kitware",
-            package="cmake",
-            repository="oci://ghcr.io/ocx-contrib/cmake",
-            created="2026-01-01",
-            tags={},
-            desc=None,
-            content_by_digest={},
-        )
-    ]
-    plan = build_render_plan(packages)
-    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
-    assert isinstance(catalog_file.content, str)
-    catalog = json.loads(catalog_file.content)
-    assert catalog["generated"] is None
-    assert catalog["packages"][0]["created"] == "2026-01-01"
-    assert catalog["packages"][0]["updated"] is None
-
-
-def test_build_render_plan_catalog_generated_null_for_no_packages() -> None:
-    plan = build_render_plan([])
-    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
-    assert isinstance(catalog_file.content, str)
-    assert json.loads(catalog_file.content) == {"generated": None, "packages": []}
 
 
 def test_build_render_plan_reachability_readme_without_logo() -> None:
@@ -533,7 +495,3 @@ def test_build_render_plan_reachability_readme_without_logo() -> None:
     plan = build_render_plan([package])
     dist_paths = {fw.path for fw in plan}
     assert f"p/mvdan/shfmt2/o/sha256/{'h' * 64}.md" in dist_paths
-    catalog_file = next(fw for fw in plan if fw.path == "data/catalog/catalog.json")
-    catalog = json.loads(catalog_file.content)
-    assert catalog["packages"][0]["logoUrl"] is None
-    assert catalog["packages"][0]["readmeUrl"] == f"/p/mvdan/shfmt2/o/sha256/{'h' * 64}.md"

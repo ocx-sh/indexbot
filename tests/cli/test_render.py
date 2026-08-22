@@ -93,7 +93,6 @@ def test_writes_dist_files() -> None:
         "dist/c/index.json",
         "dist/p/kitware/cmake.json",
         f"dist/p/kitware/cmake/o/sha256/{hex_digest}.json",
-        "dist/data/catalog/catalog.json",
     }
     assert files.read_bytes("dist/p/kitware/cmake.json") == files.read_bytes("p/kitware/cmake.json")
 
@@ -169,8 +168,8 @@ def test_cas_subtree_file_without_a_root_is_ignored() -> None:
     result = run(_args(), files=files)
 
     assert result == ExitCode.OK
-    catalog = json.loads(files.read_bytes("dist/data/catalog/catalog.json") or b"{}")
-    assert catalog["packages"] == []
+    index = json.loads(files.read_bytes("dist/c/index.json") or b"{}")
+    assert index["packages"] == {}
 
 
 def test_root_vanishing_between_list_and_read_raises() -> None:
@@ -201,7 +200,5 @@ def test_golden_plan_execution_against_real_filesystem(tmp_path: Path) -> None:
     ).read_bytes()
     assert cas_copy == _index_bytes()
 
-    catalog = json.loads(
-        (tmp_path / "site/.vitepress/dist/data/catalog/catalog.json").read_text(encoding="utf-8")
-    )
-    assert catalog["packages"][0]["name"] == "ocx.sh/kitware/cmake"
+    index = json.loads((tmp_path / "site/.vitepress/dist/c/index.json").read_text(encoding="utf-8"))
+    assert list(index["packages"]) == ["kitware/cmake"]

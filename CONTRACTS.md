@@ -622,17 +622,32 @@ plan's "partial-success semantics" (clean-subset PR + one anomaly issue
 listing every finding + exit 65) — `check_tag_mutations` itself never
 raises `AnomalyError`; the CLI layer maps a non-empty result to that outcome.
 
-## 8. `core/render.py` (WP2-F, reshaped by `plan_site_redesign` WP-bot)
+## 8. `core/render.py` (WP2-F, reshaped by `plan_site_redesign` WP-bot, then
+   by the `@ocx-sh/catalog` extraction, `plan_catalog_extraction` WP-11)
 
 `core/catalog_md.py` — this section's original wrapper-page-Markdown
 module — is **deleted**. `plan_site_redesign` retired bot-generated
 per-package wrapper pages in favor of dynamic routes
 (`site/src/[ns]/[pkg].paths.ts`, globbing the committed `p/*/*.json` tree
 directly at VitePress build time — see `adr_catalog_docs_colocation.md`
-Amendment A1 and `site/README.md`). `core/render.py` now emits exactly one
-output tree; `cas_relpath` (the CAS path-building helper the deleted module
-also used) relocated to `core/validate_entry.py`, alongside
-`cli/reconcile.py`'s existing import of it.
+Amendment A1). `plan_catalog_extraction` WP-11 then retired those dynamic
+routes too — per-package pages are now synthesized by `@ocx-sh/catalog`'s
+own build engine (`cat/src/build/pages.ts`) from the wire tree, not by
+anything under `site/`. `core/render.py` now emits exactly one output tree;
+`cas_relpath` (the CAS path-building helper the deleted module also used)
+relocated to `core/validate_entry.py`, alongside `cli/reconcile.py`'s
+existing import of it.
+
+**WP-11 update**: the catalog-grid view-model (`/data/catalog/catalog.json`,
+previously emitted here — see the retired shape documented below for
+provenance) is **retired from this module**. That projection now lives
+entirely in the `@ocx-sh/catalog` npm package's own view-model emitter
+(`cat/src/viewmodel/`), a byte-gated TS port of this module's former
+`_catalog_platforms`/`_latest_activity`/`_catalog_entry`/
+`_generated_timestamp`/`_catalog_index` functions, which reads the wire
+tree this module still produces (`config.json`, `/p/**`, `c/index.json`)
+and renders the catalog UI directly from it — no bot-emitted view-model
+JSON in between any more. `core/render.py` now emits ONLY the wire tree.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -692,33 +707,14 @@ Returned file list:
   byte-identical today and is still the wrong input: what this digest
   attests is the file that was committed, not what the dataclass would
   produce from it).
-- `data/catalog/catalog.json` — the catalog-grid view-model, frozen shape
-  (`plan_site_redesign`), referencing logo/readme blobs by their CAS URL
-  rather than duplicating blob bytes into `/data/catalog` (ADR-3's explicit
-  divergence from `ocx-sh/ocx`'s website). **Not** wire contract (ADR-1 D2,
-  ADR-3):
-  ```jsonc
-  {
-    "generated": "…Z" | null,   // lexicographic max over every tag's observed
-                                 // + yanked.at value across every package;
-                                 // null if no package has ever carried a tag.
-                                 // No datetime import — a wall-clock value
-                                 // would break `render --check` idempotency.
-    "packages": [{              // sorted by package_id
-      "namespace": "kitware", "package": "cmake", "name": "ocx.sh/kitware/cmake",
-      "status": "active" | "deprecated" | "yanked",
-      "deprecatedMessage": string | null,
-      "supersededBy": string | null,
-      "title": string, "description": string, "keywords": string[],
-      "latestVersion": string | null,
-      "tagCount": number,        // non-yanked tag count
-      "platforms": string[],     // "<os>/<architecture>" union across every
-                                  // non-yanked tag's image index,
-                                  // deduped + sorted
-      "logoUrl": string | null, "readmeUrl": string | null   // pre-resolved CAS paths
-    }]
-  }
-  ```
+
+There is no fourth output any more — no `data/catalog/catalog.json`. That
+shape (frozen by `plan_site_redesign`, referencing logo/readme blobs by CAS
+URL rather than duplicating blob bytes, `generated` = lexicographic max over
+every tag's `observed`/`yanked.at`, `packages[]` sorted by package id) is
+retired from this module per the WP-11 update above; its authoritative
+definition now lives in the `@ocx-sh/catalog` package's own viewmodel
+contract (`cat/`'s own design docs), not here.
 
 Note on `content_by_digest` keying: a CAS digest alone does not carry its
 file extension (`.json` vs `.md` vs `.svg`/`.png`) — the extension is only

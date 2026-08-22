@@ -1,23 +1,22 @@
 """`root.variants` end to end: derived by `core/regenerate.py`, spelled by
 `core/validate_entry.py`'s codec, and never a second source of truth.
 
-The stored field is vestigial — `core/render.py` derives the catalog's
-`variants` from `tags` instead of reading it. It stays parsed and byte-
-preserved on rewrite until ocx stops writing it and the keys are swept; the
-round-trip tests below are the guard on that, since a root whose bytes
-changed would open a pull request per package on its next announce.
+The stored field is vestigial — the `@ocx-sh/catalog` package's view-model
+emitter derives the catalog's `variants` from `tags` instead of reading it
+(see that package's own `viewmodel` tests for that half). It stays parsed
+and byte-preserved on rewrite until ocx stops writing it and the keys are
+swept; the round-trip tests below are the guard on that, since a root whose
+bytes changed would open a pull request per package on its next announce.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, cast
 
 import pytest
 
 from indexbot.core.observe import Observation
 from indexbot.core.regenerate import regenerate
-from indexbot.core.render import SourcePackage, build_render_plan
 from indexbot.core.validate_entry import (
     check_variants_match_tags,
     parse_package_root,
@@ -25,7 +24,7 @@ from indexbot.core.validate_entry import (
 )
 from indexbot.core.version_order import variant_names
 from indexbot.errors import ValidationError
-from indexbot.model import Owner, PackageId, PackageRoot, TagEntry
+from indexbot.model import Owner, PackageRoot, TagEntry
 from tests.fakes import FixedClock
 
 _OWNER = Owner(github="alice", github_id=1)
@@ -223,52 +222,3 @@ def test_the_check_is_the_gate_a_hand_authored_root_cannot_pass() -> None:
     ), "the byte gate passes it"
     with pytest.raises(ValidationError):
         check_variants_match_tags(hand_authored)
-
-
-# --- catalog view-model ----------------------------------------------------
-
-
-def _catalog_row(root: PackageRoot) -> dict[str, object]:
-    source = SourcePackage(
-        package_id=PackageId(namespace="astral-sh", package="python-build-standalone"),
-        root=root,
-        root_raw=serialize_package_root(root),
-        # Every tag's `content` must resolve to a committed CAS object or the
-        # render plan refuses the package outright.
-        content_by_digest={f"{entry.content}.json": _INDEX_RAW for entry in root.tags.values()},
-    )
-    plan = build_render_plan((source,))
-    catalog = next(f for f in plan if f.path == "data/catalog/catalog.json")
-    document = cast("dict[str, Any]", json.loads(catalog.content))
-    packages = cast("list[dict[str, object]]", document["packages"])
-    assert len(packages) == 1
-    return packages[0]
-
-
-def test_the_catalog_grid_row_carries_the_variants_the_tags_imply() -> None:
-    # The grid's `latestVersion` deliberately skips variant-prefixed tags, so
-    # without this key a browsing user cannot tell a package that ships
-    # variants from one that does not.
-    row = _catalog_row(_root({"slim-3.13.1": _entry(_DIGEST_B)}, variants=("slim",)))
-    assert row["variants"] == ["slim"]
-
-
-def test_the_catalog_grid_row_omits_variants_when_there_are_none() -> None:
-    row = _catalog_row(_root({"3.13.1": _entry(_DIGEST_A)}))
-    assert "variants" not in row
-
-
-def test_the_catalog_row_derives_variants_rather_than_reading_the_root() -> None:
-    # The discriminating test. A root whose recorded field disagrees with its
-    # own tags is not a state the bot can produce (`regenerate` re-derives and
-    # `check_variants_match_tags` rejects it), but it is the only way to tell
-    # "parse the tags" from "read the field" — and the field is vestigial.
-    row = _catalog_row(_root({"slim-3.13.1": _entry(_DIGEST_B)}, variants=("musl",)))
-    assert row["variants"] == ["slim"]
-
-
-def test_the_catalog_row_derives_variants_for_a_root_that_stores_none() -> None:
-    # Once ocx stops writing the field (stage 2) every announced root looks
-    # like this. Before the derivation it rendered no `variants` key at all.
-    row = _catalog_row(_root({"3.13.1": _entry(_DIGEST_A), "slim-3.13.1": _entry(_DIGEST_B)}))
-    assert row["variants"] == ["slim"]

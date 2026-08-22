@@ -113,6 +113,7 @@ RESERVED_NAMESPACE_SEGMENTS: Final[frozenset[str]] = frozenset(
         "api",
         "static",
         "data",
+        "index",
         # Brand — OCX's own project/org identities.
         "ocx",
         "ocx-sh",
