@@ -121,7 +121,14 @@ tasks:
       - |
         wheel=$(ls -1 dist/*.whl | tail -1)
         echo "== inspecting $wheel =="
-        if ! unzip -l "$wheel" | grep -q 'ocx_indexbot/py.typed'; then
+        # The listing is captured first, deliberately: `unzip -l … | grep -q`
+        # under `pipefail` fails BECAUSE the search succeeded — `grep -q` exits
+        # on the first match, closing the pipe, and `unzip` dies of SIGPIPE
+        # mid-write. It is a race on how fast the writer finishes, so it passed
+        # locally and on one CI run while failing another, reporting a missing
+        # py.typed that was present all along.
+        listing=$(unzip -l "$wheel")
+        if ! printf '%s\n' "$listing" | grep -q 'ocx_indexbot/py.typed'; then
           echo "py.typed is MISSING from $wheel" >&2
           exit 1
         fi
