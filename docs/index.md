@@ -36,7 +36,7 @@ reviewed pull request.
 | `seed-import` | Bulk-import package roots from mirror metadata |
 | `classify-pr` | Route a pull request to the machine lane or the human lane |
 | `governance-check` | The privileged gate: ownership, review requirements, auto-merge arming |
-| `workflows check` | Assert the workflow security invariants over an index repo's `.github/workflows/` |
+| `workflows-check` | Assert the workflow security invariants over an index repo's `.github/workflows/` |
 
 ## Exit codes
 

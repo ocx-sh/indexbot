@@ -88,3 +88,5 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Reference:
+      - Workflow invariants: reference/workflow-invariants.md

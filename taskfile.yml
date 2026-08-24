@@ -161,6 +161,14 @@ tasks:
     cmds:
       - uvx zizmor --min-severity medium .github/
 
+  workflows:check:
+    desc: >-
+      Dogfood — run this package's own workflow-invariant checker over this
+      repo's workflows. An index repo runs the same command in its CI.
+    deps: [sync]
+    cmds:
+      - uv run indexbot workflows-check --owner ocx-sh
+
   lint:links:
     desc: Check for broken links (network; may be flaky offline)
     cmds:

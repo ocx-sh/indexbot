@@ -100,6 +100,8 @@ jobs:
         run: task lint:actions
       - name: Security-lint GitHub Actions workflows
         run: task lint:workflows
+      - name: Workflow invariants (dogfood)
+        run: task workflows:check
       - name: Check for broken links
         run: task lint:links
       - name: Scan for committed secrets

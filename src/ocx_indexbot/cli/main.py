@@ -35,6 +35,7 @@ from ocx_indexbot.cli import classify_pr as _classify_pr_cli
 from ocx_indexbot.cli import governance_check as _governance_check_cli
 from ocx_indexbot.cli import reconcile as _reconcile_cli
 from ocx_indexbot.cli import validate as _validate_cli
+from ocx_indexbot.cli import workflows_check as _workflows_check_cli
 from ocx_indexbot.cli._common import write_github_step_summary
 from ocx_indexbot.cli._wiring import DISPATCH as _PRODUCTION_DISPATCH
 from ocx_indexbot.errors import IndexBotError
@@ -104,6 +105,7 @@ _ARG_POPULATORS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "seed-import": _add_seed_import_arguments,
     "classify-pr": _classify_pr_cli.add_arguments,
     "governance-check": _governance_check_cli.add_arguments,
+    "workflows-check": _workflows_check_cli.add_arguments,
 }
 """Subcommand name -> its subparser's CLI-surface populator. A name present
 in `_DISPATCH` but absent here (e.g. a test's `monkeypatch`-injected handler)

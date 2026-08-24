@@ -8,7 +8,7 @@ Doubles come from `tests/fakes`; no sockets (B4 owns socket flows).
 
 PARKED BY THE EXTRACTION (2026-08-24): `test_threat_pr_target_no_head_checkout`
 read the index repository's real `governance.yml`. It still runs in
-`ocx-sh/index`; WP-3 re-homes it into `indexbot workflows check`.
+`ocx-sh/index`; WP-3 re-homes it into `indexbot workflows-check`.
 """
 
 from __future__ import annotations

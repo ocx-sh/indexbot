@@ -49,6 +49,7 @@ from ocx_indexbot.cli import (
     render,
     seed_import,
     validate,
+    workflows_check,
 )
 from ocx_indexbot.core.policy import INDEX_POLICY_PATH, parse_index_policy
 from ocx_indexbot.errors import ValidationError
@@ -261,6 +262,10 @@ def _run_validate(args: argparse.Namespace) -> ExitCode:
     )
 
 
+def _run_workflows_check(args: argparse.Namespace) -> ExitCode:
+    return workflows_check.run(args, files=LocalFiles(root=_repo_root()))
+
+
 def _run_render(args: argparse.Namespace) -> ExitCode:
     return render.run(args, files=LocalFiles(root=_repo_root()))
 
@@ -292,6 +297,7 @@ DISPATCH: dict[str, Callable[[argparse.Namespace], ExitCode]] = {
     "seed-import": _run_seed_import,
     "classify-pr": _run_classify_pr,
     "governance-check": _run_governance_check,
+    "workflows-check": _run_workflows_check,
 }
 """Production subcommand name -> handler, matching `cli/main.py`'s
 `_DISPATCH: dict[str, Callable[[argparse.Namespace], ExitCode]]` shape

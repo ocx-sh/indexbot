@@ -25,7 +25,7 @@ land beside.
 PARKED BY THE EXTRACTION (2026-08-24) — assertions that read the *index
 repository's* committed files, which no longer sit beside this package. They
 are not deleted: they still run in `ocx-sh/index`, and the extraction plan's
-WP-3 re-homes each one, either into `indexbot workflows check` (asserted here
+WP-3 re-homes each one, either into `indexbot workflows-check` (asserted here
 against fixture workflow trees) or into that repo's own `task policy:check`.
 Until WP-3 lands, this file is NOT the complete audit index:
 
@@ -40,7 +40,7 @@ Until WP-3 lands, this file is NOT the complete audit index:
   `test_g16_privileged_unprivileged_split`,
   `test_g17_no_announce_pat_surface`, and the `announce.yml`-absence half of
   `test_g08_no_repository_dispatch_surface` — hand-parsed the real workflow
-  tree. These become `indexbot workflows check`, which infers the privileged
+  tree. These become `indexbot workflows-check`, which infers the privileged
   job from its trigger rather than naming it, so it holds for any index repo.
 """
 

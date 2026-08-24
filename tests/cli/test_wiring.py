@@ -7,12 +7,14 @@ this file exercises the real production dispatch table end to end).
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+from ocx_indexbot.adapters.local_files import LocalFiles
 from ocx_indexbot.adapters.registry_v2 import GHCR_HOST, OCX_SH_HOST, OCX_SH_REALM
 from ocx_indexbot.cli import _wiring
 from ocx_indexbot.cli import main as main_module
@@ -94,7 +96,7 @@ def test_github_api_missing_token_raises(monkeypatch: pytest.MonkeyPatch) -> Non
 # --- DISPATCH table shape -------------------------------------------------------
 
 
-def test_dispatch_registers_exactly_the_seven_subcommands() -> None:
+def test_dispatch_registers_exactly_the_eight_subcommands() -> None:
     assert set(_wiring.DISPATCH) == {
         "announce",
         "reconcile",
@@ -103,7 +105,30 @@ def test_dispatch_registers_exactly_the_seven_subcommands() -> None:
         "seed-import",
         "classify-pr",
         "governance-check",
+        "workflows-check",
     }
+
+
+def test_workflows_check_is_wired_to_a_repo_root_file_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The shipped entrypoint really reaches `cli/workflows_check.run` with a
+    `LocalFiles` rooted at the checkout — coverage of the module alone cannot
+    tell a wired subcommand from a dead one."""
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    seen: dict[str, object] = {}
+
+    def _spy(args: argparse.Namespace, *, files: object) -> ExitCode:
+        seen["args"] = args
+        seen["files"] = files
+        return ExitCode.OK
+
+    monkeypatch.setattr(_wiring.workflows_check, "run", _spy)
+    namespace = argparse.Namespace(dir=".github/workflows", owner=None)
+
+    assert _wiring.DISPATCH["workflows-check"](namespace) == ExitCode.OK
+    assert seen["args"] is namespace
+    assert isinstance(seen["files"], LocalFiles)
 
 
 def test_main_dispatch_is_seeded_from_wiring_dispatch() -> None:
