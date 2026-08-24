@@ -1,0 +1,31 @@
+{
+  "name": "ocx.sh/regclient/regsync",
+  "repository": "oci://ghcr.io/ocx-contrib/regclient-regsync",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-02-01",
+  "desc": {
+    "digest": "sha256:mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+    "title": "regsync",
+    "description": "Utility to sync images between registries.",
+    "keywords": [
+      "oci",
+      "registry",
+      "sync"
+    ],
+    "readme": "sha256:qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+    "logo": "sha256:wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+  },
+  "tags": {
+    "0.7.0": {
+      "content": "sha256:nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "observed": "2026-07-17T00:00:00Z"
+    }
+  }
+}

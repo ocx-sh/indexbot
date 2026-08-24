@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "packages": {
+    "sigstore/cosign": "sha256:e640e0446b1c353394aa1c5454caea1936b6eea510864deeae06e1e564f91897"
+  }
+}

@@ -74,8 +74,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 # PGH denies bare `# noqa` / `# type: ignore` (PY-GATE-08) — a suppression
-# always names its code.
-select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF", "S", "ANN", "PGH", "PT"]
+# always names its code. PT011 (not the whole PT family) is what PY-TEST-05
+# asks for: the rest of PT argues with deliberate patterns in this suite, e.g.
+# the multi-statement `raises` block in tests/test_validate_entry.py that
+# documents an unreachable call.
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF", "S", "ANN", "PGH", "PT011"]
 
 [tool.ruff.lint.flake8-pytest-style]
 # PT011: a bare `pytest.raises(IndexBotError)` passes on any error in the

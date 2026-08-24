@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "packages": {
+    "regclient/regsync": "sha256:96025ebbbb343bdf97b2c95684936d32e133eec44e7f9ba21df21de8fccd6bcc"
+  }
+}
