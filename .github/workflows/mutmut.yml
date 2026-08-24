@@ -12,6 +12,7 @@ jobs:
     # Cron is upstream-only (see audit.yml).
     if: github.repository_owner == 'ocx-sh'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Baseline signal only (ADR-4 BD-3) — surviving mutants are triaged by
     # hand, never gated. Deliberately advisory, and therefore deliberately NOT
     # in the required-checks list (PY-GATE-02: a required check that cannot go

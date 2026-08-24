@@ -56,6 +56,7 @@ dev = [
     "pip-audit>=2.7",
     "pyright>=1.1",
     "pytest>=8.3",
+    "pytest-timeout>=2.3",
     "pytest-cov>=5.0",
     "respx>=0.21",
     "ruff>=0.7",
@@ -74,7 +75,12 @@ target-version = "py312"
 [tool.ruff.lint]
 # PGH denies bare `# noqa` / `# type: ignore` (PY-GATE-08) — a suppression
 # always names its code.
-select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF", "S", "ANN", "PGH"]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF", "S", "ANN", "PGH", "PT"]
+
+[tool.ruff.lint.flake8-pytest-style]
+# PT011: a bare `pytest.raises(IndexBotError)` passes on any error in the
+# hierarchy, including one raised for an unrelated reason.
+raises-extend-require-match-for = ["ocx_indexbot.errors.IndexBotError"]
 
 [tool.ruff.lint.per-file-ignores]
 # Asserts are the point of a test suite (S101); fixtures like FakeGitHub's
@@ -90,7 +96,10 @@ pythonVersion = "3.12"
 typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
-addopts = "--cov=ocx_indexbot --cov-branch --cov-report=term-missing"
+# --strict-markers: an unregistered marker is a typo that silently applies
+# nothing (PY-TEST-13). --timeout: a session-level bound so a hung test fails
+# instead of burning the job's wall clock (PY-TEST-06).
+addopts = "--cov=ocx_indexbot --cov-branch --cov-report=term-missing --strict-markers --timeout=60 --timeout-method=signal"
 testpaths = ["tests"]
 
 [tool.coverage.run]

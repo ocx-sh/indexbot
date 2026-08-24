@@ -27,6 +27,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # `actions/configure-pages` with `enablement: true` needs `pages: write`
     # on the build job too (not only the deploy job) so the very first run
     # can turn Pages on.
@@ -59,6 +60,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       pages: write
       id-token: write

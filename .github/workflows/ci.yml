@@ -16,6 +16,9 @@ on:
 
 permissions: {}  # default-deny; jobs elevate individually
 
+env:
+  PYTHONUNBUFFERED: '1'
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -25,6 +28,7 @@ jobs:
   # floor, so the floor is a version CI actually runs (PY-PKG-01).
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -35,10 +39,10 @@ jobs:
       - name: Verify
         run: task verify
       - name: Coverage XML
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         run: task cov:xml
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -49,6 +53,7 @@ jobs:
   unit-matrix:
     needs: verify
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -69,6 +74,7 @@ jobs:
   # --strict consumer silently see this package as untyped (PY-PKG-08).
   packaging:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -81,6 +87,7 @@ jobs:
 
   repo-checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -102,6 +109,7 @@ jobs:
   # runs on its own nightly schedule as well — see audit.yml.
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
