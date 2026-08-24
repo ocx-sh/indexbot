@@ -1,0 +1,10 @@
+#:schema https://grimoire.rs/schemas/grimoire-config.schema.json
+[options]
+clients = ["claude"]
+
+[bundles]
+python-essentials = "ghcr.io/ocx-sh/lore/python-essentials:latest"
+
+[skills]
+
+[rules]

@@ -1,0 +1,39 @@
+name: mutmut
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # weekly, Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  mutmut:
+    # Cron is upstream-only (see audit.yml).
+    if: github.repository_owner == 'ocx-sh'
+    runs-on: ubuntu-latest
+    # Baseline signal only (ADR-4 BD-3) — surviving mutants are triaged by
+    # hand, never gated. Deliberately advisory, and therefore deliberately NOT
+    # in the required-checks list (PY-GATE-02: a required check that cannot go
+    # red occupies the slot and reports nothing).
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e  # v1
+      - name: Run mutmut
+        continue-on-error: true
+        run: task mutation
+      - name: Render mutmut HTML report
+        if: always()
+        run: task mutation:html
+      - name: Upload mutmut report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mutmut-report
+          path: html
+          if-no-files-found: warn

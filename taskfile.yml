@@ -1,0 +1,216 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# The single contributor-and-CI command surface (PY-GATE-01). Every gate CI
+# runs is a task here, and CI runs the task — never a bare tool invocation,
+# which would resolve through $PATH instead of the project pin (PY-GATE-04).
+
+version: '3'
+
+tasks:
+  default:
+    desc: Fast feedback loop — the full gate
+    cmds:
+      - task: verify
+
+  verify:
+    desc: Full quality gate (format, lint, types, security, tests + 100% branch coverage, lockfile)
+    cmds:
+      - task: format:check
+      - task: lint
+      - task: types
+      - task: security
+      - task: test
+      - task: lock:check
+
+  sync:
+    desc: uv sync (frozen when uv.lock is committed, else a regular sync)
+    internal: true
+    set: [e, u, pipefail]
+    cmds:
+      - |
+        if [ -f uv.lock ]; then
+          uv sync --frozen
+        else
+          uv sync
+        fi
+
+  format:
+    desc: Apply formatting
+    deps: [sync]
+    cmds:
+      - uv run ruff format .
+
+  format:check:
+    desc: Check formatting without applying
+    deps: [sync]
+    cmds:
+      - uv run ruff format --check .
+
+  lint:
+    desc: Lint source and tests
+    deps: [sync]
+    cmds:
+      - uv run ruff check .
+
+  types:
+    desc: Type-check (pyright, strict on src)
+    deps: [sync]
+    cmds:
+      - uv run pyright
+
+  security:
+    desc: bandit static security scan over src
+    deps: [sync]
+    cmds:
+      - uv run bandit -c pyproject.toml -r src
+
+  test:
+    desc: pytest — enforces the 100% branch-coverage gate from pyproject.toml
+    deps: [sync]
+    cmds:
+      - uv run pytest {{.CLI_ARGS}}
+
+  cov:xml:
+    desc: Emit coverage.xml for CI upload
+    deps: [sync]
+    cmds:
+      - uv run coverage xml
+
+  cov:html:
+    desc: Generate an HTML coverage report at htmlcov/ for local browsing
+    deps: [sync]
+    cmds:
+      - uv run coverage html
+
+  lock:check:
+    desc: uv.lock is in sync with pyproject.toml (PY-PKG-05)
+    cmds:
+      - uv lock --check
+
+  audit:
+    desc: pip-audit against the resolved dependency set
+    deps: [sync]
+    cmds:
+      - uv run pip-audit
+
+  mutation:
+    desc: mutmut baseline run (advisory — surviving mutants are triaged, not gated)
+    deps: [sync]
+    cmds:
+      - uv run mutmut run
+
+  mutation:html:
+    desc: Render the mutmut HTML report into html/
+    deps: [sync]
+    cmds:
+      - uv run mutmut html
+
+  build:
+    desc: Build wheel + sdist
+    cmds:
+      - uv build
+
+  wheel:check:
+    desc: >-
+      The built wheel actually ships py.typed (PY-PKG-08) — present in src/ and
+      absent from the archive means every downstream --strict consumer silently
+      sees this package as untyped, with no error anywhere.
+    set: [e, u, pipefail]
+    deps: [build]
+    cmds:
+      - |
+        wheel=$(ls -1 dist/*.whl | tail -1)
+        echo "== inspecting $wheel =="
+        if ! unzip -l "$wheel" | grep -q 'ocx_indexbot/py.typed'; then
+          echo "py.typed is MISSING from $wheel" >&2
+          exit 1
+        fi
+        echo "wheel:check: OK"
+
+  docs:serve:
+    desc: Live-reload MkDocs server at http://127.0.0.1:8000
+    cmds:
+      - uv run --group docs mkdocs serve -a 127.0.0.1:8000
+
+  docs:build:
+    desc: Build the static site into site/ (strict mode)
+    cmds:
+      - uv run --group docs mkdocs build --strict
+    sources:
+      - 'docs/**/*'
+      - 'src/ocx_indexbot/**/*.py'
+      - 'mkdocs.yml'
+    generates:
+      - 'site/**/*'
+
+  docs:clean:
+    desc: Remove the generated site/ directory
+    cmds:
+      - rm -rf site
+
+  lint:actions:
+    desc: Lint GitHub Actions workflows
+    cmds:
+      - actionlint
+
+  lint:workflows:
+    desc: >-
+      zizmor security lint over .github/ — the binding check for PY-GATE-05
+      (no expression interpolation inside a `run:` block; a grep provably
+      misses the multi-line block form).
+    cmds:
+      - uvx zizmor --min-severity medium .github/
+
+  lint:links:
+    desc: Check for broken links (network; may be flaky offline)
+    cmds:
+      - lychee --cache --max-cache-age 1d .
+
+  secrets:
+    desc: Scan for committed secrets
+    cmds:
+      - gitleaks detect --source . --redact
+
+  changelog:
+    desc: Update CHANGELOG.md from git history
+    cmds:
+      - git-cliff --output CHANGELOG.md
+
+  changelog:preview:
+    desc: Preview unreleased changes
+    cmds:
+      - git-cliff --unreleased
+
+  # Full release preparation: compute the next version, bump pyproject, update
+  # CHANGELOG, run verify. The human reviews, commits and tags afterwards.
+  #
+  #   task release:prepare                          # interactive: auto|patch|minor|major
+  #   task release:prepare BUMP=minor               # skip the menu
+  #   task release:prepare BUMP=auto VERSION=1.4.0  # pin an exact version
+  release:prepare:
+    desc: 'Prepare a release (interactive, or BUMP=<level> / VERSION=x.y.z)'
+    requires:
+      vars:
+        - name: BUMP
+          enum: [auto, patch, minor, major]
+    vars:
+      NEXT_VERSION:
+        sh: |
+          if [ -n "{{.VERSION}}" ]; then
+            printf 'v%s' "{{.VERSION | default "" | trimPrefix "v"}}"
+          elif [ "{{.BUMP}}" = "auto" ]; then
+            git-cliff --bumped-version
+          else
+            git-cliff --bumped-version --bump "{{.BUMP}}"
+          fi
+    cmds:
+      - echo "Next version:{{.NEXT_VERSION}}"
+      - uv version "{{.NEXT_VERSION | trimPrefix "v"}}"
+      - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
+      - task verify
+      - |
+        echo ""
+        echo "Release prepared ({{.NEXT_VERSION}}). Review changes, then:"
+        echo "  git add -A && git commit -m 'chore(release): {{.NEXT_VERSION}}'"
+        echo "  git tag {{.NEXT_VERSION}}"
+        echo "  git push --atomic origin main {{.NEXT_VERSION}}"

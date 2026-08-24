@@ -1,0 +1,113 @@
+name: CI
+
+# Every job provisions its toolchain with `ocx-sh/setup-ocx`, which ACTIVATES
+# the project when ocx.toml is present — the tools ocx.lock pins are on PATH
+# for every step that follows. So steps invoke `task <name>` directly, never a
+# bare `ruff`/`pytest`/`pyright` (PY-GATE-04: a bare tool name resolves through
+# $PATH instead of the project pin). Locally, `.envrc` (direnv) activates the
+# same project the same way, so CI and a developer's shell run byte-identical
+# commands.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}  # default-deny; jobs elevate individually
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # THE gate. `.python-version` pins this leg to the declared `requires-python`
+  # floor, so the floor is a version CI actually runs (PY-PKG-01).
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e  # v1
+      - name: Verify
+        run: task verify
+      - name: Coverage XML
+        if: ${{ !cancelled() }}
+        run: task cov:xml
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  # Every version in `[project] classifiers` is a leg here (PY-PKG-02).
+  unit-matrix:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13', '3.14']
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e  # v1
+      - name: Test
+        run: task test
+
+  # A wheel that ships annotations without `py.typed` makes every downstream
+  # --strict consumer silently see this package as untyped (PY-PKG-08).
+  packaging:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e  # v1
+      - name: Wheel ships py.typed
+        run: task wheel:check
+
+  repo-checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e  # v1
+      - name: Lint GitHub Actions workflows
+        run: task lint:actions
+      - name: Security-lint GitHub Actions workflows
+        run: task lint:workflows
+      - name: Check for broken links
+        run: task lint:links
+      - name: Scan for committed secrets
+        run: task secrets
+
+  # Dependency vulnerabilities move even when this repo does not, so the audit
+  # runs on its own nightly schedule as well — see audit.yml.
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e  # v1
+      - name: pip-audit
+        run: task audit

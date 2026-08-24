@@ -1,0 +1,26 @@
+name: Audit
+
+# pip-audit's vulnerability database moves even when this repo does not, so the
+# audit runs nightly as well as on every pull request (ci.yml's `audit` job).
+on:
+  schedule:
+    - cron: '0 4 * * *'  # nightly, 04:00 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  audit:
+    # Cron is upstream-only: a fork inherits every schedule and would run it
+    # off its own stale YAML.
+    if: github.repository_owner == 'ocx-sh'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e  # v1
+      - name: pip-audit
+        run: task audit
