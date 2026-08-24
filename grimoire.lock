@@ -1,0 +1,37 @@
+skill = []
+agent = []
+
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:5616b3125e7a94ea00d8c4492811ec6d7492682e798e0c08b1b83b53d81e6e2e"
+generated_by = "grim 0.12.1"
+generated_at = "2026-08-24T17:53:57Z"
+
+[[rule]]
+name = "python-packaging"
+pinned = "ghcr.io/ocx-sh/lore/python-packaging@sha256:83b48110ecdfdc874b6714e7c7ba10deb199f4bf0cdc3169631cb884d842c802"
+bundle = "ghcr.io/ocx-sh/lore/python-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "python-quality"
+pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:7ad282eaddce2add9f9fd7ef17dc6cbd547908a3d7f5cb1be47f751b8a360797"
+bundle = "ghcr.io/ocx-sh/lore/python-essentials"
+bundle_tag = "latest"
+
+[[bundle]]
+name = "python-essentials"
+repo = "ghcr.io/ocx-sh/lore/python-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:e187285b34e5e6f10c62b6ddc6fd8daaa7b17858d3a1f4598d72cbd92f8b805e"
+
+[[bundle.member]]
+kind = "rule"
+name = "python-packaging"
+id = "ghcr.io/ocx-sh/lore/python-packaging:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "python-quality"
+id = "ghcr.io/ocx-sh/lore/python-quality:latest"
