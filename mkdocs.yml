@@ -88,5 +88,13 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Guide:
+      - Quickstart: guide/quickstart.md
   - Reference:
+      - CLI: reference/cli.md
+      - Deployment policy: reference/policy.md
       - Workflow invariants: reference/workflow-invariants.md
+      - Module contracts: reference/contracts.md
+  - Contributing:
+      - Releasing: contributing/releasing.md
+  - Changelog: changelog.md

@@ -9,11 +9,16 @@ one: it validates announced roots against registry truth, regenerates derived
 fields, enforces the governance contracts that let untrusted fork pull requests
 announce safely, and renders the wire tree a static host serves.
 
-!!! warning "Scaffold"
+Start with the [Quickstart](guide/quickstart.md) — it takes an index
+repository from empty to serving. The [CLI reference](reference/cli.md) has
+every subcommand's argv surface and the pinned exit codes.
 
-    The toolchain, quality gate and release pipeline are wired; the subcommands
-    land with the extraction move from
-    [ocx-sh/index](https://github.com/ocx-sh/index).
+!!! note "Pre-release"
+
+    Version 0.1.0 is the extraction of this bot out of
+    [ocx-sh/index](https://github.com/ocx-sh/index), which remains the
+    reference deployment and consumer #1. Breaking changes ship without
+    migration shims until 1.0 — pin an exact version in CI.
 
 ## Install
 
@@ -26,6 +31,8 @@ workflow jobs, so its version belongs in a committed lockfile where a bump is a
 reviewed pull request.
 
 ## Subcommands
+
+Full detail in the [CLI reference](reference/cli.md).
 
 | Subcommand | Purpose |
 |---|---|

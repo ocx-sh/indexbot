@@ -15,8 +15,11 @@ format with many copies, and every per-deployment input — the registry-host
 allowlist, the owners, the namespace — is committed data in the index
 repository, never a constant in this package.
 
-> **Status: scaffold.** The toolchain, quality gate and release pipeline are
-> wired; the subcommands land with the extraction move from `ocx-sh/index`.
+> **Pre-release.** 0.1.0 is the extraction of this bot out of `ocx-sh/index`,
+> which remains the reference deployment. Breaking changes ship without
+> migration shims until 1.0 — pin an exact version in CI.
+>
+> Docs: <https://ocx-sh.github.io/indexbot/>
 
 ## Install
 
