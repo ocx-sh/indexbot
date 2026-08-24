@@ -10,7 +10,15 @@ announce lane depends on. It is a CLI, not a library — the module surface is
 package-private and may move between releases.
 
 Wire-format authority lives in [ocx](https://github.com/ocx-sh/ocx); this
-package implements the write side of it.
+package implements the write side of it. Architecture and security posture:
+ADR-4 (`adr_index_bot_and_workflow_security.md`); the wire format `core/`
+computes against: ADR-1 (`adr_locked_observation_index_format.md`). Both live
+in the reference deployment, [ocx-sh/index](https://github.com/ocx-sh/index),
+under `.claude/artifacts/`.
+
+`__version__` resolves from installed distribution metadata rather than a
+literal, so `task release:prepare`'s `uv version` bump has one file to touch
+(PY-PKG-04).
 """
 
 from importlib.metadata import PackageNotFoundError

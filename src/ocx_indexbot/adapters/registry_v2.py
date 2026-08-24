@@ -1,0 +1,443 @@
+"""OCI Distribution (Registry v2) `RegistryPort` implementation
+(CONTRACTS.md §9).
+
+One client class, configured per host: `ghcr.io` and `ocx.sh` speak the same
+`/v2/` API with the same anonymous-pull token dance, and differ only in which
+URL issues the token (GHCR: `https://ghcr.io/token`; `ocx.sh` is an
+Artifactory-backed registry whose `WWW-Authenticate` realm sits under
+`/artifactory/...`). `RoutedRegistry` below picks the configured client for a
+`repository` URI's host, so `core/` still sees a single `RegistryPort`.
+
+The only place `httpx` is imported for registry reads (ADR-4 BD-1, functional
+core / imperative shell). Owns three things `core/` never sees the mechanics
+of:
+
+- The anonymous bearer-token dance: an unauthenticated request gets a `401`,
+  a pull token is fetched from `GET <realm>?service=<host>&scope=
+  repository:<path>:pull` (no credentials required for a publicly readable
+  repository), and the original request is retried once with
+  `Authorization: Bearer <token>`. The token is cached per repository path
+  for this instance's lifetime and refreshed (not counted against
+  `BackoffPolicy.max_attempts`) on exactly one fresh `401` — a second
+  consecutive `401` for the same logical request is a persistent auth
+  failure, raised as `TransientError`.
+- A `403` from either the token endpoint or a `/v2/` API call — the `DENIED`
+  response for a repository that is missing or private, body present or not
+  — is a permanent condition, never a bug and never worth retrying: raised
+  as `ValidationError`, distinct from the `401` dance above (which *can*
+  succeed once a token is attached) and from `TransientError` (which implies
+  retrying later might help).
+- `tags/list` pagination via the RFC 8288 `Link` response header, bounded by
+  `max_pages` so a misbehaving/malicious next-link chain can't loop forever.
+- The retry loop — the imperative-shell half of `core/backoff.py`'s pure
+  timing decisions (CONTRACTS.md §7): this module calls `time.sleep`
+  directly, `core/backoff.py` only computes *how long*. It spends one
+  `BackoffPolicy` budget on two failure kinds: retryable *statuses*
+  (429/5xx, via `is_retryable_status`) and transport *failures* (timeout,
+  connection reset, protocol error), which are exceptions and so never reach
+  a status test at all. Both exhaust into `TransientError`; a bare `httpx`
+  exception must never escape this module, because `cli/main.py` only maps
+  `IndexBotError` onto an exit code and a step summary.
+
+`repository` arguments are always the full `oci://<host>/<path>` URI stored
+in `PackageRoot.repository` (see `core/validate_entry.py`'s
+`check_repository_allowlisted`/`check_repository_shape`, which already ran
+against this same string before any `RegistryPort` call reaches here per BD-1's
+SSRF ordering) — `RegistryV2` only ever parses out the `<path>` portion; the
+host is re-read exactly once, by `RoutedRegistry`, to choose a client.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import random
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Final, cast
+from urllib.parse import urlsplit
+
+import httpx
+
+from ocx_indexbot.core.backoff import BackoffPolicy, delay_seconds, is_retryable_status
+from ocx_indexbot.errors import AnomalyError, TransientError, ValidationError
+from ocx_indexbot.model import ManifestFetch
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from ocx_indexbot.model import OwnershipProbeResult
+
+GHCR_HOST: Final[str] = "ghcr.io"
+"""GitHub Container Registry — the host every third-party mirror lives on.
+
+`cli/_wiring.py` builds its servable-host set from this and `OCX_SH_HOST`: a
+deployment policy (`.github/index-policy.json`) that allowlists a host no
+adapter implements is refused at wiring time rather than producing roots that
+validate and then cannot be fetched. Keep these the single source of the
+literals — `base_url` and the token endpoint's `service` parameter both
+derive from them."""
+
+OCX_SH_HOST: Final[str] = "ocx.sh"
+"""The index operator's own registry, home of the first-party `ocx/cli`,
+`ocx/mirror` and `regclient/regsync` repositories. Anonymously readable, same
+Registry v2 API as GHCR."""
+
+OCX_SH_REALM: Final[str] = "https://ocx.sh/artifactory/api/docker/sh-ocx-oci-prod/v2/token"
+"""`ocx.sh`'s pull-token endpoint — the `realm` its `/v2/` `401` advertises
+(`WWW-Authenticate: Bearer realm="…",service="ocx.sh"`), which is NOT
+`https://ocx.sh/token` (that path 404s: the registry is Artifactory-backed
+and issues tokens under its own repository path).
+
+Pinned as a constant rather than followed from the response header on the
+fly: a `realm` is a server-supplied URL, and this adapter already refuses to
+follow a server-supplied cross-host pagination link (`_parse_next_link`) for
+the same SSRF reason. If JFrog ever moves it, the token fetch 404s loudly at
+`raise_for_status` — a visible break, not a silent widening of where this bot
+sends requests."""
+
+_DEFAULT_TIMEOUT_SECONDS = 30.0
+"""Per-request deadline handed to every `httpx` call.
+
+Raised from 10s after a GHCR manifest GET stalled past it and failed a
+REQUIRED announce check. A manifest is a few KiB, so a request that has not
+answered inside 30s is a stall, not a slow transfer — and `_send` now spends
+its `BackoffPolicy` budget on the retry rather than surfacing the timeout,
+so the generous per-attempt deadline costs nothing on the happy path.
+"""
+
+_DEFAULT_MAX_PAGES = 10_000
+_TAGS_PAGE_SIZE = 100
+
+_DESC_TAG = "__ocx.desc"
+
+_OWNERSHIP_ANNOTATION_KEY = "sh.ocx.name"
+"""Manifest-level annotation `probe_ownership` reads for the embedded
+canonical identifier (e.g. `ocx.sh/kitware/cmake`).
+
+The identifier-embedding convention itself is **unconfirmed** against
+`ocx-mirror`'s actual publish behavior (ADR-4 Risk 2; `ports.py`'s
+`probe_ownership` docstring calls this "a pluggable seam, not a fixed
+annotation-key lookup"). Reusing the `__ocx.desc` manifest (already fetched
+by `core/desc.py` for title/description/keywords) as the identifier's home is
+this stage's best-effort default, not a locked contract — confirm against
+real `ocx-mirror` output before Phase 3.
+"""
+
+_MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+    )
+)
+"""Accept both OCI and legacy Docker media types for a manifest or an image
+index — GHCR has historically served the "wrong" one of the pair for a given
+request (`research_ghcr_constraints.md` §4), so a strict single-type Accept
+header is a known footgun here, not defensive over-engineering."""
+
+
+def _repo_path(repository: str) -> str:
+    """`oci://ghcr.io/<path>` -> `<path>`, mirroring
+    `core/validate_entry.py`'s `check_repository_shape` parse exactly."""
+    return urlsplit(repository).path.lstrip("/")
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Integer-seconds `Retry-After` only.
+
+    # ponytail: HTTP-date form (RFC 9110 §10.2.3) unsupported — GHCR's 429s
+    observed in practice send seconds; add date parsing if that changes.
+    """
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _parse_next_link(link_header: str | None, *, base_url: str) -> str | None:
+    """`rel="next"` target URL from an RFC 8288 `Link` header, or `None`.
+
+    An absolute target's host must equal `base_url`'s own host. `list_tags`
+    reattaches this instance's cached bearer pull-token to whatever URL this
+    function returns (`_send`, keyed only by `repo_path`) — a server-supplied
+    `Link` header pointing at a different host is not a condition this
+    adapter has a defined recovery for (SSRF-via-pagination-link), so it is
+    rejected the same way a malformed-JSON body is (CONTRACTS.md §9): a
+    plain `ValueError`, propagating as an unhandled bug, never silently
+    followed or silently truncated.
+    """
+    if not link_header:
+        return None
+    allowed_host = urlsplit(base_url).netloc
+    for part in link_header.split(","):
+        segments = part.split(";")
+        target = segments[0].strip()
+        if not (target.startswith("<") and target.endswith(">")):
+            continue
+        if any(segment.strip() == 'rel="next"' for segment in segments[1:]):
+            raw = target[1:-1]
+            if not raw.startswith(("http://", "https://")):
+                return f"{base_url}{raw}"
+            next_host = urlsplit(raw).netloc
+            if next_host != allowed_host:
+                raise ValueError(
+                    f"next-link host {next_host!r} does not match {allowed_host!r} "
+                    "(rejecting cross-host pagination redirect)"
+                )
+            return raw
+    return None
+
+
+def _denied_message(host: str, repo_path: str) -> str:
+    """`403`/`DENIED` from the registry (token endpoint or a `/v2/` call),
+    body present or empty — the repository is missing or private and does not
+    grant anonymous `:pull`. Permanent, not retryable: distinct from a
+    `401`, which the token dance above can still recover from.
+    """
+    return (
+        f"{host}/{repo_path} is missing or does not allow anonymous pull "
+        "(the registry denied the request with 403); the repository must exist and grant "
+        "anonymous :pull access before this bot can observe it"
+    )
+
+
+def _embedded_identifier(manifest: dict[str, object]) -> str | None:
+    """`_OWNERSHIP_ANNOTATION_KEY`'s value from `manifest["annotations"]`, if
+    present and string-shaped — annotation values are always strings per the
+    OCI image-spec, so a non-string value (malformed manifest) is treated the
+    same as "absent"."""
+    annotations = manifest.get("annotations")
+    if not isinstance(annotations, dict):
+        return None
+    typed_annotations = cast("dict[str, object]", annotations)
+    value = typed_annotations.get(_OWNERSHIP_ANNOTATION_KEY)
+    return value if isinstance(value, str) else None
+
+
+@dataclass(slots=True)
+class RegistryV2:
+    """`RegistryPort` over one Registry v2 host (defaults to `ghcr.io`). One
+    instance per host per process run — `_tokens` caches one anonymous pull
+    token per repository path for this instance's lifetime (CONTRACTS.md §9).
+
+    `host` is the *logical* host (the one in `oci://<host>/<path>`, used for
+    the token request's `service` parameter and for error messages); it is
+    deliberately separate from `base_url`, which the integration harness
+    repoints at a loopback fake while the roots under test still name
+    `ghcr.io`.
+    """
+
+    base_url: str = f"https://{GHCR_HOST}"
+    host: str = GHCR_HOST
+    realm: str = ""
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS
+    policy: BackoffPolicy = field(default_factory=BackoffPolicy)
+    max_pages: int = _DEFAULT_MAX_PAGES
+    client: httpx.Client = field(default_factory=httpx.Client)
+    _tokens: dict[str, str] = field(default_factory=dict[str, str], init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Default the token endpoint to `<base_url>/token` — the Registry v2
+        convention GHCR follows, and the shape the integration harness's fake
+        serves, so repointing `base_url` at a loopback fake moves the token
+        endpoint with it. `ocx.sh` passes its own `realm` explicitly
+        because Artifactory issues tokens from a different path."""
+        if not self.realm:
+            self.realm = f"{self.base_url}/token"
+
+    def list_tags(self, repository: str) -> list[str]:
+        repo_path = _repo_path(repository)
+        url: str | None = f"{self.base_url}/v2/{repo_path}/tags/list"
+        params: Mapping[str, str] | None = {"n": str(_TAGS_PAGE_SIZE)}
+        tags: list[str] = []
+        for _page in range(self.max_pages):
+            response = self._send("GET", url, repo_path=repo_path, params=params)
+            params = None
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            tags.extend(response.json().get("tags") or [])
+            url = _parse_next_link(response.headers.get("Link"), base_url=self.base_url)
+            if url is None:
+                return tags
+        raise TransientError(
+            f"tags/list pagination exceeded {self.max_pages} pages for {repository!r}"
+        )
+
+    def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
+        repo_path = _repo_path(repository)
+        url = f"{self.base_url}/v2/{repo_path}/manifests/{reference}"
+        response = self._send("GET", url, repo_path=repo_path, headers={"Accept": _MANIFEST_ACCEPT})
+        if response.status_code == 404:
+            raise KeyError(f"no manifest for {repository}@{reference}")
+        response.raise_for_status()
+        raw = response.content
+        computed_digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+        # Verify-if-present (ports.py's digest doctrine): the header is never
+        # trusted in place of the computed digest, only cross-checked against
+        # it when the registry happens to send one.
+        header_digest = response.headers.get("Docker-Content-Digest")
+        if header_digest is not None and header_digest != computed_digest:
+            raise AnomalyError(
+                f"manifest digest mismatch for {repository}@{reference}: "
+                f"Docker-Content-Digest header {header_digest!r} != computed {computed_digest!r}"
+            )
+        return ManifestFetch(raw=raw, digest=computed_digest, parsed=response.json())
+
+    def get_desc_tag_digest(self, repository: str) -> str | None:
+        repo_path = _repo_path(repository)
+        url = f"{self.base_url}/v2/{repo_path}/manifests/{_DESC_TAG}"
+        response = self._send(
+            "HEAD", url, repo_path=repo_path, headers={"Accept": _MANIFEST_ACCEPT}
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.headers["Docker-Content-Digest"]
+
+    def get_blob(self, repository: str, digest: str) -> bytes:
+        repo_path = _repo_path(repository)
+        url = f"{self.base_url}/v2/{repo_path}/blobs/{digest}"
+        response = self._send("GET", url, repo_path=repo_path)
+        if response.status_code == 404:
+            raise KeyError(f"no blob {digest} for {repository}")
+        response.raise_for_status()
+        return response.content
+
+    def probe_ownership(self, repository: str, expected_name: str) -> OwnershipProbeResult:
+        digest = self.get_desc_tag_digest(repository)
+        if digest is None:
+            return "unconfirmed"
+        fetch = self.get_manifest(repository, digest)
+        embedded = _embedded_identifier(fetch.parsed)
+        if embedded is None:
+            return "unconfirmed"
+        return "confirmed" if embedded == expected_name else "mismatch"
+
+    def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        repo_path: str,
+        headers: Mapping[str, str] | None = None,
+        params: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        """One logical request: token dance (401 -> refresh -> retry once)
+        wrapped in the backoff loop, which covers both retryable *statuses*
+        (429/5xx) and transport *failures* (timeout, reset, protocol error)."""
+        auth_retried = False
+        attempt = 1
+        while True:
+            request_headers = dict(headers or {})
+            token = self._tokens.get(repo_path)
+            if token is not None:
+                request_headers["Authorization"] = f"Bearer {token}"
+
+            try:
+                response = self.client.request(
+                    method, url, headers=request_headers, params=params, timeout=self.timeout
+                )
+
+                if response.status_code == 401:
+                    if auth_retried:
+                        raise TransientError(f"persistent 401 for {method} {url}")
+                    self._tokens[repo_path] = self._fetch_token(repo_path)
+                    # Set only after the fetch lands: a token fetch that dies
+                    # on a transport failure must leave the 401 lane re-armed,
+                    # or the retry below sends unauthenticated again and trips
+                    # "persistent 401" instead of spending its budget.
+                    auth_retried = True
+                    continue
+            except httpx.TransportError as exc:
+                # A timeout / connection reset / protocol error is an
+                # exception, not a status, so `is_retryable_status` never sees
+                # it. Without this it escapes the loop, past `main()`'s
+                # `IndexBotError` handler, and fails the run with a bare
+                # traceback — no `ExitCode.TRANSIENT`, no step summary. Same
+                # attempt budget as a 429/5xx; `TransientError` when spent.
+                if attempt >= self.policy.max_attempts:
+                    raise TransientError(
+                        f"transport failure for {method} {url} after {attempt} attempts: {exc!r}"
+                    ) from exc
+                jitter = random.random()  # noqa: S311 # nosec B311 - retry-jitter, not crypto
+                time.sleep(delay_seconds(attempt, self.policy, jitter=jitter))
+                attempt += 1
+                continue
+
+            if response.status_code == 403:
+                raise ValidationError(_denied_message(self.host, repo_path))
+
+            if is_retryable_status(response.status_code):
+                if attempt >= self.policy.max_attempts:
+                    raise TransientError(
+                        f"backoff exhausted for {method} {url} (status {response.status_code})"
+                    )
+                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                jitter = random.random()  # noqa: S311 # nosec B311 - retry-jitter, not crypto
+                wait = delay_seconds(attempt, self.policy, jitter=jitter, retry_after=retry_after)
+                time.sleep(wait)
+                attempt += 1
+                continue
+
+            return response
+
+    def _fetch_token(self, repo_path: str) -> str:
+        response = self.client.get(
+            self.realm,
+            params={"service": self.host, "scope": f"repository:{repo_path}:pull"},
+            timeout=self.timeout,
+        )
+        if response.status_code == 403:
+            raise ValidationError(_denied_message(self.host, repo_path))
+        response.raise_for_status()
+        return str(response.json()["token"])
+
+
+@dataclass(slots=True)
+class RoutedRegistry:
+    """`RegistryPort` that picks a per-host `RegistryV2` from the
+    `oci://<host>/<path>` URI it is handed.
+
+    The index serves more than one registry host (`.github/index-policy.json`),
+    and one `validate`/`reconcile` run can touch roots on both — so the choice
+    has to be per call, not per run. `cli/_wiring.py` builds the mapping; its
+    keys are exactly `_wiring.REGISTRY_ADAPTER_HOSTS`.
+
+    A host with no client is a `ValidationError`, not a `KeyError`: it is
+    unreachable in production (`check_repository_allowlisted` refuses any host
+    outside the policy, and `_registry_hosts` refuses any policy host without a
+    client, both before this class ever sees the URI), so this is the
+    defence-in-depth backstop for a future wiring bug — and it must fail the
+    same closed way an out-of-policy host does.
+    """
+
+    by_host: dict[str, RegistryV2]
+
+    def list_tags(self, repository: str) -> list[str]:
+        return self._client(repository).list_tags(repository)
+
+    def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
+        return self._client(repository).get_manifest(repository, reference)
+
+    def get_desc_tag_digest(self, repository: str) -> str | None:
+        return self._client(repository).get_desc_tag_digest(repository)
+
+    def get_blob(self, repository: str, digest: str) -> bytes:
+        return self._client(repository).get_blob(repository, digest)
+
+    def probe_ownership(self, repository: str, expected_name: str) -> OwnershipProbeResult:
+        return self._client(repository).probe_ownership(repository, expected_name)
+
+    def _client(self, repository: str) -> RegistryV2:
+        host = urlsplit(repository).netloc
+        client = self.by_host.get(host)
+        if client is None:
+            raise ValidationError(
+                f"no registry client for host {host!r} (serving {sorted(self.by_host)})"
+            )
+        return client

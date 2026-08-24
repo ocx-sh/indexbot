@@ -1,0 +1,24 @@
+{
+  "name": "ocx.sh/ziglang/zig",
+  "repository": "oci://ghcr.io/ocx-contrib/zig",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-05-01",
+  "desc": null,
+  "tags": {
+    "0.13.0": {
+      "content": "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "observed": "2026-07-17T00:00:00Z"
+    },
+    "latest": {
+      "content": "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "observed": "2026-07-17T00:00:00Z"
+    }
+  }
+}

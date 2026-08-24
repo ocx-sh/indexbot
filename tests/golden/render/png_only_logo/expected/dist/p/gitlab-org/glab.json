@@ -1,0 +1,29 @@
+{
+  "name": "ocx.sh/gitlab-org/glab",
+  "repository": "oci://ghcr.io/ocx-contrib/glab",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-03-01",
+  "desc": {
+    "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "title": "glab",
+    "description": "GitLab CLI.",
+    "keywords": [
+      "git",
+      "cli"
+    ],
+    "logo": "sha256:pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+  },
+  "tags": {
+    "1.42.0": {
+      "content": "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+      "observed": "2026-07-17T00:00:00Z"
+    }
+  }
+}

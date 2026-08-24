@@ -1,0 +1,20 @@
+{
+  "name": "ocx.sh/mvdan/shfmt",
+  "repository": "oci://ghcr.io/ocx-contrib/shfmt",
+  "owners": [
+    {
+      "github": "alice",
+      "github_id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-04-01",
+  "desc": null,
+  "tags": {
+    "3.7.0": {
+      "content": "sha256:ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "observed": "2026-07-17T00:00:00Z"
+    }
+  }
+}
