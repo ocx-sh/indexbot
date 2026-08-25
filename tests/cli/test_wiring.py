@@ -245,12 +245,14 @@ def test_validate_pr_is_wired_to_local_git_and_an_out_of_tree_base_port(
         git: object,
         files: object,
         registry: object,
-        policy: object,
         base_files: object,
     ) -> ExitCode:
-        seen.update(
-            args=args, git=git, files=files, registry=registry, policy=policy, base_files=base_files
-        )
+        # No `policy=`: this is the one job that checks out PR-head content, so
+        # the wiring must NOT hand it a policy parsed from that checkout. The
+        # signature is the assertion — a wiring that reintroduced
+        # `policy=_local_policy(files)` would fail here with a TypeError rather
+        # than quietly obey the pull request's own copy.
+        seen.update(args=args, git=git, files=files, registry=registry, base_files=base_files)
         return ExitCode.OK
 
     monkeypatch.setattr(_wiring.validate_pr, "run", _spy)

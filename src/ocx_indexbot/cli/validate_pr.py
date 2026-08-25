@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, cast
 
 from ocx_indexbot.cli import validate
 from ocx_indexbot.cli._common import write_ci_annotation, write_ci_summary
-from ocx_indexbot.core.policy import INDEX_POLICY_PATH, root_glob
+from ocx_indexbot.core.policy import INDEX_POLICY_PATH, parse_index_policy, root_glob
 from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 
@@ -176,71 +176,70 @@ def _same_repo_pr(args: argparse.Namespace, env: Mapping[str, str]) -> bool:
     return False
 
 
-def _reject_head_authored_policy(base_sha: str, *, git: GitPort, files: FilePort) -> None:
-    """Refuse to run at all when this pull request carries its own copy of
-    `.github/index-policy.json`.
+def _base_ref_policy(base_sha: str, *, git: GitPort, files: FilePort) -> IndexPolicy:
+    """The deployment policy this gate obeys: the BASE ref's copy, always.
 
     This job checks out `pull_request.head.sha` — it has to, it is the half
     that reads PR-head content (ADR-4 BD-5, ADR-6 FP-7) — so the policy
     `cli/_wiring._local_policy` reads out of that checkout is whatever the
     **pull request** committed there. Every field in that file steers this
-    gate: `name_segments` builds the `:(glob)` pathspec below that decides
-    which paths get validated at all, `reserved_namespaces` names the brand
-    segments ADR-2 ND-4 withholds from a fork, `registry_hosts` is G-03's
-    allowlist. A fork declaring `"name_segments": 3` makes `root_glob` select
+    gate: `name_segments` builds the `:(glob)` pathspec that decides which
+    paths get validated at all, `reserved_namespaces` names the brand segments
+    ADR-2 ND-4 withholds from a fork, `registry_hosts` is G-03's allowlist. A
+    fork declaring `"name_segments": 3` makes `root_glob` select
     `p/*/*/*.json`, its own two-segment `p/<reserved>/pkg.json` matches
     nothing, `run` prints "No package-root changes" and exits `0` — the
-    required `schema-validate-pr` context green, having validated nothing.
-    Emptying `reserved_namespaces` in the same file is the shorter spelling
-    of the same move.
+    required check green, having validated nothing. Emptying
+    `reserved_namespaces` is the shorter spelling of the same move.
 
-    That is contained, not harmless. The machine-merge lane cannot be reached
-    this way — `cli/classify_pr.py` and `cli/governance_check.py` run under
-    `_wiring._base_ref_policy` and force `human-review-required` on any
-    changed path outside `p/**`, this file included — but a green required
-    check is what a reviewer reads before pressing merge, and it would be a
-    green nobody earned.
+    So the bytes come from the base ref and the head's copy is never parsed.
 
-    **Byte equality, not a field-by-field comparison.** Deciding which keys
-    "matter enough" to reject is exactly the judgment that goes wrong on the
-    next key someone adds, and every key this file carries steers something
-    here. Bytes need no such judgment and cannot be wrong in the unsafe
-    direction. Once this returns, the `IndexPolicy` the wiring handed `run`
-    is provably the base ref's own, so obeying it is obeying the base — which
-    is what makes it safe to keep taking the policy from the checkout.
+    **Read, not refused.** An earlier cut of this rejected any pull request
+    whose policy differed from the base ref's. That closed the hole and broke
+    the control it was protecting: `.github/index-policy.json` is deliberately
+    a committed file rather than a settings-page variable *precisely so that
+    widening it takes a reviewed pull request* (ADR-4 BD-3 / this deployment's
+    G-03 note). A gate that refuses every pull request touching it leaves
+    direct-push-to-default as the only way to change it, which is the control
+    inverted. Reading the base ref's copy needs no such trade: the pull request
+    may propose any policy it likes, and this gate simply judges its roots
+    under the one currently in force. The proposal takes effect when it merges,
+    like every other change to the default branch.
+
+    A policy-touching pull request is not merged unreviewed either way:
+    `cli/classify_pr.py` forces `human-review-required` on any changed path
+    outside `p/**`, this file included, so the machine lane cannot reach it.
+
+    **A base ref with no policy file** is refused rather than falling back to
+    the pull request's. An index whose base ref never committed one has no
+    policy in force for this gate to obey, and adopting the incoming branch's
+    is exactly the trust direction this function exists to fix. Bootstrap the
+    file on the default branch first.
 
     **Before the diff, not after.** The pathspec that decides "this pull
-    request changed no roots" is itself derived from the policy, so a check
-    placed after `changed_package_roots` would let a head-authored
-    `name_segments` reach the zero-root early exit first and return `0`
-    before ever being examined.
-
-    **A base ref with no policy file** is refused for the same reason rather
-    than adopting the pull request's: an index whose base ref never committed
-    one has no policy in force for this gate to obey, and inheriting the
-    incoming branch's is precisely the trust direction this function exists
-    to reverse. The file is deployment policy — it lands on the default
-    branch, by the operator who owns it, never through a pull request the
-    same file governs. The provenance flags do not enter into it:
-    `--same-repo-pr`/`--fork-pr` say who opened the request, not which
-    policy is in force.
+    request changed no roots" is derived from the policy, so resolving it late
+    would let a head-authored `name_segments` reach the zero-root early exit
+    and return `0` before the base ref was ever consulted.
     """
-    head = files.read_bytes(INDEX_POLICY_PATH)
-    base = git.file_at(base_sha, INDEX_POLICY_PATH)
-    if head == base:
-        return
-    detail = (
-        f"the base ref has no {INDEX_POLICY_PATH}"
-        if base is None
-        else f"{INDEX_POLICY_PATH} differs from its copy on the base ref"
-    )
-    raise ValidationError(
-        f"{detail} ({base_sha}). indexbot validate-pr will not run under a policy the "
-        f"pull request itself authored: {INDEX_POLICY_PATH} decides which paths this "
-        "gate validates, which namespace segments it protects and which registry hosts "
-        "it admits. It is the deployment's own policy and lands on the base branch, "
-        "never through a pull request the same file governs."
-    )
+    raw = git.file_at(base_sha, INDEX_POLICY_PATH)
+    if raw is None:
+        raise ValidationError(
+            f"the base ref has no {INDEX_POLICY_PATH} ({base_sha}). It is the "
+            "deployment's own policy — which paths this gate validates, which "
+            "namespace segments it protects, which registry hosts it admits — and it "
+            "has to be in force on the base branch before a pull request can be judged "
+            "against it. This command will not fall back to the copy the pull request "
+            "itself carries."
+        )
+    if raw != files.read_bytes(INDEX_POLICY_PATH):
+        write_ci_annotation(
+            "notice",
+            "indexbot validate-pr",
+            f"This pull request changes {INDEX_POLICY_PATH}. Its roots are validated "
+            f"under the BASE ref's policy ({base_sha}); the proposed one takes effect "
+            "when it merges.",
+        )
+    return parse_index_policy(raw)
 
 
 def _materialize_base(
@@ -270,13 +269,12 @@ def run(
     git: GitPort,
     files: FilePort,
     registry: RegistryPort,
-    policy: IndexPolicy,
     base_files: FilePort,
 ) -> ExitCode:
     """`indexbot validate-pr [--base-sha SHA] [--offline] [--same-repo-pr | --fork-pr]`.
 
-    Resolves the base commit, refuses a pull request that brought its own copy
-    of the deployment policy (`_reject_head_authored_policy`), diffs the base
+    Resolves the base commit, reads the deployment policy from that ref rather
+    than from the PR-head checkout (`_base_ref_policy`), diffs the base
     three-dot against `HEAD` through a `:(glob)` pathspec built from the
     deployment's own `name_segments`, materializes each changed root's
     base-ref bytes, decides the reserved-namespace carve-out from PR
@@ -290,7 +288,7 @@ def run(
     `TransientError` propagating uncaught, mapped by `cli/main.py`).
     """
     base_sha = _resolve_base_sha(cast("str | None", args.base_sha), os.environ)
-    _reject_head_authored_policy(base_sha, git=git, files=files)
+    policy = _base_ref_policy(base_sha, git=git, files=files)
     paths = git.changed_package_roots(base_sha, root_glob=root_glob(policy.name_segments))
     if not paths:
         write_ci_annotation(

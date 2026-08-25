@@ -102,11 +102,16 @@ jobs:
       #     declaring `"name_segments": 3` leaves its own two-segment
       #     `p/<reserved>/pkg.json` matching nothing, so this required context
       #     goes green having validated nothing at all. `reserved_namespaces`
-      #     emptied is the shorter spelling. The command byte-compares the
-      #     head's copy against the base ref's before it diffs anything and
-      #     refuses when they differ — or when the base ref has no policy at
-      #     all. That file is deployment policy: it lands on the default
-      #     branch, never through a pull request the same file governs.
+      #     emptied is the shorter spelling. The command reads that file from
+      #     the BASE ref through git and never parses the checkout's copy, so
+      #     the pull request may propose any policy it likes and is judged
+      #     under the one in force. It refuses only when the base ref carries
+      #     no policy at all, which is a deployment that has not started yet.
+      #     Refusing every pull request that TOUCHES the file was the first
+      #     shape of this and was wrong: the file is committed rather than a
+      #     settings-page variable precisely so that widening it takes a
+      #     reviewed pull request, and a gate that refused those would leave
+      #     direct-push-to-default as the only way to change it.
       #   * ND-4's reserved-brand carve-out, gated on PR provenance. A segment
       #     this index reserves for itself cannot host the operator's own
       #     first-party roots without it, but granting it unconditionally

@@ -30,15 +30,21 @@ from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import Owner, PackageRoot
 from ocx_indexbot.ports import GitPort
-from tests.fakes import FakeRegistry, InMemoryFiles, make_policy
+from tests.fakes import FakeRegistry, InMemoryFiles
 
 if TYPE_CHECKING:
-    from ocx_indexbot.core.policy import IndexPolicy
+    pass
 
 _REPOSITORY = "oci://ghcr.io/ocx-contrib/cmake"
 
 
-_POLICY_BYTES = b'{"name":"ocx.sh","name_segments":2,"registry_hosts":["ghcr.io"]}\n'
+_POLICY_BYTES = (
+    b'{"name":"ocx.sh","name_segments":2,"registry_hosts":["ghcr.io"],'
+    b'"reserved_namespaces":["ocx","ocx-sh","ocx-contrib","ocx-rs"]}\n'
+)
+"""The public index's own policy, byte-for-byte equivalent to
+`tests.fakes.make_policy()`. It is what the fake git serves at the base ref,
+and therefore what `run` actually obeys."""
 """Stand-in bytes for `.github/index-policy.json`.
 
 Only their *equality* is under test — the parsed policy every case runs under
@@ -117,18 +123,18 @@ def _run(
     git: GitPort,
     files: InMemoryFiles,
     base_files: InMemoryFiles | None = None,
-    policy: IndexPolicy | None = None,
 ) -> ExitCode:
-    """Every case runs in a checkout whose policy copy matches the base ref's,
-    unless the case set one deliberately — that agreement is the precondition
-    of the command, not the subject of most of these tests."""
+    """The policy is never injected: `run` reads it from the base ref through
+    the `GitPort`, which is the whole point of `_base_ref_policy`. A case that
+    wants a different policy in force sets it in the fake git's `at_base`, and
+    a case about a policy-changing pull request sets a different one in
+    `files`."""
     files.files.setdefault(INDEX_POLICY_PATH, _POLICY_BYTES)
     return validate_pr.run(
         args,
         git=git,
         files=files,
         registry=FakeRegistry(),
-        policy=make_policy() if policy is None else policy,
         base_files=InMemoryFiles() if base_files is None else base_files,
     )
 
@@ -217,41 +223,48 @@ def test_a_head_authored_policy_cannot_neuter_the_pathspec() -> None:
     """The trust-direction bug this guard exists for, in its exact shape.
 
     `validate.yml` checks out `pull_request.head.sha`, so the
-    `.github/index-policy.json` the wiring reads is the fork's. Declaring
-    `"name_segments": 3` makes `root_glob` select `p/*/*/*.json`, under which
-    the fork's own two-segment `p/ocx/tool.json` matches nothing — zero
-    changed roots, the "No package-root changes" notice, exit `0`, and the
-    required `schema-validate-pr` context green having validated a claim on a
-    reserved brand segment.
+    `.github/index-policy.json` sitting in the checkout is the fork's.
+    Declaring `"name_segments": 3` would make `root_glob` select
+    `p/*/*/*.json`, under which the fork's own two-segment `p/ocx/tool.json`
+    matches nothing - zero changed roots, the "No package-root changes"
+    notice, exit `0`, and the required context green having validated a claim
+    on a reserved brand segment.
 
-    The second assertion is the one that matters: the command must never have
-    reached the diff at all. Refusing *after* `changed_package_roots` would
-    still leave the empty-diff green as the first thing a head-authored
-    `name_segments` produces.
+    The head's copy is never parsed, so the pathspec is the base ref's
+    `p/*/*.json`, the root IS selected, and the reserved-segment refusal it
+    was trying to dodge is what actually happens.
     """
     three_segments = _POLICY_BYTES.replace(b'"name_segments":2', b'"name_segments":3')
     files = InMemoryFiles(
         files={"p/ocx/tool.json": _root_bytes("ocx.sh/ocx/tool"), INDEX_POLICY_PATH: three_segments}
     )
-    git = ScriptedGit(changed=())
+    git = ScriptedGit(changed=("p/ocx/tool.json",))
 
-    with pytest.raises(ValidationError, match=r"index-policy\.json differs from its copy"):
-        _run(_args(), git=git, files=files)
-    assert git.diffed_glob is None, "refused before the diff, not after"
+    assert _run(_args(fork_pr=True), git=git, files=files) == ExitCode.VALIDATION_FAILURE
+    assert git.diffed_glob == "p/*/*.json", "the base ref's segment count, not the head's"
 
 
-def test_the_refusal_names_the_file_and_the_base_ref() -> None:
-    """An operator reading this in a job log has to know which file to look at
-    and which ref to compare it against — the two facts a bare "policy
-    mismatch" would make them go find."""
-    files = InMemoryFiles(files={INDEX_POLICY_PATH: b"{}\n"})
+def test_a_pull_request_may_still_propose_a_new_policy() -> None:
+    """`.github/index-policy.json` is a committed file rather than a
+    settings-page variable *so that* widening it takes a reviewed pull request
+    (ADR-4 BD-3). A gate that refused every pull request touching it would
+    leave direct-push-to-default as the only way to change it - the control
+    inverted. The proposal is judged under the policy currently in force and
+    takes effect when it merges.
+    """
+    widened = _POLICY_BYTES.replace(
+        b'"registry_hosts":["ghcr.io"]', b'"registry_hosts":["ghcr.io","registry.gitlab.com"]'
+    )
+    files = InMemoryFiles(
+        files={
+            "p/kitware/cmake.json": _root_bytes("ocx.sh/kitware/cmake"),
+            INDEX_POLICY_PATH: widened,
+        }
+    )
+    git = ScriptedGit(changed=("p/kitware/cmake.json",))
 
-    with pytest.raises(ValidationError) as caught:
-        _run(_args(base_sha="origin/main"), git=ScriptedGit(), files=files)
-
-    message = str(caught.value)
-    assert INDEX_POLICY_PATH in message
-    assert "origin/main" in message
+    assert _run(_args(), git=git, files=files) == ExitCode.OK
+    assert git.diffed_glob == "p/*/*.json"
 
 
 def test_a_base_ref_with_no_policy_file_is_refused() -> None:
@@ -263,11 +276,18 @@ def test_a_base_ref_with_no_policy_file_is_refused() -> None:
     git = ScriptedGit()
     del git.at_base[INDEX_POLICY_PATH]
 
-    with pytest.raises(ValidationError, match=r"the base ref has no \.github/index-policy\.json"):
-        _run(_args(), git=git, files=InMemoryFiles())
+    with pytest.raises(ValidationError) as caught:
+        _run(_args(base_sha="origin/main"), git=git, files=InMemoryFiles())
+
+    # An operator reading this in a job log has to know which file to look at
+    # and which ref stated no policy - the two facts a bare "policy missing"
+    # would make them go find.
+    message = str(caught.value)
+    assert f"the base ref has no {INDEX_POLICY_PATH}" in message
+    assert "origin/main" in message
 
 
-def test_an_unchanged_policy_file_is_not_a_refusal() -> None:
+def test_an_unchanged_policy_file_needs_no_special_case() -> None:
     """The overwhelmingly common case: the pull request touches package roots
     and leaves the policy alone. Byte-identical copies mean the injected
     policy is provably the base ref's, so the command proceeds on it."""
@@ -284,8 +304,12 @@ def test_an_unchanged_policy_file_is_not_a_refusal() -> None:
 def test_the_root_glob_comes_from_the_declared_segment_count() -> None:
     """`name_segments` is per-deployment (0.2.0), so the pathspec is derived
     from the policy rather than hardcoded at two."""
-    git = ScriptedGit()
-    _run(_args(), git=git, files=InMemoryFiles(), policy=make_policy(name_segments=3))
+    git = ScriptedGit(
+        at_base={
+            INDEX_POLICY_PATH: _POLICY_BYTES.replace(b'"name_segments":2', b'"name_segments":3')
+        }
+    )
+    _run(_args(), git=git, files=InMemoryFiles())
     assert git.diffed_glob == "p/*/*/*.json"
 
 

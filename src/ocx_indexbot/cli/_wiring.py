@@ -352,14 +352,19 @@ def _run_validate_pr(args: argparse.Namespace) -> ExitCode:
     exits moments later, in a job whose runner is discarded, and an
     `atexit`/`finally` teardown would be a second failure path guarding
     nothing.
+
+    No `policy=` is passed, unlike every other subcommand here. This job
+    checks out PR-head content, so `_local_policy(files)` would read the
+    pull request's own `.github/index-policy.json` — the file that decides
+    which paths this gate validates. `validate_pr` resolves it from the base
+    ref itself, through the `GitPort` above, because only it knows the base
+    commit.
     """
-    files = LocalFiles(root=_repo_root())
     return validate_pr.run(
         args,
         git=LocalGit(repo=_repo_root()),
-        files=files,
+        files=LocalFiles(root=_repo_root()),
         registry=_registry(),
-        policy=_local_policy(files),
         base_files=LocalFiles(root=Path(tempfile.mkdtemp(prefix="indexbot-base-"))),
     )
 

@@ -109,6 +109,21 @@ then `$CI_MERGE_REQUEST_DIFF_BASE_SHA` (GitLab), then `origin/$GITHUB_BASE_REF`
 find). None of them resolving is an error, never an empty diff: a gate that
 passes with nothing validated is worse than one that fails.
 
+The deployment policy this gate obeys comes from the **base ref**, read
+through git, never from the checkout. This is the one job that checks out
+pull-request head content, and `.github/index-policy.json` steers everything
+here: `name_segments` builds the pathspec below, `reserved_namespaces` names
+the brand segments a fork may not claim, `registry_hosts` is the allowlist. A
+pull request declaring `"name_segments": 3` would otherwise leave its own
+two-segment root matching nothing and take the "no package-root changes" exit,
+green, having validated a claim on a reserved segment.
+
+A pull request may still *propose* a new policy — that file is committed
+rather than a settings-page value precisely so that widening it takes a
+reviewed pull request. Its roots are simply judged under the policy currently
+in force, with a notice saying so, and the proposal takes effect when it
+merges. The command refuses only when the base ref carries no policy at all.
+
 The diff is `<base>...HEAD` — **three dots**, against the merge base, so a
 branch cut before another pull request merged does not re-validate stale copies
 of roots it never touched — filtered by a `:(glob)` pathspec built from the

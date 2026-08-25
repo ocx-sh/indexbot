@@ -328,16 +328,20 @@ def test_the_gitlab_fork_pipeline_setting_is_documented_as_a_token_handover() ->
 def test_the_validate_workflow_says_its_policy_comes_from_the_base_ref() -> None:
     """The job checks out PR-head content, so the policy file under that root
     is the pull request's own — and `name_segments` in it picks the pathspec
-    that decides what gets validated at all. `cli/validate_pr.py` refuses that
-    copy, and the rendered workflow is where the next person editing this lane
-    will look for the reason it does."""
+    that decides what gets validated at all. `cli/validate_pr.py` reads the
+    base ref's copy instead, and the rendered workflow is where the next
+    person editing this lane will look for the reason it does."""
     prose = _prose(_rendered_github("validate.yml"))
 
     assert "the deployment policy this gate obeys, taken from the BASE ref" in prose
-    assert "byte-compares the head's copy against the base ref's" in prose
-    # The claim this replaced overstated what a green context is worth:
-    # `governance.yml` gates the machine lane from base-ref data regardless.
+    assert "reads that file from" in prose and "the BASE ref through git" in prose
+    # Two claims that were in earlier cuts of this comment and are now wrong.
+    # `governance.yml` gates the machine lane from base-ref data regardless, so
+    # a green context was never the only thing stopping a fork; and refusing a
+    # pull request that touches the policy inverted the very control that keeps
+    # the file committed rather than a settings-page value.
     assert "that context is the only thing stopping a fork" not in prose
+    assert "byte-compares the head's copy against the base ref's" not in prose
 
 
 def test_only_the_validate_lane_checks_anything_out() -> None:
