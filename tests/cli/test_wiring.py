@@ -19,7 +19,7 @@ from ocx_indexbot.adapters.gitlab_api import GitLabApi
 from ocx_indexbot.adapters.local_files import LocalFiles
 from ocx_indexbot.adapters.local_git import LocalGit
 from ocx_indexbot.adapters.registry_v2 import GHCR_HOST, GITLAB_HOST, OCX_SH_HOST, OCX_SH_REALM
-from ocx_indexbot.cli import _wiring
+from ocx_indexbot.cli import _wiring, announce
 from ocx_indexbot.cli import main as main_module
 from ocx_indexbot.core.observe import observe
 from ocx_indexbot.core.policy import INDEX_POLICY_PATH
@@ -212,7 +212,7 @@ def test_workflows_check_is_wired_to_a_repo_root_file_port(
         return ExitCode.OK
 
     monkeypatch.setattr(_wiring.workflows_check, "run", _spy)
-    namespace = argparse.Namespace(dir=".github/workflows", owner=None)
+    namespace = argparse.Namespace(dir=".github/workflows", owner=None, forge="github")
 
     assert _wiring.DISPATCH["workflows-check"](namespace) == ExitCode.OK
     assert seen["args"] is namespace
@@ -326,6 +326,96 @@ def test_registry_wires_the_ocx_sh_token_endpoint() -> None:
     assert client.host == OCX_SH_HOST
     assert client.base_url == "https://ocx.sh"
     assert client.realm == OCX_SH_REALM
+
+
+def test_the_privileged_policy_read_follows_the_branch_the_request_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deployment whose default branch is not `main` — `master`, `trunk` —
+    had its policy read at the literal string `main` and got the fail-closed
+    "no policy" refusal on every pull request. Nothing in
+    `.github/index-policy.json` names the default branch, so the runner's own
+    variable is where it comes from. It is also the ref `cli/validate_pr.py`
+    diffs against, so both halves of one gate judge one request under one
+    policy."""
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setenv("GITHUB_BASE_REF", "trunk")
+    tag_content = _observed_content_digest("1.0.0")
+    root = _root({"1.0.0": TagEntry(content=tag_content, observed="2026-07-17T00:00:00Z")})
+    info = PullRequestInfo(
+        number=1, base_sha="base-sha", head_sha="head-sha", changed_paths=(_ROOT_PATH,)
+    )
+    github = FakeGitHub(
+        files={(_ROOT_PATH, "head-sha"): serialize_package_root(root)},
+        pull_request_info={1: info},
+    )
+    _patch_adapters(monkeypatch, github=github)
+    # `_patch_adapters` seeds the policy at "main". This deployment has no
+    # such branch, so the read has to find it where the runner says.
+    del github.files[(INDEX_POLICY_PATH, "main")]
+    github.files[(INDEX_POLICY_PATH, "trunk")] = _POLICY_BYTES
+
+    assert main_module.main(["classify-pr", "--pr-number", "1"]) == ExitCode.OK
+
+
+def test_the_base_ref_falls_back_to_main_off_a_request_event() -> None:
+    """`reconcile` and `stale` run on a schedule, where no forge sets a
+    target-branch variable. `main` is the fallback, not a required input."""
+    assert _wiring._base_ref({}) == announce.BASE_REF  # pyright: ignore[reportPrivateUsage]
+
+
+def test_an_explicit_base_ref_env_beats_the_forge_s_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`INDEXBOT_BASE_REF` is the escape hatch for a pipeline neither forge
+    variable fits — the same shape `validate-pr`'s `INDEXBOT_BASE_SHA` has."""
+    environ = {"INDEXBOT_BASE_REF": "release", "GITHUB_BASE_REF": "trunk"}
+    assert _wiring._base_ref(environ) == "release"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_gitlab_s_target_branch_variable_is_read_too() -> None:
+    """GitLab sets no `GITHUB_BASE_REF`; its merge-request pipelines carry the
+    target branch under its own name."""
+    environ = {"CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "master"}
+    assert _wiring._base_ref(environ) == "master"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_announce_reads_the_index_policy_at_the_ref_it_was_told_to_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--base-ref` is the flag a publisher passes when the index's default
+    branch is not `main`, and the policy governing that announce is the copy
+    committed *there*. Reading it at the constant instead sent every publisher
+    on such an index the fail-closed refusal."""
+    tag = "1.0.0"
+    committed = _root({})
+    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index()})
+    github = FakeGitHub(files={(_ROOT_PATH, "master"): serialize_package_root(committed)})
+    files = InMemoryFiles()
+    _patch_adapters(monkeypatch, registry=registry, github=github, files=files)
+    # This index's default branch is `master`; `_patch_adapters` seeds the
+    # policy at `main`, which here does not exist.
+    del github.files[(INDEX_POLICY_PATH, "main")]
+    github.files[(INDEX_POLICY_PATH, "master")] = _POLICY_BYTES
+
+    result = main_module.main(
+        [
+            "announce",
+            "--index-repo",
+            "ocx-sh/index",
+            "--package",
+            f"{_NS}/{_PKG}",
+            "--tags",
+            tag,
+            "--base-ref",
+            "master",
+            "--out",
+            "dist",
+        ]
+    )
+
+    assert result == ExitCode.OK
+    assert files.exists(f"dist/{_ROOT_PATH}")
 
 
 def test_local_policy_reads_the_checkout_copy() -> None:

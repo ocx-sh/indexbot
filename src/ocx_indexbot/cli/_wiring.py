@@ -74,7 +74,7 @@ from ocx_indexbot.errors import ValidationError
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from ocx_indexbot.exit_codes import ExitCode
     from ocx_indexbot.ports import FilePort, ForgePort
@@ -303,7 +303,9 @@ def _run_announce(args: argparse.Namespace) -> ExitCode:
     # governing policy is the target index's own committed file at `main` —
     # read through the same `ForgePort`, at the same base ref, as the root
     # this run is about to regenerate. A publisher cannot widen it locally.
-    policy = _index_policy(index_github.get_file_contents(INDEX_POLICY_PATH, announce.BASE_REF))
+    policy = _index_policy(
+        index_github.get_file_contents(INDEX_POLICY_PATH, cast("str", args.base_ref))
+    )
     return announce.run(
         args,
         registry=_registry(),
@@ -394,6 +396,39 @@ def _run_seed_import(args: argparse.Namespace) -> ExitCode:
     )
 
 
+_BASE_REF_ENV: Final[tuple[str, ...]] = (
+    "INDEXBOT_BASE_REF",
+    "GITHUB_BASE_REF",
+    "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+)
+"""Env vars naming the branch a pull request targets, most explicit first.
+
+`INDEXBOT_BASE_REF` is the forge-independent escape hatch. The other two are
+what GitHub Actions and GitLab CI set on a pull- or merge-request event. Every
+one of them is *parent*-controlled — a fork can push to no branch of the index
+— so reading a policy at any of them is the same trust direction as reading it
+at the default branch, and it has the property `announce.BASE_REF` does not:
+it agrees with the ref `cli/validate_pr.py` diffs against, so both halves of
+the gate judge one pull request under one policy even when it targets a branch
+that is not called `main`.
+"""
+
+
+def _base_ref(environ: Mapping[str, str]) -> str:
+    """The branch the running pull request targets, or `announce.BASE_REF`.
+
+    A deployment whose default branch is not `main` — GitLab's `master`
+    holdovers, a corporate GitHub org's `trunk` — has no policy field naming
+    it: `.github/index-policy.json` names an owner and a forge and stops
+    there. So it comes from the runner, which knows.
+    """
+    for name in _BASE_REF_ENV:
+        value = environ.get(name)
+        if value:
+            return value
+    return announce.BASE_REF
+
+
 def _base_ref_policy(github: ForgePort) -> IndexPolicy:
     """The index's committed policy, read from the BASE ref over the API.
 
@@ -402,7 +437,7 @@ def _base_ref_policy(github: ForgePort) -> IndexPolicy:
     PR head's copy even if they could: a fork could then declare its own
     `name_segments` and change how its own diff is classified (FP-7, G-16).
     """
-    return _index_policy(github.get_file_contents(INDEX_POLICY_PATH, announce.BASE_REF))
+    return _index_policy(github.get_file_contents(INDEX_POLICY_PATH, _base_ref(os.environ)))
 
 
 def _run_classify_pr(args: argparse.Namespace) -> ExitCode:

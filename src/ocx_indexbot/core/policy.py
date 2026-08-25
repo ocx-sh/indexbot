@@ -118,15 +118,18 @@ not start."""
 
 _DEPLOY_WORKFLOW_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._-]+")
 """`ci.deploy_workflow`'s grammar: a bare workflow filename, nothing a path
-component could hide in. `governance-deploy-job.yml` substitutes it
-*unquoted* into a shell command — `gh workflow run {{deploy_workflow}}
---repo "$REPO" --ref main` — in a job that holds `actions: write` +
-`contents: write` (arming the merge already happened; this job only
-dispatches). Unquoted means space-separated words in the value become
-separate argv entries to `gh`, so this grammar excludes whitespace and shell
-metacharacters outright rather than relying on the template to quote it
-correctly forever. The call site is quoted too, belt-and-suspenders, but the
-grammar is what makes that quoting inert rather than load-bearing."""
+component could hide in. `governance-deploy-job.yml` substitutes it into a
+shell command — `gh workflow run "{{deploy_workflow}}" --repo "$REPO" --ref
+main` — in a job that holds `actions: write` + `pull-requests: read`, enough
+to dispatch a workflow and read the merged pull request and nothing else.
+
+The call site quotes it. This grammar is what keeps that quoting inert rather
+than load-bearing: a value containing a `"` would end the quoted word and
+inject the rest as further argv, and one containing whitespace would split
+into several arguments if the quotes were ever dropped. Excluding both from
+the alphabet outright means neither the template's quoting nor a future
+editor's memory of it is what stands between an operator's config file and
+`gh`'s argv."""
 
 _AUTO_MERGE_VALUES: Final[frozenset[str]] = frozenset(get_args(AutoMerge))
 FORGE_VALUES: Final[frozenset[str]] = frozenset(get_args(Forge))
@@ -452,8 +455,8 @@ def _require_string(block: dict[str, Any], key: str, default: str) -> str:
 def _require_pattern(block: dict[str, Any], key: str, pattern: re.Pattern[str], shape: str) -> str:
     """Like `_require_string`, but for a `ci.*` value substituted somewhere
     more hostile than free text: `owner` into a quoted expression scalar,
-    `deploy_workflow` unquoted into a shell command (see `_OWNER_RE` and
-    `_DEPLOY_WORKFLOW_RE`). `_require_string`'s newline check stops a line
+    `deploy_workflow` into a quoted word in a shell command (see `_OWNER_RE`
+    and `_DEPLOY_WORKFLOW_RE`). `_require_string`'s newline check stops a line
     break; it says nothing about the quote or shell-metacharacter a scalar or
     an unquoted word can still be broken out of, which is what `pattern`
     closes.

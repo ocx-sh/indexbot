@@ -62,9 +62,9 @@ if TYPE_CHECKING:
     from ocx_indexbot.ports import ClockPort, FilePort, ForgePort, RegistryPort
 
 BASE_REF: Final[str] = "main"
-"""`--base-ref`'s default, and what `cli/_wiring.py` reads this deployment's
-own policy file at before `announce.run`'s `args.base_ref` is even parsed
-(the bootstrap has no policy yet to name a branch, let alone `args`).
+"""`--base-ref`'s default, and `cli/_wiring._base_ref`'s last fallback — what
+the privileged subcommands read this deployment's policy file at when the
+runner names no target branch, which is every scheduled lane.
 `.github/index-policy.json` names an owner and a forge but never a
 default-branch name — GitLab and a corporate GitHub org alike are free to
 call it something other than `main` — so the per-run override is a CLI flag
