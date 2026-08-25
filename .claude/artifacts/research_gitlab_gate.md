@@ -60,14 +60,33 @@ applies plan limits (`ci_daily_pipeline_schedule_triggers`) and the schedule
 worker has its own tick. **Real cadence is a WP-8 measurement** against the
 live e2e index, not something this probe settles.
 
-## Q3 — Fork MR pipelines and protected variables: deferred, not skipped
+## Q3 — Fork MR pipelines and protected variables: measured, and stronger
 
-The claim (a fork MR pipeline cannot read the parent's protected+masked CI
-variables, because fork MR pipelines run in the fork project with the fork's
-variables) is explicit and unambiguous in GitLab's own documentation, unlike
-Q1. It is also already a named scenario in WP-8's e2e, where it runs against
-the real index rather than a throwaway. Measuring it twice buys nothing, so
-it is proven there.
+Measured 2026-08-25 against the live e2e projects, not a throwaway.
+
+`michael-herwig/e2e-indexbot-index` carries `INDEX_PARENT_SECRET`, protected +
+masked. A branch on the fork (`e2e-indexbot-fork`) added one job gated on
+`$CI_PIPELINE_SOURCE == "merge_request_event"` that reports the variable's
+*presence* only — never its value — and exits non-zero if it is there. The
+merge request was opened against the parent, the job read, the branch deleted.
+
+    project=michael-herwig/e2e-indexbot-index
+    pipeline_source=merge_request_event
+    INDEX_PARENT_SECRET=ABSENT
+
+The first line is the part worth keeping. The documented claim is that a fork
+MR pipeline runs *in the fork*, with the fork's variables — and MR !6, opened
+by the fork's own project-access-token bot, did exactly that. This probe was
+opened by an account with developer access to **both** projects, so GitLab ran
+the pipeline in the **parent** instead. The protected variable was still
+absent, because protection is a property of the *ref*, and a fork's source
+branch is not a protected branch of the parent.
+
+So the boundary does not rest on which project runs the pipeline. Even in the
+case where the parent runs it, a merge request cannot reach a protected
+variable. That is a strictly stronger result than the claim being checked, and
+it is the one the security argument actually needs, because "the pipeline runs
+in the fork" is a condition an operator's project settings can change.
 
 The security argument it supports is unchanged: on GitLab the privileged
 governance actor is a **scheduled pipeline on the parent's default branch** —
