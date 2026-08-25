@@ -69,18 +69,29 @@ class ScriptedGit:
     """
 
     def __init__(
-        self, changed: tuple[str, ...] = (), at_base: dict[str, bytes] | None = None
+        self,
+        changed: tuple[str, ...] = (),
+        at_base: dict[str, bytes] | None = None,
+        tree_changed: tuple[str, ...] | None = None,
     ) -> None:
         self.changed = changed
+        # What the widest pathspec answers, when a test needs it to differ
+        # from the root glob's answer. Real git returns a superset there, and
+        # the whole point of `_check_package_tree_shape` is a path that only
+        # the wide pathspec can see, so a fake answering both alike could not
+        # express the case at all.
+        self.tree_changed = changed if tree_changed is None else tree_changed
         self.at_base = {INDEX_POLICY_PATH: _POLICY_BYTES} | ({} if at_base is None else at_base)
         self.diffed_from: str | None = None
         self.diffed_glob: str | None = None
+        self.diffed_globs: list[str] = []
         self.read_at: list[tuple[str, str]] = []
 
     def changed_package_roots(self, base_sha: str, *, root_glob: str) -> tuple[str, ...]:
         self.diffed_from = base_sha
         self.diffed_glob = root_glob
-        return self.changed
+        self.diffed_globs.append(root_glob)
+        return self.tree_changed if root_glob == "p" else self.changed
 
     def file_at(self, ref: str, path: str) -> bytes | None:
         self.read_at.append((ref, path))
@@ -297,7 +308,51 @@ def test_a_base_ref_with_no_policy_selects_the_whole_package_tree() -> None:
 
     _run(_args(), git=git, files=InMemoryFiles())
 
-    assert git.diffed_glob == "p/**"
+    assert git.diffed_glob == "p"
+
+
+def test_the_package_tree_replaced_by_a_symlink_is_refused() -> None:
+    """The defect this guard exists for. A branch that deletes `p/` and commits
+    a symlink under the same name repoints every published package, and every
+    path it changes is either that one blob or a delete. `--diff-filter=d`
+    drops the deletes, and `p/*/*.json` never described `p` itself — so the
+    root glob selected nothing, `validate` ran over nothing, and this required
+    check went green. Replayed against real git in
+    `tests/adapters/test_local_git.py`; this is the CLI half."""
+    git = ScriptedGit(changed=(), tree_changed=("p",))
+
+    with pytest.raises(ValidationError) as caught:
+        _run(_args(), git=git, files=InMemoryFiles())
+
+    assert "p" in str(caught.value)
+    assert "shape of the package tree" in str(caught.value)
+
+
+def test_a_namespace_directory_replaced_by_a_symlink_is_refused() -> None:
+    """Same swap one level down. `p/<ns>` is shallower than a root at
+    `name_segments = 2`, so the shallow test catches it without knowing
+    anything about symlinks — it is a tree position, and a tree position that
+    turns up as a changed path is no longer a directory."""
+    git = ScriptedGit(changed=(), tree_changed=("p/kitware",))
+
+    with pytest.raises(ValidationError) as caught:
+        _run(_args(), git=git, files=InMemoryFiles())
+
+    assert "p/kitware" in str(caught.value)
+
+
+def test_an_announce_is_not_mistaken_for_a_tree_change() -> None:
+    """The false-positive side, and the reason the test is depth and not a
+    path allowlist: an announce adds a root and at least one CAS object, and
+    the CAS object is deeper than its root, never shallower. Both must pass a
+    guard that refuses everything shallower than a root."""
+    root = "p/kitware/cmake.json"
+    cas = "p/kitware/cmake/o/sha256/" + "a" * 64 + ".json"
+    git = ScriptedGit(changed=(root,), tree_changed=(root, cas))
+    files = InMemoryFiles({root: _root_bytes("ocx.sh/kitware/cmake")})
+
+    assert _run(_args(), git=git, files=files) == ExitCode.OK
+    assert git.diffed_globs[0] == "p", "the wide pathspec runs before the root glob"
 
 
 def test_a_pull_request_that_adopts_the_first_policy_is_not_refused(
