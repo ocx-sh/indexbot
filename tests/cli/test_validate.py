@@ -767,3 +767,51 @@ def test_the_exemption_never_widens_a_control_path_segment() -> None:
         base_files=InMemoryFiles(files={path: serialized}),
     )
     assert result == ExitCode.VALIDATION_FAILURE
+
+
+# --- carried-over claims reach `verify_claims` through this subcommand ------
+
+
+def _drifted_package() -> tuple[InMemoryFiles, FakeRegistry, InMemoryFiles]:
+    """A committed root whose one tag has MOVED upstream since it was
+    announced, plus the byte-identical base-ref copy `--base-dir` supplies.
+
+    The `ocx-sh/index` shape this exists for: a pull request that rewrites
+    governance metadata across every root, over a tree where twelve
+    packages' `latest`/partial-version tags have drifted. Nothing here
+    touches a claim, and the drift belongs to `cli/reconcile.py`.
+    """
+    entry, object_bytes, registry = _observed_tag("latest")
+    files = _build(tags={"latest": entry}, extra_files={_cas_path(entry.content): object_bytes})
+    base = InMemoryFiles(files={_PATH: files.files[_PATH]})
+    registry.manifests[(_REPOSITORY, "latest")] = _index(architecture="arm64")
+    return files, registry, base
+
+
+def test_a_drifted_tag_no_pr_touched_does_not_fail_this_gate() -> None:
+    files, registry, base = _drifted_package()
+    result = validate.run(
+        _args([_PATH]), files=files, registry=registry, policy=make_policy(), base_files=base
+    )
+    assert result == ExitCode.OK
+
+
+def test_the_same_drift_fails_the_gate_with_no_base_ref_copy() -> None:
+    # `--base-dir` absent is the fail-closed side, and the pair proves the
+    # OK above is the narrowing rather than a registry that stopped drifting.
+    files, registry, _ = _drifted_package()
+    assert _run(_args([_PATH]), files=files, registry=registry) == ExitCode.VALIDATION_FAILURE
+
+
+def test_base_ref_bytes_this_version_cannot_parse_read_as_no_base_ref_copy() -> None:
+    # Fail closed, never fail loud: an unparseable ALREADY-MERGED copy must
+    # not reject the pull request, it must only stop the narrowing.
+    files, registry, _ = _drifted_package()
+    result = validate.run(
+        _args([_PATH]),
+        files=files,
+        registry=registry,
+        policy=make_policy(),
+        base_files=InMemoryFiles(files={_PATH: b"not json"}),
+    )
+    assert result == ExitCode.VALIDATION_FAILURE

@@ -124,8 +124,8 @@ def _package_id_from_root_path(path: str, *, name_segments: int) -> PackageId:
     return parse_package_id("/".join(parts[1:]).removesuffix(".json"), name_segments=name_segments)
 
 
-def _is_announce_shaped_update(path: str, root: PackageRoot, base_files: FilePort | None) -> bool:
-    """True iff `path` is ALREADY committed on the base ref and this PR's
+def _is_announce_shaped_update(root: PackageRoot, base_root: PackageRoot | None) -> bool:
+    """True iff this root is ALREADY committed on the base ref and this PR's
     change to it is announce-shaped.
 
     ADR-2 ND-4's reserved segments exist so a stranger cannot *claim*
@@ -148,18 +148,41 @@ def _is_announce_shaped_update(path: str, root: PackageRoot, base_files: FilePor
     block a careless merge. `name` needs no clause: `check_name_matches_path`
     already pins it to the path.
 
-    Fail-closed by construction: no `--base-dir`, or no such root at the base
-    ref, means "new claim", which is what ND-4 is for. This predicate answers
-    "is this an update?" only — the caller still narrows the admitted set to
-    the deployment's own `reserved_namespaces`, so no base-ref state ever unlocks a
-    control-path or generic segment.
+    Fail-closed by construction: no `--base-dir`, no such root at the base
+    ref, or base bytes this version cannot parse all yield `base_root=None`
+    — "new claim", which is what ND-4 is for. This predicate answers "is this
+    an update?" only — the caller still narrows the admitted set to the
+    deployment's own `reserved_namespaces`, so no base-ref state ever unlocks
+    a control-path or generic segment.
+    """
+    if base_root is None:
+        return False
+    return classify_change(base_root, root) == "refresh"
+
+
+def _base_root(path: str, base_files: FilePort | None) -> PackageRoot | None:
+    """`path` as it stands on the PR's base ref, or `None` when there is no
+    base-ref copy to read.
+
+    Read once per validated root and handed to both consumers — ND-4's
+    update-vs-claim predicate above, and `verify_claims`'s carried-over-claim
+    narrowing — rather than each re-reading and re-parsing the same bytes.
+
+    Unparseable base bytes read as `None`, not as an error: this is the
+    ALREADY-MERGED copy, so a version of the bot that can no longer parse it
+    must not fail the pull request over it. Both consumers treat `None` as
+    the strict side — a new claim for ND-4, verify-everything for
+    `verify_claims` — so degrading here can only ever tighten the gate.
     """
     if base_files is None:
-        return False
+        return None
     base_raw = base_files.read_bytes(path)
     if base_raw is None:
-        return False
-    return classify_change(parse_package_root(base_raw), root) == "refresh"
+        return None
+    try:
+        return parse_package_root(base_raw)
+    except ValidationError:
+        return None
 
 
 def _cas_prefix(package_id: PackageId) -> str:
@@ -197,6 +220,7 @@ def _validate_one(
     not caught here — it propagates out of `run` uncaught.
     """
     warnings: list[str] = []
+    base_root = _base_root(path, base_files)
     try:
         raw = files.read_bytes(path)
         if raw is None:
@@ -238,7 +262,7 @@ def _validate_one(
             # announce-shaped update to such a root — see
             # `_is_announce_shaped_update` for why that scope, and why it is
             # narrower than "the path exists at the base ref".
-            if not _is_announce_shaped_update(path, root, base_files):
+            if not _is_announce_shaped_update(root, base_root):
                 raise
             # Exactly the carve-out `--allow-reserved-namespace` opens, never
             # wider: brand segments only. Control-path (`p`, `o`) and generic
@@ -325,7 +349,11 @@ def _validate_one(
             # actually true right now — a validation failure for THIS PR,
             # not an anomaly against already-committed history (that's
             # `cli/reconcile.py`'s nightly-sweep disposition for the exact
-            # same `verify_claims` findings).
+            # same `verify_claims` findings). `base=` scopes the two REGISTRY
+            # checks to the claims this PR actually makes — a tag/digest pair
+            # byte-identical to the base ref is not asserted here and is the
+            # sweep's business, not this gate's. Local CAS byte checks stay
+            # unconditional; see `verify_claims`.
             cas_bytes_by_digest = {
                 entry.content: object_bytes_by_tag[tag_name]
                 for tag_name, entry in root.tags.items()
@@ -339,7 +367,9 @@ def _validate_one(
                     cas_bytes_by_digest[root.desc.logo] = cast(
                         bytes, files.read_bytes(paths_by_digest[root.desc.logo])
                     )
-            findings = verify_claims(package_id, root, cas_bytes_by_digest, registry)
+            findings = verify_claims(
+                package_id, root, cas_bytes_by_digest, registry, base=base_root
+            )
             if findings:
                 detail = "; ".join(f"{finding.kind}: {finding.detail}" for finding in findings)
                 raise ValidationError(f"claim verification failed for {package_id}: {detail}")

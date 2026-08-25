@@ -259,3 +259,101 @@ def test_verify_claims_desc_none_is_a_noop() -> None:
     root = _root({}, desc=None)
     findings = verify_claims(_PACKAGE_ID, root, {}, FakeRegistry())
     assert findings == ()
+
+
+# --- carried-over claims (the `base` narrowing) -----------------------------
+
+
+def _drifted(tag: str) -> tuple[TagEntry, bytes, FakeRegistry]:
+    """A committed claim whose tag has since MOVED upstream: the returned
+    entry/bytes are what the index committed, the registry now serves a
+    different image index under the same tag.
+
+    The real shape of the twelve `ocx-sh/index` packages whose `latest` and
+    partial-version tags drifted between announce and the next unrelated
+    pull request.
+    """
+    entry, object_bytes, registry = _observed_claim(tag)
+    registry.manifests[(_REPO, tag)] = _index("arm64")
+    assert registry.get_manifest(_REPO, tag).digest != entry.content
+    return entry, object_bytes, registry
+
+
+def test_a_drifted_tag_the_pr_did_not_touch_is_not_this_prs_problem() -> None:
+    entry, object_bytes, registry = _drifted("latest")
+    root = _root({"latest": entry})
+    assert (
+        verify_claims(_PACKAGE_ID, root, {entry.content: object_bytes}, registry, base=root) == ()
+    )
+
+
+def test_the_same_drift_is_still_reported_with_no_base_ref_copy() -> None:
+    # The `base=None` half of the pair above: a gate with nothing to compare
+    # against verifies everything, so the narrowing can only ever be reached
+    # deliberately.
+    entry, object_bytes, registry = _drifted("latest")
+    root = _root({"latest": entry})
+    assert verify_claims(_PACKAGE_ID, root, {entry.content: object_bytes}, registry) == (
+        ClaimFinding(package_id=_PACKAGE_ID, kind="digest-mismatch", detail="latest"),
+    )
+
+
+def test_a_tag_the_pr_repoints_is_verified_even_though_the_base_carries_it() -> None:
+    # The attack the narrowing must not open: same tag name, different digest.
+    # Only a byte-identical pair is carried over.
+    entry, object_bytes, registry = _drifted("latest")
+    base = _root({"latest": TagEntry(content="sha256:" + "9" * 64, observed=entry.observed)})
+    assert verify_claims(
+        _PACKAGE_ID, _root({"latest": entry}), {entry.content: object_bytes}, registry, base=base
+    ) == (ClaimFinding(package_id=_PACKAGE_ID, kind="digest-mismatch", detail="latest"),)
+
+
+def test_a_tag_the_pr_adds_is_verified_in_full() -> None:
+    entry, object_bytes, registry = _drifted("latest")
+    assert verify_claims(
+        _PACKAGE_ID,
+        _root({"latest": entry}),
+        {entry.content: object_bytes},
+        registry,
+        base=_root({}),
+    ) == (ClaimFinding(package_id=_PACKAGE_ID, kind="digest-mismatch", detail="latest"),)
+
+
+def test_a_carried_over_claim_still_has_its_cas_bytes_checked() -> None:
+    # The half that stays unconditional: skipping the REGISTRY re-derivation
+    # must not let a pull request delete a committed CAS object while keeping
+    # the root's claim to it.
+    entry, _, registry = _drifted("latest")
+    root = _root({"latest": entry})
+    assert verify_claims(_PACKAGE_ID, root, {}, registry, base=root) == (
+        ClaimFinding(package_id=_PACKAGE_ID, kind="cas-object-missing", detail="latest"),
+    )
+
+
+def test_a_carried_over_claim_still_has_its_cas_bytes_hash_checked() -> None:
+    entry, _, registry = _drifted("latest")
+    root = _root({"latest": entry})
+    assert verify_claims(_PACKAGE_ID, root, {entry.content: b"tampered"}, registry, base=root) == (
+        ClaimFinding(package_id=_PACKAGE_ID, kind="cas-object-hash-mismatch", detail="latest"),
+    )
+
+
+def test_repointing_the_repository_discards_every_carried_over_claim() -> None:
+    # A root whose `repository` moved resolves every tag against a different
+    # physical registry, so no claim under it was ever verified — carrying
+    # them over would trust digests observed somewhere else entirely.
+    entry, object_bytes, registry = _drifted("latest")
+    base = _root({"latest": entry})
+    moved = PackageRoot(
+        name=base.name,
+        repository="oci://ghcr.io/ocx-contrib/cmake-fork",
+        owners=base.owners,
+        status=base.status,
+        deprecated_message=None,
+        created=base.created,
+        desc=None,
+        tags=dict(base.tags),
+    )
+    assert verify_claims(
+        _PACKAGE_ID, moved, {entry.content: object_bytes}, registry, base=base
+    ) == (ClaimFinding(package_id=_PACKAGE_ID, kind="tag-missing-upstream", detail="latest"),)

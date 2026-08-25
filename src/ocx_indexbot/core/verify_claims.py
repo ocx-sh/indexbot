@@ -95,8 +95,15 @@ def _verify_tag_claim(
     repository: str,
     registry: RegistryPort,
     cas_object_bytes: Mapping[str, bytes],
+    *,
+    carried_over: bool = False,
 ) -> ClaimFinding | None:
-    """One tag's claim, re-observed. `Observation.content_digest` is the
+    """One tag's claim, re-observed unless `carried_over`.
+
+    `carried_over` says this exact `tag -> content_digest` pair is already
+    committed on the base ref, so the caller is not asserting it — see
+    `verify_claims`'s `base` parameter. The registry re-derivation below is
+    then skipped and only the local CAS checks run. `Observation.content_digest` is the
     physical registry's own digest for the image index the tag resolves to
     *now*, so the equality below compares the committed claim against a
     registry-computed value — nothing is re-derived on this side that could
@@ -110,6 +117,15 @@ def _verify_tag_claim(
     tag resolves to. Letting it propagate would break this module's
     returns-findings-never-raises contract, drop the finding the sweep exists
     to produce, and abandon every package queued behind this one."""
+    if carried_over:
+        return _verify_blob_claim(
+            package_id,
+            tag,
+            content_digest,
+            cas_object_bytes,
+            missing_kind="cas-object-missing",
+            mismatch_kind="cas-object-hash-mismatch",
+        )
     try:
         observation = observe_one_tag(repository, tag, registry)
     except ValidationError:
@@ -133,6 +149,8 @@ def verify_claims(
     root: PackageRoot,
     cas_object_bytes: Mapping[str, bytes],
     registry: RegistryPort,
+    *,
+    base: PackageRoot | None = None,
 ) -> tuple[ClaimFinding, ...]:
     """Verify every claim in `root` individually against `registry` (subset
     semantics — see module docstring).
@@ -146,11 +164,41 @@ def verify_claims(
     is compared against the registry's floating `__ocx.desc` tag,
     `core/desc.py`'s concern, not re-derived here); this closes the gap
     where only tag digests were ever byte-verified.
+
+    `base` is the same root as it stands on the pull request's BASE ref, and
+    it narrows (a)/(b) — the two REGISTRY checks — to the claims the pull
+    request is actually making. A `tag -> content` pair byte-identical to the
+    base ref is not this pull request's assertion: it was verified by this
+    same gate when it landed, and whether it is still true *today* is
+    `cli/reconcile.py`'s question, which deliberately answers it differently
+    (a floating tag drifting is expected there, not an anomaly — ADR-6
+    FP-2/FP-3). Without this, a pull request touching only governance
+    metadata is rejected for upstream drift in tags it never mentioned, and
+    the wider the change the likelier that is: the owners rename across
+    `ocx-sh/index` failed on twelve packages whose `latest`/partial-version
+    tags had moved since their last announce.
+
+    The narrowing is registry-only and cannot hide a hostile edit. (c), the
+    local CAS byte check, still runs on every claim carried over or not, so
+    deleting or corrupting a committed CAS object is still caught; a tag the
+    pull request ADDS or REPOINTS has no matching base entry and is verified
+    in full; and `base` is `None` — verify everything — whenever the caller
+    has no base-ref copy. A `repository` that differs from the base ref
+    discards the whole carry-over set: every tag then resolves against a
+    different physical registry, so no claim under it was ever verified.
     """
     findings: list[ClaimFinding] = []
+    base_tags = {} if base is None or base.repository != root.repository else base.tags
     for tag, entry in sorted(root.tags.items()):
+        base_entry = base_tags.get(tag)
         finding = _verify_tag_claim(
-            package_id, tag, entry.content, root.repository, registry, cas_object_bytes
+            package_id,
+            tag,
+            entry.content,
+            root.repository,
+            registry,
+            cas_object_bytes,
+            carried_over=base_entry is not None and base_entry.content == entry.content,
         )
         if finding is not None:
             findings.append(finding)

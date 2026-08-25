@@ -400,6 +400,8 @@ def verify_claims(
     root: PackageRoot,
     cas_object_bytes: Mapping[str, bytes],
     registry: RegistryPort,
+    *,
+    base: PackageRoot | None = None,
 ) -> tuple[ClaimFinding, ...]:
 ```
 
@@ -433,6 +435,29 @@ not a silent drop) — see §12's `cli/reconcile.py` entry for the full
 disposition table: floating-tag drift is expected cascade behavior, and a
 still-*pinned*-tag mutation is caught by the reused
 `core/anomaly.py::check_tag_mutations` instead, not by `verify_claims`.
+
+`base` (0.5.1) is the same root as it stands on the pull request's **base
+ref**, and it scopes the two REGISTRY checks — `"tag-missing-upstream"` and
+`"digest-mismatch"` — to the claims the pull request actually makes. A
+`tag -> content` pair byte-identical to the base ref is not asserted by this
+pull request: it passed this same gate when it landed, and whether it is
+still true *today* is `cli/reconcile.py`'s question, which the paragraph
+above answers differently on purpose. Without it, a pull request touching
+only governance metadata is rejected for upstream drift in tags it never
+mentioned — `ocx-sh/index`'s forge-neutral `owners[]` rename failed on
+twelve of 124 packages whose `latest`/partial-version tags had moved since
+their last announce.
+
+The narrowing is registry-only and cannot hide a hostile edit: the local CAS
+byte checks (`"cas-object-missing"`/`"cas-object-hash-mismatch"`) run on
+every claim, carried over or not; a tag the pull request adds or repoints
+has no byte-identical base entry and is verified in full; a `repository`
+differing from the base ref discards the whole carried-over set (every tag
+then resolves against a different physical registry, so no claim under it
+was ever verified); and `base=None` — no `--base-dir`, no such root at the
+base ref, or base bytes this version cannot parse — verifies everything.
+`cli/validate.py::_base_root` is that read, done once per validated root and
+shared with ND-4's update-vs-claim predicate.
 
 ### `core/desc.py`
 
