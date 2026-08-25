@@ -67,7 +67,7 @@ from ocx_indexbot.core.regenerate import regenerate
 from ocx_indexbot.core.registry_checks import check_ownership
 from ocx_indexbot.core.render import SourcePackage, build_render_plan
 from ocx_indexbot.core.validate_entry import (
-    RESERVED_NAMESPACE_SEGMENTS,
+    ALWAYS_RESERVED_SEGMENTS,
     cas_relpath,
     check_name_matches_path,
     check_namespace_not_reserved,
@@ -85,7 +85,7 @@ from ocx_indexbot.model import (
     Upstream,
     Yank,
 )
-from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles
+from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles, make_policy
 
 # --- shared locations + builders (self-contained, DAMP) --------------------
 
@@ -96,7 +96,7 @@ _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 _TS = "2026-07-17T00:00:00Z"
 _OWNER = Owner(github="alice", github_id=1)
-_PKG = PackageId(namespace="kitware", package="cmake")
+_PKG = PackageId(segments=("kitware", "cmake"))
 
 
 def _root(
@@ -153,9 +153,11 @@ def _observation(tag: str, content_digest: str) -> Observation:
 def test_g02_name_must_equal_path() -> None:
     """G-02: `check_name_matches_path` raises when `name` != path-derived
     `ocx.sh/<ns>/<pkg>`, passes when it matches."""
-    check_name_matches_path(_PKG, _root(name="ocx.sh/kitware/cmake"))  # matches -> no raise
+    check_name_matches_path(
+        _PKG, _root(name="ocx.sh/kitware/cmake"), index_name="ocx.sh"
+    )  # matches -> no raise
     with pytest.raises(ValidationError):
-        check_name_matches_path(_PKG, _root(name="ocx.sh/kitware/wrong"))
+        check_name_matches_path(_PKG, _root(name="ocx.sh/kitware/wrong"), index_name="ocx.sh")
 
 
 # --- G-03 ------------------------------------------------------------------
@@ -230,9 +232,9 @@ def test_g06_render_reachability_filter() -> None:
             f"{_DIGEST_B}.json": orphan_obj,
         },
     )
-    paths = {fw.path for fw in build_render_plan((source,))}
-    assert cas_relpath("kitware", "cmake", _DIGEST_A, "json") in paths
-    assert cas_relpath("kitware", "cmake", _DIGEST_B, "json") not in paths
+    paths = {fw.path for fw in build_render_plan((source,), name_segments=2)}
+    assert cas_relpath(_PKG, _DIGEST_A, "json") in paths
+    assert cas_relpath(_PKG, _DIGEST_B, "json") not in paths
 
 
 # --- G-07 ------------------------------------------------------------------
@@ -253,9 +255,9 @@ def test_g07_render_idempotent_noop() -> None:
     files = InMemoryFiles()
     _seed_render_source(files)
     write_args = argparse.Namespace(index_dir="", out="dist", check=False)
-    assert cli_render.run(write_args, files=files) == ExitCode.OK
+    assert cli_render.run(write_args, files=files, policy=make_policy()) == ExitCode.OK
     check_args = argparse.Namespace(index_dir="", out="dist", check=True)
-    assert cli_render.run(check_args, files=files) == ExitCode.OK
+    assert cli_render.run(check_args, files=files, policy=make_policy()) == ExitCode.OK
 
 
 # --- G-08 (RETIRED — absence test) -----------------------------------------
@@ -316,11 +318,17 @@ def test_nd4_index_segment_is_reserved() -> None:
     the namespace and package position `check_namespace_not_reserved`
     checks (a `PackageId` does not otherwise distinguish which position
     collided)."""
-    assert "index" in RESERVED_NAMESPACE_SEGMENTS
+    assert "index" in ALWAYS_RESERVED_SEGMENTS
     with pytest.raises(ValidationError, match="index"):
-        check_namespace_not_reserved(PackageId(namespace="index", package="foo"))
+        check_namespace_not_reserved(
+            PackageId(segments=("index", "foo")),
+            operator_reserved=frozenset(),
+        )
     with pytest.raises(ValidationError, match="index"):
-        check_namespace_not_reserved(PackageId(namespace="foo", package="index"))
+        check_namespace_not_reserved(
+            PackageId(segments=("foo", "index")),
+            operator_reserved=frozenset(),
+        )
 
 
 def test_nd4_c_segment_is_reserved() -> None:
@@ -332,11 +340,17 @@ def test_nd4_c_segment_is_reserved() -> None:
     namespace and package position `check_namespace_not_reserved` checks (a
     `PackageId` does not otherwise distinguish which position collided) --
     same convention as `test_nd4_index_segment_is_reserved` above."""
-    assert "c" in RESERVED_NAMESPACE_SEGMENTS
+    assert "c" in ALWAYS_RESERVED_SEGMENTS
     with pytest.raises(ValidationError, match="c"):
-        check_namespace_not_reserved(PackageId(namespace="c", package="foo"))
+        check_namespace_not_reserved(
+            PackageId(segments=("c", "foo")),
+            operator_reserved=frozenset(),
+        )
     with pytest.raises(ValidationError, match="c"):
-        check_namespace_not_reserved(PackageId(namespace="foo", package="c"))
+        check_namespace_not_reserved(
+            PackageId(segments=("foo", "c")),
+            operator_reserved=frozenset(),
+        )
 
 
 # --- G-10 ------------------------------------------------------------------
@@ -409,7 +423,7 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
         files=files,
         registry=registry,
         github=github,
-        allowed_hosts=frozenset({"ghcr.io"}),
+        policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
     )
 
     assert result == ExitCode.OK
@@ -549,7 +563,10 @@ def _disposition_of(github: FakeGitHub) -> str:
     """The commit-status state `governance_check.run` set — the exact value it
     also writes to `$GITHUB_OUTPUT` as `disposition`, which `governance.yml`'s
     `gh pr merge --auto --squash` step gates on (`== 'success'`)."""
-    assert governance_check.run(argparse.Namespace(pr_number=1), github=github) == ExitCode.OK
+    assert (
+        governance_check.run(argparse.Namespace(pr_number=1), github=github, policy=make_policy())
+        == ExitCode.OK
+    )
     _context, state, _description = github.statuses["head-sha"][0]
     return state
 
@@ -559,13 +576,21 @@ def test_g19_machine_lane_requires_author_owner(_github_output: Path) -> None:
     `owners[]` goes green (`success`); an author not in `owners[]` falls back
     to the human lane (`pending`)."""
     owner_github = _refresh_pr_github(author_id=1)
-    assert governance_check.run(argparse.Namespace(pr_number=1), github=owner_github) == ExitCode.OK
+    assert (
+        governance_check.run(
+            argparse.Namespace(pr_number=1), github=owner_github, policy=make_policy()
+        )
+        == ExitCode.OK
+    )
     _context, state, _description = owner_github.statuses["head-sha"][0]
     assert state == "success"
 
     stranger_github = _refresh_pr_github(author_id=999)
     assert (
-        governance_check.run(argparse.Namespace(pr_number=1), github=stranger_github) == ExitCode.OK
+        governance_check.run(
+            argparse.Namespace(pr_number=1), github=stranger_github, policy=make_policy()
+        )
+        == ExitCode.OK
     )
     _context, stranger_state, description = stranger_github.statuses["head-sha"][0]
     assert stranger_state == "pending"
@@ -651,8 +676,8 @@ def test_g20_human_lane_assigns_maintainers_reviewers(_github_output: Path) -> N
     )
     github = FakeGitHub(files=files, pull_request_info={1: info})
 
-    governance_check.run(argparse.Namespace(pr_number=1), github=github)
-    governance_check.run(argparse.Namespace(pr_number=1), github=github)
+    governance_check.run(argparse.Namespace(pr_number=1), github=github, policy=make_policy())
+    governance_check.run(argparse.Namespace(pr_number=1), github=github, policy=make_policy())
 
     assert github.requested_reviewers[1] == ["carol", "carol"]  # author 'alice' excluded both runs
     assert list(github.comments[1]) == [

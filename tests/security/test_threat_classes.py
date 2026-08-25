@@ -43,14 +43,14 @@ from ocx_indexbot.model import (
     TagEntry,
     Yank,
 )
-from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles
+from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles, make_policy
 
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 _TS = "2026-07-17T00:00:00Z"
 _ROOT_PATH = "p/kitware/cmake.json"
 _MAINTAINERS = b"maintainers:\n  - github: carol\n    github_id: 99\n"
-_PKG = PackageId(namespace="kitware", package="cmake")
+_PKG = PackageId(segments=("kitware", "cmake"))
 
 
 @pytest.fixture
@@ -131,6 +131,7 @@ def test_threat_ssrf_allowlist_before_registry() -> None:
         out="dist",
         fork=None,
         index_repo="ocx-sh/index",
+        base_ref="main",
         yank=[],
         unyank=[],
         yank_reason="yanked via announce",
@@ -143,7 +144,7 @@ def test_threat_ssrf_allowlist_before_registry() -> None:
             fork_github=None,
             files=InMemoryFiles(),
             clock=FixedClock(),
-            allowed_hosts=frozenset({"ghcr.io"}),
+            policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
         )
 
 
@@ -183,7 +184,7 @@ def test_threat_self_authorizing_owners_edit(_github_output: Path) -> None:
     )
     github = FakeGitHub(files=files, pull_request_info={1: info})
 
-    governance_check.run(argparse.Namespace(pr_number=1), github=github)
+    governance_check.run(argparse.Namespace(pr_number=1), github=github, policy=make_policy())
 
     _context, state, description = github.statuses["head-sha"][0]
     assert state == "pending"
@@ -221,12 +222,18 @@ def test_threat_authz_binds_numeric_id_not_login(_github_output: Path) -> None:
     the id (`alice-renamed`/id 1) IS -> `success`. Authorization binds
     `github_id`, never the mutable login (ADR-6 FP-1/ND-8)."""
     recycled = _refresh_github(author_login="alice", author_id=999)
-    assert governance_check.run(argparse.Namespace(pr_number=1), github=recycled) == ExitCode.OK
+    assert (
+        governance_check.run(argparse.Namespace(pr_number=1), github=recycled, policy=make_policy())
+        == ExitCode.OK
+    )
     _context, recycled_state, _description = recycled.statuses["head-sha"][0]
     assert recycled_state == "pending"
 
     renamed = _refresh_github(author_login="alice-renamed", author_id=1)
-    assert governance_check.run(argparse.Namespace(pr_number=1), github=renamed) == ExitCode.OK
+    assert (
+        governance_check.run(argparse.Namespace(pr_number=1), github=renamed, policy=make_policy())
+        == ExitCode.OK
+    )
     _context, renamed_state, _description = renamed.statuses["head-sha"][0]
     assert renamed_state == "success"
 
@@ -295,15 +302,23 @@ def test_threat_fork_pr_cannot_claim_the_reserved_brand_namespace() -> None:
     and the generic control-path segments stay blocked either way.
     """
     for package in ("cli", "mirror"):
-        claim = PackageId(namespace="ocx", package=package)
+        claim = PackageId(segments=("ocx", package))
         with pytest.raises(ValidationError):
-            check_namespace_not_reserved(claim)  # fork PR: flag withheld
-        check_namespace_not_reserved(claim, allow_reserved=True)  # same-repo PR
+            check_namespace_not_reserved(
+                claim, operator_reserved=make_policy().reserved_namespaces
+            )  # fork PR: flag withheld
+        check_namespace_not_reserved(
+            claim, allow_reserved=True, operator_reserved=make_policy().reserved_namespaces
+        )  # same-repo PR
 
     # The carve-out is brand-only: `p/` is a control-path segment, and no PR
     # provenance unlocks it.
     with pytest.raises(ValidationError):
-        check_namespace_not_reserved(PackageId(namespace="p", package="thing"), allow_reserved=True)
+        check_namespace_not_reserved(
+            PackageId(segments=("p", "thing")),
+            operator_reserved=make_policy().reserved_namespaces,
+            allow_reserved=True,
+        )
 
 
 # --- a fork PR may REFRESH a reserved root, never re-aim it -----------------
@@ -354,7 +369,7 @@ def _fork_pr_validate(head: PackageRoot, base: PackageRoot | None) -> ExitCode:
             }
         ),
         registry=FakeRegistry(),
-        allowed_hosts=frozenset({"ghcr.io"}),
+        policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
         base_files=InMemoryFiles(
             files={} if base is None else {_RESERVED_PATH: serialize_package_root(base)}
         ),
