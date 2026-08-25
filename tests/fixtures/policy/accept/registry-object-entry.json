@@ -1,0 +1,15 @@
+{
+  "name": "acme.corp",
+  "name_segments": 2,
+  "registry_hosts": [
+    "ghcr.io",
+    {
+      "host": "artifactory.corp",
+      "base_url": "https://oci-prod.artifactory.corp:8443",
+      "realm": "https://oci-prod.artifactory.corp:8443/v2/token",
+      "service": "artifactory",
+      "auth": "basic",
+      "credentials_env": "OCX_REGISTRY_ARTIFACTORY"
+    }
+  ]
+}

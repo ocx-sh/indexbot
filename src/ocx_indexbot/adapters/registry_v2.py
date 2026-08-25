@@ -58,10 +58,12 @@ request outside the path segment it was built for (A-5).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import random
 import time
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 from urllib.parse import quote, urlsplit
 
@@ -74,6 +76,7 @@ from ocx_indexbot.model import ManifestFetch
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from ocx_indexbot.core.policy import RegistryAuth
     from ocx_indexbot.model import OwnershipProbeResult
 
 GHCR_HOST: Final[str] = "ghcr.io"
@@ -122,6 +125,25 @@ GHCR and `ocx.sh` both name themselves here, so the adapter passed `host` for
 this parameter and the coupling went unnoticed. Sending
 `service=registry.gitlab.com` yields a token that is not valid for the
 requested scope — an index whose downloads 401 rather than one that works."""
+
+BUILTIN_REGISTRIES: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
+    {
+        GHCR_HOST: MappingProxyType({}),
+        OCX_SH_HOST: MappingProxyType({"realm": OCX_SH_REALM}),
+        GITLAB_HOST: MappingProxyType({"realm": GITLAB_REALM, "service": GITLAB_SERVICE}),
+    }
+)
+"""What a bare-string `registry_hosts` entry means, for the hosts whose
+non-default token endpoints this package already knows.
+
+An index that writes `"ghcr.io"` gets the Registry v2 conventions;
+`"ocx.sh"` and `"registry.gitlab.com"` additionally get the two facts no
+convention supplies (Artifactory's token path, GitLab's fixed `service`
+literal). Every other host either follows the conventions — `https://<host>`,
+`<base_url>/token`, `service = host` — or states its own in an object entry.
+This is a convenience table, not an allowlist: `cli/_wiring.py` builds a
+client for whatever the policy names, and a host absent from here is not
+refused, only undefaulted."""
 
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 """Per-request deadline handed to every `httpx` call.
@@ -267,16 +289,29 @@ def _same_origin(current: str, target: str) -> bool:
     return (left.scheme, left.netloc) == (right.scheme, right.netloc)
 
 
-def _denied_message(host: str, repo_path: str) -> str:
+def _denied_message(host: str, repo_path: str, credentialed: bool = False) -> str:
     """`403`/`DENIED` from the registry (token endpoint or a `/v2/` call),
-    body present or empty — the repository is missing or private and does not
-    grant anonymous `:pull`. Permanent, not retryable: distinct from a
-    `401`, which the token dance above can still recover from.
+    body present or empty — the repository is missing, or the identity this
+    bot presented does not grant `:pull` on it. Permanent, not retryable:
+    distinct from a `401`, which the token dance above can still recover
+    from.
+
+    Which identity that was decides what the operator has to fix, so the
+    message says: with no credential configured the answer is "grant
+    anonymous pull", and with one it is "grant this account pull" — never the
+    first sentence when a credential was in fact sent, which would send an
+    operator looking for a permission they already have.
     """
+    identity = (
+        "the configured credentials do not grant :pull on it"
+        if credentialed
+        else "it does not allow anonymous pull"
+    )
+    remedy = "grant that account" if credentialed else "grant anonymous"
     return (
-        f"{host}/{repo_path} is missing or does not allow anonymous pull "
-        "(the registry denied the request with 403); the repository must exist and grant "
-        "anonymous :pull access before this bot can observe it"
+        f"{host}/{repo_path} is missing or {identity} "
+        "(the registry denied the request with 403); the repository must exist and "
+        f"{remedy} :pull access before this bot can observe it"
     )
 
 
@@ -310,11 +345,14 @@ class RegistryV2:
     host: str = GHCR_HOST
     realm: str = ""
     service: str = ""
+    auth: RegistryAuth = "token"
+    credentials: str = field(default="", repr=False)
     timeout: float = _DEFAULT_TIMEOUT_SECONDS
     policy: BackoffPolicy = field(default_factory=BackoffPolicy)
     max_pages: int = _DEFAULT_MAX_PAGES
     client: httpx.Client = field(default_factory=httpx.Client)
     _tokens: dict[str, str] = field(default_factory=dict[str, str], init=False, repr=False)
+    _basic: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Default the token endpoint to `<base_url>/token` — the Registry v2
@@ -324,11 +362,28 @@ class RegistryV2:
         because Artifactory issues tokens from a different path.
 
         `service` defaults to `host` — the convention GHCR and `ocx.sh` both
-        follow. GitLab does not, and passes its own literal."""
+        follow. GitLab does not, and passes its own literal.
+
+        `credentials` is `user:password` (Docker's own convention) and is
+        base64'd here, once, into the header every authenticated request
+        reuses — never split into parts, because RFC 7617 encodes the pair
+        verbatim and a password may legitimately contain a colon. A value
+        with no colon at all is refused loudly: it is a misconfigured secret,
+        and the alternative is a registry that answers 401 forever for a
+        reason nobody can see. The message names the host, never the value.
+        """
         if not self.service:
             self.service = self.host
         if not self.realm:
             self.realm = f"{self.base_url}/token"
+        if self.credentials:
+            if ":" not in self.credentials:
+                raise ValidationError(
+                    f"{self.host}: malformed registry credentials — expected 'user:password' "
+                    "(Docker's convention), got a value with no ':' separator"
+                )
+            encoded = base64.b64encode(self.credentials.encode()).decode()
+            self._basic = f"Basic {encoded}"
 
     def list_tags(self, repository: str) -> list[str]:
         repo_path = _repo_path(repository)
@@ -425,9 +480,9 @@ class RegistryV2:
         attempt = 1
         while True:
             request_headers = dict(headers or {})
-            token = self._tokens.get(repo_path)
-            if token is not None:
-                request_headers["Authorization"] = f"Bearer {token}"
+            authorization = self._authorization(repo_path)
+            if authorization is not None:
+                request_headers["Authorization"] = authorization
 
             try:
                 response = self.client.request(
@@ -435,7 +490,10 @@ class RegistryV2:
                 )
 
                 if response.status_code == 401:
-                    if auth_retried:
+                    # `basic` mode has nothing to refresh: the credential it
+                    # already sent is the whole of what it can offer, so a
+                    # second identical attempt is only a slower failure.
+                    if auth_retried or self.auth == "basic":
                         raise TransientError(f"persistent 401 for {method} {url}")
                     self._tokens[repo_path] = self._fetch_token(repo_path)
                     # Set only after the fetch lands: a token fetch that dies
@@ -461,7 +519,7 @@ class RegistryV2:
                 continue
 
             if response.status_code == 403:
-                raise ValidationError(_denied_message(self.host, repo_path))
+                raise ValidationError(_denied_message(self.host, repo_path, bool(self.credentials)))
 
             if response.is_redirect:
                 return self._follow(response, repo_path=repo_path)
@@ -508,23 +566,44 @@ class RegistryV2:
             target = str(response.next_request.url)
             headers: dict[str, str] = {}
             if _same_origin(str(response.url), target):
-                token = self._tokens.get(repo_path)
-                if token is not None:
-                    headers["Authorization"] = f"Bearer {token}"
+                authorization = self._authorization(repo_path)
+                if authorization is not None:
+                    headers["Authorization"] = authorization
             response = self.client.request("GET", target, headers=headers, timeout=self.timeout)
             seen += 1
         if response.is_redirect:
             raise TransientError(f"registry redirected more than {_MAX_REDIRECTS} times")
         return response
 
+    def _authorization(self, repo_path: str) -> str | None:
+        """The `Authorization` header this instance sends for `repo_path`, or
+        `None` when it has nothing to send yet.
+
+        One chokepoint for both credential shapes, so every call site — the
+        request loop and the same-origin redirect hop — carries exactly the
+        same rule, and a future third shape has one place to be wrong in.
+        """
+        if self.auth == "basic":
+            return self._basic or None
+        token = self._tokens.get(repo_path)
+        return None if token is None else f"Bearer {token}"
+
     def _fetch_token(self, repo_path: str) -> str:
+        """Exchange `realm` for a pull token, authenticating the exchange
+        itself when this registry has credentials.
+
+        Basic-on-the-token-request is Docker's own flow: the realm is the
+        only endpoint that ever sees the operator's credential, and what
+        reaches `/v2/` afterwards is a scoped, short-lived Bearer.
+        """
         response = self.client.get(
             self.realm,
             params={"service": self.service, "scope": f"repository:{repo_path}:pull"},
+            headers={"Authorization": self._basic} if self._basic else None,
             timeout=self.timeout,
         )
         if response.status_code == 403:
-            raise ValidationError(_denied_message(self.host, repo_path))
+            raise ValidationError(_denied_message(self.host, repo_path, bool(self.credentials)))
         response.raise_for_status()
         return str(response.json()["token"])
 
@@ -536,13 +615,14 @@ class RoutedRegistry:
 
     The index serves more than one registry host (`.github/index-policy.json`),
     and one `validate`/`reconcile` run can touch roots on both — so the choice
-    has to be per call, not per run. `cli/_wiring.py` builds the mapping; its
-    keys are exactly `_wiring.REGISTRY_ADAPTER_HOSTS`.
+    has to be per call, not per run. `cli/_wiring.py` builds the mapping, one
+    client per `registry_hosts` entry, so its keys are exactly this
+    deployment's allowlist.
 
     A host with no client is a `ValidationError`, not a `KeyError`: it is
     unreachable in production (`check_repository_allowlisted` refuses any host
-    outside the policy, and `_registry_hosts` refuses any policy host without a
-    client, both before this class ever sees the URI), so this is the
+    outside the policy, and every policy host gets a client by construction,
+    both before this class ever sees the URI), so this is the
     defence-in-depth backstop for a future wiring bug — and it must fail the
     same closed way an out-of-policy host does.
     """
@@ -565,8 +645,13 @@ class RoutedRegistry:
         return self._client(repository).probe_ownership(repository, expected_name)
 
     def _client(self, repository: str) -> RegistryV2:
-        host = urlsplit(repository).netloc
-        client = self.by_host.get(host)
+        # `hostname`, never `netloc`: G-03 matches a policy entry against the
+        # port-stripped hostname (`core/validate_entry.check_repository_allowlisted`),
+        # so keying this lookup on `netloc` made `oci://harbor.corp:5000/team/tool`
+        # pass validation and then find no client at all. Where the requests
+        # actually go is the entry's own `base_url`, port included.
+        host = urlsplit(repository).hostname
+        client = None if host is None else self.by_host.get(host)
         if client is None:
             raise ValidationError(
                 f"no registry client for host {host!r} (serving {sorted(self.by_host)})"

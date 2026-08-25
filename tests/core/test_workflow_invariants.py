@@ -19,6 +19,7 @@ directory you have to go open (`docs/reference/contracts.md` §2).
 from __future__ import annotations
 
 from ocx_indexbot.ci import render
+from ocx_indexbot.core.policy import RegistryConfig
 from ocx_indexbot.core.workflow_invariants import (
     check_workflows,
     job_block,
@@ -794,6 +795,27 @@ def test_the_generated_workflow_tree_satisfies_every_invariant() -> None:
     plan = render.build_render_plan(make_policy(deploy_workflow="render-deploy.yml"), existing={})
     workflows = {path.rsplit("/", 1)[-1]: text for path, text in plan.items()}
     assert check_workflows(workflows, owner="ocx-sh") == ()
+
+
+def test_the_generated_tree_keeps_a_registry_credential_out_of_the_fork_lane() -> None:
+    """A credentialed registry puts its variable in the privileged reconcile
+    job and nowhere near the `pull_request` gate that runs a fork's own code.
+    The rendered job matrix is what enforces that; `cli/_wiring` is what makes
+    it moot even if a hand-edit got one there, by building the fork lane's
+    registry clients from an empty environment."""
+    policy = make_policy(
+        registries={
+            "artifactory.corp": RegistryConfig(
+                host="artifactory.corp", credentials_env="OCX_REGISTRY_ART"
+            )
+        }
+    )
+    plan = render.build_render_plan(policy, existing={})
+    workflows = {path.rsplit("/", 1)[-1]: text for path, text in plan.items()}
+
+    assert check_workflows(workflows, owner="ocx-sh") == ()
+    assert "OCX_REGISTRY_ART: ${{ secrets.OCX_REGISTRY_ART }}" in workflows["reconcile.yml"]
+    assert "OCX_REGISTRY_ART" not in workflows["validate.yml"]
 
 
 # --- WF-08 through a local composite action ----------------------------------

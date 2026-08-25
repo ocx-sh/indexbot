@@ -1,0 +1,5 @@
+{
+  "name": "acme.corp",
+  "name_segments": 2,
+  "registry_hosts": [{"host": "oci.corp:8443"}]
+}

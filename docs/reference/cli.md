@@ -52,7 +52,11 @@ indexbot validate [--offline] [--allow-reserved-namespace] [--base-dir DIR] <pat
 | `--base-dir` | Directory holding each root's base-ref copy, so an announce-shaped update to a root already committed under a reserved segment is not read as a fresh claim |
 
 Runs with no token and no write scope. It is the job that touches PR-head
-content, which is exactly why it holds no credential.
+content, which is exactly why it holds no credential — including the registry
+credentials in [`registry_hosts`](policy.md#registries): its clients are built
+from an empty environment, and a root on a credentialed registry is
+shape-checked with a WARN naming the variable, then verified for real by
+`reconcile`.
 
 Takes an explicit file set, which a caller has to compute. `validate-pr` below
 computes it and is what a pipeline should run.
@@ -455,6 +459,8 @@ GitLab column; anything else uses GitHub.
 | `GITHUB_EVENT_PATH` | `validate-pr`, for the pull request's head-repository provenance |
 | `GITHUB_BASE_REF` | `validate-pr`, as `origin/<branch>` when no base sha is given |
 | `INDEXBOT_BASE_SHA` | `validate-pr`, on any CI — the forge-independent base commit |
+| `GITHUB_API_URL` / `GITHUB_GRAPHQL_URL` | the seven above, as the API roots; default to `api.github.com`, and GitHub Enterprise Server sets both |
+| *your* `credentials_env` names | `reconcile` and `seed-import` only, as `user:password` per registry — the names come from [`registry_hosts`](policy.md#registries), never from this package. `validate`/`validate-pr` read none of them |
 
 `render` and bare `validate` appear in neither table on purpose: `validate`
 takes its files as explicit arguments, and `render` reads no environment
@@ -472,6 +478,7 @@ On GitLab CI:
 | `CI_MERGE_REQUEST_DIFF_BASE_SHA` | `validate-pr`, as the base commit |
 | `CI_MERGE_REQUEST_SOURCE_PROJECT_PATH` | `validate-pr`, compared against `CI_MERGE_REQUEST_PROJECT_PATH` for provenance. **Not** `CI_PROJECT_PATH`, which names the project the pipeline runs in — for a fork merge request that is the fork, so it equals the source project every time |
 | `CI_MERGE_REQUEST_PROJECT_PATH` | `validate-pr`, the target project of the merge request |
+| *your* `credentials_env` names | as in the GitHub column — masked, protected CI/CD variables, read only by the privileged lanes |
 
 GitLab has no job-summary surface, so a failure reason goes to stderr, which is
 the job log.

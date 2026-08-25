@@ -15,16 +15,15 @@ PR-open over a real socket.
 from __future__ import annotations
 
 import base64
-import functools
 import json
 from pathlib import Path
 
 import pytest
 
 from ocx_indexbot.adapters.github_api import GitHubApi
-from ocx_indexbot.adapters.registry_v2 import RegistryV2
 from ocx_indexbot.cli.main import main
 from ocx_indexbot.exit_codes import ExitCode
+from tests.integration.conftest import write_policy
 from tests.integration.fixtures.canonical import (
     CANONICAL_INDEX,
     CANONICAL_ROOT_PATH,
@@ -47,12 +46,9 @@ def test_validate_end_to_end(
 
     # Seam 1 (FilePort root): `_wiring._repo_root()` reads GITHUB_WORKSPACE.
     monkeypatch.setenv("GITHUB_WORKSPACE", str(index_tree))
-    # Seam 2 (RegistryPort base URL): `_wiring._run_validate` builds a bare
-    # `RegistryV2()`; thread the fake's base URL through the adapter's own
-    # `base_url` constructor arg by monkeypatching the wiring's class reference.
-    monkeypatch.setattr(
-        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=fake_ghcr.base_url)
-    )
+    # Seam 2 (RegistryPort address): the checkout's own policy, which is where
+    # every registry's address comes from — no monkeypatching of the adapter.
+    write_policy(index_tree, [{"host": "ghcr.io", "base_url": fake_ghcr.base_url}])
 
     exit_code = main(["validate", CANONICAL_ROOT_PATH])
 

@@ -75,7 +75,14 @@ jobs:
       # `$GITHUB_WORKSPACE` to route around its own cwd. With the source
       # extracted there is no `bot/` to sit in: the run happens at the checkout
       # root, where the index data actually is.
+      # The registry credentials this deployment's `.github/index-policy.json`
+      # declares, if any. This lane is the one that verifies registry truth for
+      # every root — including the ones the fork-PR gate could only check the
+      # shape of: that lane builds its registry clients from an empty
+      # environment, so it never holds one of these.
+      # `indexbot reconcile` refuses to start when one of these is unset.
       - name: indexbot reconcile
         env:
           GITHUB_TOKEN: ${{ github.token }}
+{{registry_credentials_env}}
         run: {{run}} reconcile --anomaly-ok

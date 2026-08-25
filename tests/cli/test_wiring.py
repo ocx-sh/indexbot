@@ -18,11 +18,11 @@ from ocx_indexbot.adapters.github_api import GitHubApi
 from ocx_indexbot.adapters.gitlab_api import GitLabApi
 from ocx_indexbot.adapters.local_files import LocalFiles
 from ocx_indexbot.adapters.local_git import LocalGit
-from ocx_indexbot.adapters.registry_v2 import GHCR_HOST, GITLAB_HOST, OCX_SH_HOST, OCX_SH_REALM
+from ocx_indexbot.adapters.registry_v2 import GITLAB_HOST, OCX_SH_HOST, OCX_SH_REALM
 from ocx_indexbot.cli import _wiring
 from ocx_indexbot.cli import main as main_module
 from ocx_indexbot.core.observe import observe
-from ocx_indexbot.core.policy import INDEX_POLICY_PATH
+from ocx_indexbot.core.policy import INDEX_POLICY_PATH, IndexPolicy
 from ocx_indexbot.core.validate_entry import serialize_package_root
 from ocx_indexbot.errors import TransientError, ValidationError
 from ocx_indexbot.exit_codes import ExitCode
@@ -259,7 +259,7 @@ def test_validate_pr_is_wired_to_local_git_and_an_out_of_tree_base_port(
         *,
         git: object,
         files: object,
-        registry: object,
+        registry_for: object,
         base_files: object,
     ) -> ExitCode:
         # No `policy=`: this is the one job that checks out PR-head content, so
@@ -267,7 +267,14 @@ def test_validate_pr_is_wired_to_local_git_and_an_out_of_tree_base_port(
         # signature is the assertion — a wiring that reintroduced
         # `policy=_local_policy(files)` would fail here with a TypeError rather
         # than quietly obey the pull request's own copy.
-        seen.update(args=args, git=git, files=files, registry=registry, base_files=base_files)
+        #
+        # `registry_for`, not `registry`, for the same reason: the registry is
+        # built from the BASE-ref policy, which only `validate_pr` can resolve,
+        # so the wiring hands it a factory rather than a client configured from
+        # the pull request's own registry entries.
+        seen.update(
+            args=args, git=git, files=files, registry_for=registry_for, base_files=base_files
+        )
         return ExitCode.OK
 
     monkeypatch.setattr(_wiring.validate_pr, "run", _spy)
@@ -304,43 +311,137 @@ def test_index_policy_missing_policy_file_fails_closed() -> None:
         _wiring._index_policy(None)  # pyright: ignore[reportPrivateUsage]
 
 
-def test_index_policy_rejects_a_host_no_adapter_can_serve() -> None:
-    """The trap this guard exists to close: allowlisting a host with no
-    `RegistryPort` would produce roots that validate and then cannot be
-    fetched. Refused at wiring time, naming the missing adapter."""
+def test_index_policy_admits_a_corporate_host_no_adapter_was_compiled_for() -> None:
+    """The refusal this used to raise is gone, and its absence is the feature:
+    a host is servable because its own entry says where it lives, so
+    allowlisting `harbor.corp.internal` now wires a client for it instead of
+    refusing the policy."""
     policy = b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["harbor.corp.internal"]}'
-    with pytest.raises(ValidationError, match="no registry adapter can serve"):
-        _wiring._index_policy(policy)  # pyright: ignore[reportPrivateUsage]
+    parsed = _wiring._index_policy(policy)  # pyright: ignore[reportPrivateUsage]
+    assert parsed.registry_hosts == frozenset({"harbor.corp.internal"})
+    assert set(_wiring._registry(parsed, credentialed=True).by_host) == {"harbor.corp.internal"}  # pyright: ignore[reportPrivateUsage]
 
 
-def test_index_policy_rejects_an_unservable_host_alongside_a_servable_one() -> None:
-    """Partial coverage is still a trap — one bad host poisons the whole
-    policy, it is not silently filtered down to the servable subset."""
+def test_every_allowlisted_host_gets_a_client() -> None:
+    """The invariant that replaced the guard: `_registry` builds from the
+    allowlist itself, so "admitted but unreachable" is not a state the two can
+    be in."""
     policy = (
         b'{"name": "ocx.sh", "name_segments": 2, '
         b'"registry_hosts": ["ghcr.io", "harbor.corp.internal"]}'
     )
-    with pytest.raises(ValidationError, match=r"harbor\.corp\.internal"):
-        _wiring._index_policy(policy)  # pyright: ignore[reportPrivateUsage]
-
-
-def test_adapter_hosts_matches_the_registry_adapters_that_exist() -> None:
-    """The servable-host set is exactly the hosts `_registry()` wires a client
-    for. This asserts the set stays honest: growing it without wiring a client
-    re-opens the gap the guard closes."""
-    assert frozenset({GHCR_HOST, OCX_SH_HOST, GITLAB_HOST}) == _wiring.REGISTRY_ADAPTER_HOSTS
-    assert set(_wiring._registry().by_host) == _wiring.REGISTRY_ADAPTER_HOSTS  # pyright: ignore[reportPrivateUsage]
+    parsed = _wiring._index_policy(policy)  # pyright: ignore[reportPrivateUsage]
+    assert set(_wiring._registry(parsed, credentialed=True).by_host) == parsed.registry_hosts  # pyright: ignore[reportPrivateUsage]
 
 
 def test_registry_wires_the_ocx_sh_token_endpoint() -> None:
     """`ocx.sh` is Artifactory-backed: its pull tokens come from the realm its
     own `401` advertises, not from `https://ocx.sh/token` (which 404s). A
     client wired with GHCR's `{base_url}/token` default would fail every read
-    against it."""
-    client = _wiring._registry().by_host[OCX_SH_HOST]  # pyright: ignore[reportPrivateUsage]
+    against it — so a bare `"ocx.sh"` entry still gets that fact from the
+    built-in table."""
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["ocx.sh"]}'
+    )
+    client = _wiring._registry(policy, credentialed=True).by_host[OCX_SH_HOST]  # pyright: ignore[reportPrivateUsage]
     assert client.host == OCX_SH_HOST
     assert client.base_url == "https://ocx.sh"
     assert client.realm == OCX_SH_REALM
+    assert client.credentials == ""
+
+
+def test_registry_wires_the_gitlab_token_service_literal() -> None:
+    """GitLab's token `service` is the fixed literal `container_registry`,
+    never its host — a bare entry inherits that too."""
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["registry.gitlab.com"]}'
+    )
+    client = _wiring._registry(policy, credentialed=True).by_host[GITLAB_HOST]  # pyright: ignore[reportPrivateUsage]
+    assert client.service == "container_registry"
+
+
+def test_registry_client_takes_its_address_and_credential_from_the_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The corporate case end to end: an object entry names a real address, a
+    token realm and the env var holding `user:password`, and the client is
+    built from exactly that."""
+    monkeypatch.setenv("OCX_REGISTRY_ARTIFACTORY", "svc-ocx:secret")
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "acme.corp", "name_segments": 2, "registry_hosts": ['
+        b'{"host": "artifactory.corp", "base_url": "https://oci.artifactory.corp:8443", '
+        b'"realm": "https://oci.artifactory.corp:8443/v2/token", "auth": "basic", '
+        b'"credentials_env": "OCX_REGISTRY_ARTIFACTORY"}]}'
+    )
+    client = _wiring._registry(policy, credentialed=True).by_host["artifactory.corp"]  # pyright: ignore[reportPrivateUsage]
+    assert client.base_url == "https://oci.artifactory.corp:8443"
+    assert client.realm == "https://oci.artifactory.corp:8443/v2/token"
+    assert client.auth == "basic"
+    assert client.credentials == "svc-ocx:secret"
+
+
+def test_registry_client_ignores_the_builtin_table_for_an_explicit_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy that repoints a known host at its own mirror must not inherit
+    the built-in realm — that would send the mirror's credentials to an
+    address nobody wrote down."""
+    monkeypatch.delenv("OCX_REGISTRY_ART", raising=False)
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "acme.corp", "name_segments": 2, "registry_hosts": ['
+        b'{"host": "ocx.sh", "base_url": "https://mirror.acme.corp"}]}'
+    )
+    client = _wiring._registry(policy, credentialed=True).by_host[OCX_SH_HOST]  # pyright: ignore[reportPrivateUsage]
+    assert client.realm == "https://mirror.acme.corp/token"
+
+
+def test_the_fork_lane_registry_holds_no_credential_even_when_one_is_exported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`validate`/`validate-pr` read a policy that PR-head content can write,
+    and that policy names both where a credential is sent (`base_url`) and
+    which variable holds it. The fork-lane factory therefore builds from an
+    empty environment: the credential is absent by construction, not because
+    the runner happened not to set it."""
+    monkeypatch.setenv("OCX_REGISTRY_ARTIFACTORY", "svc-ocx:secret")
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "acme.corp", "name_segments": 2, "registry_hosts": ['
+        b'{"host": "artifactory.corp", "base_url": "https://oci.artifactory.corp:8443", '
+        b'"credentials_env": "OCX_REGISTRY_ARTIFACTORY"}]}'
+    )
+
+    privileged = _wiring._registry(policy, credentialed=True)  # pyright: ignore[reportPrivateUsage]
+    fork = _wiring._anonymous_registry(policy)  # pyright: ignore[reportPrivateUsage]
+
+    assert privileged.by_host["artifactory.corp"].credentials == "svc-ocx:secret"
+    assert not fork.by_host["artifactory.corp"].credentials
+
+
+def test_require_registry_credentials_refuses_a_lane_missing_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The privileged lane covers exactly the roots the fork lane could only
+    check the shape of. Running it with a silently anonymous client would
+    leave those verified by nobody, so a declared-but-unset variable stops the
+    job and names itself."""
+    monkeypatch.delenv("OCX_REGISTRY_ARTIFACTORY", raising=False)
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "acme.corp", "name_segments": 2, "registry_hosts": ['
+        b'{"host": "artifactory.corp", "credentials_env": "OCX_REGISTRY_ARTIFACTORY"}]}'
+    )
+    with pytest.raises(ValidationError, match="OCX_REGISTRY_ARTIFACTORY"):
+        _wiring._require_registry_credentials(policy)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_require_registry_credentials_passes_when_every_one_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OCX_REGISTRY_ARTIFACTORY", "svc-ocx:secret")
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "acme.corp", "name_segments": 2, "registry_hosts": ['
+        b'{"host": "artifactory.corp", "credentials_env": "OCX_REGISTRY_ARTIFACTORY"}]}'
+    )
+    _wiring._require_registry_credentials(policy)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_the_privileged_policy_read_follows_the_branch_the_request_targets(
@@ -496,7 +597,10 @@ def _patch_adapters(
     # `_registry` (the per-host router factory), not the `RegistryV2` class
     # itself: every `_run_*` reaches the registry through it, and a fake needs
     # no host routing — `tests/adapters/test_registry_v2.py` owns the router.
-    monkeypatch.setattr(_wiring, "_registry", lambda: registry or FakeRegistry())
+    def _registry_double(_policy: IndexPolicy, *, credentialed: bool) -> FakeRegistry:
+        return registry or FakeRegistry()
+
+    monkeypatch.setattr(_wiring, "_registry", _registry_double)
     monkeypatch.setattr(_wiring, "_forge_api", lambda: github_double)
     monkeypatch.setattr(_wiring, "_project_api", _project_api_double)
     monkeypatch.setattr(_wiring, "LocalFiles", _local_files)
@@ -882,3 +986,33 @@ def test_render_requires_index_dir(capsys: pytest.CaptureFixture[str]) -> None:
         main_module.main(["render", "--out", "dist"])
     assert exc_info.value.code == 2
     assert "--index-dir" in capsys.readouterr().err
+
+
+# --- GitHub Enterprise Server ------------------------------------------------
+
+
+def test_project_api_github_honours_the_runners_api_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where an index repository is HOSTED is independent of where its
+    packages live. GitLab has worked on a self-hosted instance since 0.2.0
+    (`$CI_API_V4_URL`); this is the GitHub half — every runner, github.com and
+    GHES alike, sets both URLs, and GHES's GraphQL endpoint is not
+    `<base_url>/graphql`."""
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghe.acme.corp/api/v3")
+    monkeypatch.setenv("GITHUB_GRAPHQL_URL", "https://ghe.acme.corp/api/graphql")
+
+    api = _wiring._project_api("acme/index", kind="github", token="t")  # noqa: S106 # pyright: ignore[reportPrivateUsage]
+
+    assert isinstance(api, GitHubApi)
+    assert api.base_url == "https://ghe.acme.corp/api/v3"
+    assert api.graphql_url == "https://ghe.acme.corp/api/graphql"
+
+
+def test_project_api_github_defaults_to_github_com(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)
+    monkeypatch.delenv("GITHUB_GRAPHQL_URL", raising=False)
+
+    api = _wiring._project_api("acme/index", kind="github", token="t")  # noqa: S106 # pyright: ignore[reportPrivateUsage]
+
+    assert isinstance(api, GitHubApi)
+    assert api.base_url == "https://api.github.com"
+    assert api.graphql_url == "https://api.github.com/graphql"

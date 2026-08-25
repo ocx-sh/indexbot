@@ -13,6 +13,7 @@ shared by every public method — those response classes are exercised once
 from __future__ import annotations
 
 import hashlib
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -847,3 +848,165 @@ def test_a_redirect_loop_is_transient_not_an_infinite_fetch() -> None:
 
     with pytest.raises(TransientError, match="redirected more than"):
         RegistryV2().get_blob(_REPOSITORY, _BLOB_DIGEST)
+
+
+# --- credentials: a private registry -----------------------------------------
+
+
+_CREDENTIALS = "svc-ocx:s3cr3t-identity-token"
+_EXPECTED_BASIC = "Basic c3ZjLW9jeDpzM2NyM3QtaWRlbnRpdHktdG9rZW4="
+
+
+def _credentialed(**overrides: object) -> RegistryV2:
+    """A client for a registry that requires credentials — the corporate case
+    (`credentials_env` in `.github/index-policy.json` named the variable,
+    `cli/_wiring.py` read it)."""
+    fields: dict[str, object] = {"credentials": _CREDENTIALS}
+    fields.update(overrides)
+    return RegistryV2(**fields)  # pyright: ignore[reportArgumentType]
+
+
+def test_credentials_without_a_colon_are_refused() -> None:
+    """`user:password` is the whole contract. A value with no separator is a
+    misconfigured secret, and the alternative is a registry that 401s forever
+    for a reason nobody can see."""
+    with pytest.raises(ValidationError, match="no ':' separator"):
+        RegistryV2(credentials="just-a-token")
+
+
+def test_the_credential_never_reaches_repr() -> None:
+    """PY-SEC-03: a field holding a credential is `repr=False`, so a logged
+    or asserted-on client cannot carry the secret with it."""
+    rendered = repr(_credentialed())
+    assert _CREDENTIALS not in rendered
+    assert _EXPECTED_BASIC not in rendered
+
+
+@respx.mock
+def test_token_mode_authenticates_the_token_request_only() -> None:
+    """Docker's own flow: the realm is the single endpoint that ever sees the
+    operator's credential, and what reaches `/v2/` afterwards is the scoped,
+    short-lived Bearer it answered with."""
+    token_route = respx.get(f"{_BASE}/token").mock(
+        return_value=httpx.Response(200, json={"token": "scoped-pull-token"})
+    )
+    tags_route = respx.get(_TAGS_URL).mock(
+        side_effect=[
+            httpx.Response(401),
+            httpx.Response(200, json={"tags": ["1.0.0"]}),
+        ]
+    )
+
+    assert _credentialed().list_tags(_REPOSITORY) == ["1.0.0"]
+
+    assert token_route.calls.last.request.headers["Authorization"] == _EXPECTED_BASIC
+    sent = [
+        cast("httpx.Request", call.request).headers for call in cast("list[Any]", tags_route.calls)
+    ]
+    assert sent[0].get("Authorization") is None
+    assert sent[1]["Authorization"] == "Bearer scoped-pull-token"
+
+
+@respx.mock
+def test_basic_mode_authenticates_every_request_and_never_fetches_a_token() -> None:
+    """ECR and some Nexus deployments answer `/v2/` to RFC 7617 credentials
+    directly — there is no realm to ask."""
+    token_route = respx.get(f"{_BASE}/token").mock(return_value=httpx.Response(200, json={}))
+    tags_route = respx.get(_TAGS_URL).mock(return_value=httpx.Response(200, json={"tags": []}))
+
+    assert _credentialed(auth="basic").list_tags(_REPOSITORY) == []
+
+    assert tags_route.calls.last.request.headers["Authorization"] == _EXPECTED_BASIC
+    assert not token_route.called
+
+
+@respx.mock
+def test_basic_mode_treats_a_401_as_terminal() -> None:
+    """Nothing to refresh: the credential already sent is the whole of what
+    this mode can offer, so a second identical attempt is only a slower
+    failure."""
+    tags_route = respx.get(_TAGS_URL).mock(return_value=httpx.Response(401))
+
+    with pytest.raises(TransientError, match="persistent 401"):
+        _credentialed(auth="basic").list_tags(_REPOSITORY)
+
+    assert tags_route.call_count == 1
+
+
+@respx.mock
+def test_a_401_never_leaks_the_credential() -> None:
+    """The mirror of `tests/test_github_api.py`'s forge-token assertion, for
+    the credential this adapter now carries."""
+    respx.get(_TAGS_URL).mock(return_value=httpx.Response(401))
+
+    with pytest.raises(TransientError) as exc_info:
+        _credentialed(auth="basic").list_tags(_REPOSITORY)
+
+    assert _CREDENTIALS not in str(exc_info.value)
+    assert _EXPECTED_BASIC not in str(exc_info.value)
+
+
+@respx.mock
+def test_a_403_names_the_credential_that_was_refused_not_anonymous_pull() -> None:
+    """ "Grant anonymous pull" is the wrong instruction for a registry this bot
+    authenticated to — it sends an operator looking for a permission they
+    already granted."""
+    respx.get(f"{_BASE}/token").mock(return_value=httpx.Response(403))
+    respx.get(_TAGS_URL).mock(return_value=httpx.Response(401))
+
+    with pytest.raises(ValidationError, match="configured credentials do not grant"):
+        _credentialed().list_tags(_REPOSITORY)
+
+
+@respx.mock
+def test_a_403_still_says_anonymous_pull_for_an_anonymous_registry() -> None:
+    respx.get(f"{_BASE}/token").mock(return_value=httpx.Response(403))
+    respx.get(_TAGS_URL).mock(return_value=httpx.Response(401))
+
+    with pytest.raises(ValidationError, match="does not allow anonymous pull"):
+        RegistryV2().list_tags(_REPOSITORY)
+
+
+@respx.mock
+def test_basic_credentials_are_dropped_on_a_cross_origin_redirect() -> None:
+    """The same rule the bearer token has always had, and the reason
+    `_authorization` is one function: a pre-signed CDN target needs no
+    credential, and sending one hands it to whatever host the redirect
+    names."""
+    blob_url = f"{_BASE}/v2/{_REPO_PATH}/blobs/sha256:{'ab' * 32}"
+    respx.get(blob_url).mock(
+        return_value=httpx.Response(307, headers={"Location": "https://cdn.example/signed"})
+    )
+    cdn_route = respx.get("https://cdn.example/signed").mock(
+        return_value=httpx.Response(200, content=b"blob-bytes")
+    )
+
+    assert _credentialed(auth="basic").get_blob(_REPOSITORY, f"sha256:{'ab' * 32}") == b"blob-bytes"
+
+    assert cdn_route.calls.last.request.headers.get("Authorization") is None
+
+
+@respx.mock
+def test_basic_credentials_survive_a_same_origin_redirect() -> None:
+    blob_url = f"{_BASE}/v2/{_REPO_PATH}/blobs/sha256:{'cd' * 32}"
+    respx.get(blob_url).mock(
+        return_value=httpx.Response(307, headers={"Location": f"{_BASE}/v2/moved"})
+    )
+    moved_route = respx.get(f"{_BASE}/v2/moved").mock(
+        return_value=httpx.Response(200, content=b"blob-bytes")
+    )
+
+    assert _credentialed(auth="basic").get_blob(_REPOSITORY, f"sha256:{'cd' * 32}") == b"blob-bytes"
+
+    assert moved_route.calls.last.request.headers["Authorization"] == _EXPECTED_BASIC
+
+
+def test_routed_registry_dispatches_on_the_hostname_not_the_netloc() -> None:
+    """G-03 matches a policy entry against the port-stripped hostname, so a
+    router keyed on `netloc` made `oci://harbor.corp:5000/…` pass validation
+    and then find no client at all. Where requests actually go is the entry's
+    own `base_url`."""
+    client = RegistryV2(base_url="https://harbor.corp:5000", host="harbor.corp")
+    routed = RoutedRegistry({"harbor.corp": client})
+
+    assert routed._client("oci://harbor.corp:5000/team/tool") is client  # pyright: ignore[reportPrivateUsage]

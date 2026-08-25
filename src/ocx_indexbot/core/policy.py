@@ -48,10 +48,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Final, Literal, cast, get_args
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Final, Literal, cast, get_args
+from urllib.parse import urlsplit
 
 from ocx_indexbot.core.grammar import HOST_MAX_LENGTH, HOST_RE, NAMESPACE_RE, NAMESPACE_SHAPE
 from ocx_indexbot.errors import ValidationError
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 INDEX_POLICY_PATH: Final[str] = ".github/index-policy.json"
 """Repo-relative path of the policy file, read through a `FilePort` (local
@@ -70,6 +75,17 @@ length-cap-before-regex order BD-4 requires has nothing to cap against.
 
 AutoMerge = Literal["owners", "never", "always"]
 Forge = Literal["github", "gitlab"]
+RegistryAuth = Literal["token", "basic"]
+"""How a registry wants to be asked for bytes.
+
+`token` is the Registry v2 dance every public host speaks (GHCR, Artifactory,
+Harbor, GitLab): a `401`, then a `GET <realm>?service=&scope=` that answers
+with a short-lived Bearer. `basic` is the other shape (ECR, some Nexus
+deployments): RFC 7617 credentials on every `/v2/` call, no realm at all.
+
+Which one a host wants is not derivable from its address, so it is declared —
+and an index that declares neither keeps today's anonymous `token` behaviour.
+"""
 
 _RUNTIME_RESOLVER_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:^|[\s;&|(])(?:uvx|uv\s+(?:tool\s+run|run|sync)|pipx\s+(?:run|install)"
@@ -131,7 +147,22 @@ the alphabet outright means neither the template's quoting nor a future
 editor's memory of it is what stands between an operator's config file and
 `gh`'s argv."""
 
+_REGISTRY_ENTRY_KEYS: Final[frozenset[str]] = frozenset(
+    {"host", "base_url", "realm", "service", "auth", "credentials_env"}
+)
+
+_ENV_NAME_MAX_LENGTH: Final[int] = 128
+_ENV_NAME_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+"""`credentials_env`'s grammar — a POSIX environment-variable NAME, never a
+value. The distinction is the whole point of the field: the name is committed,
+reviewed data (the same argument that keeps the host allowlist a file), and
+the secret it points at only ever exists in the process environment of the
+job that needs it."""
+
+_BASE_URL_MAX_LENGTH: Final[int] = 2048
+
 _AUTO_MERGE_VALUES: Final[frozenset[str]] = frozenset(get_args(AutoMerge))
+_REGISTRY_AUTH_VALUES: Final[frozenset[str]] = frozenset(get_args(RegistryAuth))
 FORGE_VALUES: Final[frozenset[str]] = frozenset(get_args(Forge))
 """Derived from the `Literal`s themselves, never restated.
 
@@ -221,6 +252,51 @@ class CiConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RegistryConfig:
+    """One allowlisted registry host, and how to reach it.
+
+    A `registry_hosts` entry is either a bare host string — every field below
+    left empty, which is what the built-in defaults and the Registry v2
+    conventions are for — or an object that states the parts no convention
+    can supply: a corporate registry's real address, its token endpoint, and
+    the name of the env var holding a credential for it.
+
+    Nothing here is a secret. `credentials_env` is a *name*; its value lives
+    only in the environment of the job that needs it.
+    """
+
+    host: str
+    """The bare lowercase host, and the `oci://<host>/…` key every root is
+    routed by. Wire-contract-visible, which is why it keeps the strict
+    grammar even when `base_url` carries a port or a path."""
+
+    base_url: str = ""
+    """Where this registry's `/v2/` API actually lives, scheme included, no
+    trailing slash — `https://oci-prod.artifactory.corp:8443`. Empty means
+    the OCI default, `https://<host>`: the bot never guesses a vendor's URL
+    convention, it either knows it (built-in) or is told."""
+
+    realm: str = ""
+    """The token endpoint, when it is not `<base_url>/token`. Configured
+    rather than followed from a `401`'s `WWW-Authenticate`, for the same
+    reason `adapters/registry_v2.py` refuses a server-supplied pagination
+    link: a realm is a URL the server chooses, and following one widens where
+    this bot sends credentials with no diff and no reviewer."""
+
+    service: str = ""
+    """The token request's `service` parameter, when it is not the host —
+    GitLab's is the literal `container_registry`."""
+
+    auth: RegistryAuth = "token"
+    """Which flow this host speaks. See `RegistryAuth`."""
+
+    credentials_env: str = ""
+    """Name of the env var holding `user:password` for this registry. Empty —
+    the default — means anonymous pull, unchanged from every public host this
+    bot has ever read."""
+
+
+@dataclass(frozen=True, slots=True)
 class IndexPolicy:
     """One index deployment's committed configuration.
 
@@ -239,10 +315,12 @@ class IndexPolicy:
     how deep `p/**` nests. Published in the rendered `config.json` because no
     client can derive it from a tree."""
 
-    registry_hosts: frozenset[str]
-    """G-03's allowlist: hosts whose `oci://` repositories this index will
-    admit. Narrowed further at wiring time to hosts some `RegistryPort` can
-    actually serve."""
+    registries: Mapping[str, RegistryConfig]
+    """Every allowlisted registry, keyed by host — G-03's allowlist and the
+    per-host connection detail in one place, because they are the same
+    decision: a host this index admits is a host it must be able to fetch
+    from, and stating one without the other is what used to produce roots
+    that validated and then failed every download."""
 
     reserved_namespaces: frozenset[str]
     """Operator-reserved first segments — a brand, an internal prefix. The
@@ -257,6 +335,34 @@ class IndexPolicy:
 
     ci: CiConfig
     """What `indexbot ci` renders, and for which forge."""
+
+    @property
+    def registry_hosts(self) -> frozenset[str]:
+        """G-03's allowlist: hosts whose `oci://` repositories this index will
+        admit.
+
+        Derived from `registries` rather than stored beside it — the two can
+        then never disagree, and every existing caller
+        (`check_repository_allowlisted` and the four subcommands that resolve
+        a repository) keeps reading exactly what it always read.
+        """
+        return frozenset(self.registries)
+
+
+def registry_credential_env(policy: IndexPolicy, repository: str) -> str:
+    """The environment variable `repository`'s registry declares for its
+    credential, or `""` when that registry is anonymous (or unknown, which
+    `check_repository_allowlisted` has already refused before any caller gets
+    here).
+
+    Pure lookup, no environment access — whether the variable is actually
+    *set* is a property of the lane, and the lanes disagree on purpose: the
+    fork lane holds no secret and degrades, the privileged lane must hold
+    every one and refuses to start without them.
+    """
+    host = urlsplit(repository).hostname
+    config = policy.registries.get(host) if host else None
+    return config.credentials_env if config else ""
 
 
 def root_glob(name_segments: int) -> str:
@@ -377,27 +483,182 @@ def _parse_name_segments(data: dict[str, Any]) -> int:
     return segments
 
 
-def _parse_registry_hosts(data: dict[str, Any]) -> frozenset[str]:
+def _require_host(value: Any, *, where: str) -> str:  # noqa: ANN401 — raw JSON
+    if not isinstance(value, str) or len(value) > HOST_MAX_LENGTH:
+        raise ValidationError(f"{INDEX_POLICY_PATH}: {value!r} is not a registry host ({where})")
+    if HOST_RE.fullmatch(value) is None:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: {value!r} is not a bare lowercase registry host "
+            f"(no scheme, no port, no path) ({where}) — a port or a path belongs in "
+            "'base_url', which is where this bot sends requests; the host is what roots "
+            "are matched and routed by"
+        )
+    return value
+
+
+def _parse_base_url(entry: dict[str, Any], host: str) -> str:
+    """`base_url`, or `""` when the entry does not state one.
+
+    Validated as a request-URL *prefix*, since that is exactly how the
+    adapter uses it (`f"{base_url}/v2/…"`): a scheme this bot speaks, a host
+    to send to, nothing after the path, and no `user:password@` — credentials
+    belong in the env var `credentials_env` names, never in a committed file.
+    """
+    raw: Any = entry.get("base_url", "")
+    if not isinstance(raw, str) or len(raw) > _BASE_URL_MAX_LENGTH:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'base_url' must be a string URL"
+        )
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'base_url' {raw!r} must start with "
+            "'http://' or 'https://'"
+        )
+    if not parsed.hostname:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'base_url' {raw!r} must include a host"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'base_url' must not embed credentials "
+            "in the URL — name an environment variable in 'credentials_env' instead; this "
+            "file is committed and reviewed, a secret in it is a secret in git history"
+        )
+    if parsed.query or parsed.fragment:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'base_url' must carry no query or "
+            "fragment — it is used verbatim as a request-URL prefix"
+        )
+    if raw.endswith("/"):
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'base_url' must not end with '/' — "
+            "every request path is built as '<base_url>/v2/…'"
+        )
+    return raw
+
+
+def _parse_registry_url(entry: dict[str, Any], key: str, host: str) -> str:
+    """`realm`, the one other free-form URL an entry may state. Same prefix
+    discipline as `base_url` minus the trailing-slash rule, since a realm is
+    a complete endpoint rather than a prefix."""
+    raw: Any = entry.get(key, "")
+    if not isinstance(raw, str) or len(raw) > _BASE_URL_MAX_LENGTH:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} {key!r} must be a string URL"
+        )
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} {key!r} {raw!r} must be an http(s) URL "
+            "with a host"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} {key!r} must not embed credentials in "
+            "the URL — name an environment variable in 'credentials_env' instead"
+        )
+    return raw
+
+
+def _parse_registry_service(entry: dict[str, Any], host: str) -> str:
+    raw: Any = entry.get("service", "")
+    if not isinstance(raw, str) or "\n" in raw or "\r" in raw:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'service' must be a single-line string"
+        )
+    return raw
+
+
+def _parse_registry_auth(entry: dict[str, Any], host: str) -> RegistryAuth:
+    raw: Any = entry.get("auth", "token")
+    if raw not in _REGISTRY_AUTH_VALUES:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'auth' must be one of "
+            f"{sorted(_REGISTRY_AUTH_VALUES)}, got {raw!r}"
+        )
+    return cast("RegistryAuth", raw)
+
+
+def _parse_credentials_env(entry: dict[str, Any], host: str) -> str:
+    raw: Any = entry.get("credentials_env", "")
+    if not isinstance(raw, str) or len(raw) > _ENV_NAME_MAX_LENGTH:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'credentials_env' must be an "
+            "environment-variable name"
+        )
+    if raw and _ENV_NAME_RE.fullmatch(raw) is None:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: registry {host!r} 'credentials_env' {raw!r} is not a bare "
+            "environment-variable name (letters, digits and '_', not starting with a digit) "
+            "— this field names the variable, never the secret it holds"
+        )
+    return raw
+
+
+def _parse_registry_entry(raw: Any) -> RegistryConfig:  # noqa: ANN401 — raw JSON
+    if isinstance(raw, str):
+        return RegistryConfig(host=_require_host(raw, where="a 'registry_hosts' entry"))
+    if not isinstance(raw, dict):
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: {raw!r} is not a registry host — an entry is either a "
+            "bare host string or an object naming one"
+        )
+    entry = cast("dict[str, Any]", raw)
+    _reject_unknown(entry, _REGISTRY_ENTRY_KEYS, "a 'registry_hosts' object entry")
+    if "host" not in entry:
+        raise ValidationError(
+            f"{INDEX_POLICY_PATH}: a 'registry_hosts' object entry is missing required "
+            "'host' — the bare host every root naming this registry is routed by"
+        )
+    host = _require_host(entry["host"], where="a 'registry_hosts' object 'host'")
+    return RegistryConfig(
+        host=host,
+        base_url=_parse_base_url(entry, host),
+        realm=_parse_registry_url(entry, "realm", host),
+        service=_parse_registry_service(entry, host),
+        auth=_parse_registry_auth(entry, host),
+        credentials_env=_parse_credentials_env(entry, host),
+    )
+
+
+def _parse_registries(data: dict[str, Any]) -> Mapping[str, RegistryConfig]:
+    """G-03's allowlist, and how to reach each host on it.
+
+    An entry is a bare host string (built-in or Registry v2 defaults apply)
+    or an object stating the parts no convention supplies. Repeating a host
+    is only an error when the two entries *disagree* — a duplicate string is
+    the same statement twice, but two objects claiming different addresses
+    for one host is a config nobody can read the intent of, and silently
+    letting the last one win is the failure mode this parser exists to
+    prevent.
+    """
     if "registry_hosts" not in data:
         raise ValidationError(f"{INDEX_POLICY_PATH}: missing required 'registry_hosts' key")
-    hosts_raw: Any = data["registry_hosts"]
-    if not isinstance(hosts_raw, list):
+    entries_raw: Any = data["registry_hosts"]
+    if not isinstance(entries_raw, list):
         raise ValidationError(f"{INDEX_POLICY_PATH}: 'registry_hosts' must be an array of hosts")
-    hosts = cast("list[Any]", hosts_raw)
-    if not hosts:
+    entries = cast("list[Any]", entries_raw)
+    if not entries:
         raise ValidationError(
             f"{INDEX_POLICY_PATH}: 'registry_hosts' must list at least one host — an empty "
             "allowlist rejects every package root this index could ever serve"
         )
-    for host in hosts:
-        if not isinstance(host, str) or len(host) > HOST_MAX_LENGTH:
-            raise ValidationError(f"{INDEX_POLICY_PATH}: {host!r} is not a registry host")
-        if HOST_RE.fullmatch(host) is None:
+    registries: dict[str, RegistryConfig] = {}
+    for raw in entries:
+        config = _parse_registry_entry(raw)
+        existing = registries.get(config.host)
+        if existing is not None and existing != config:
             raise ValidationError(
-                f"{INDEX_POLICY_PATH}: {host!r} is not a bare lowercase registry host "
-                "(no scheme, no port, no path)"
+                f"{INDEX_POLICY_PATH}: 'registry_hosts' lists {config.host!r} more than once "
+                "with different configuration — one entry per host"
             )
-    return frozenset(cast("list[str]", hosts))
+        registries[config.host] = config
+    return MappingProxyType(registries)
 
 
 def _parse_reserved_namespaces(data: dict[str, Any]) -> frozenset[str]:
@@ -561,7 +822,7 @@ def parse_index_policy(raw: bytes) -> IndexPolicy:
     return IndexPolicy(
         name=_parse_name(data),
         name_segments=_parse_name_segments(data),
-        registry_hosts=_parse_registry_hosts(data),
+        registries=_parse_registries(data),
         reserved_namespaces=_parse_reserved_namespaces(data),
         auto_merge=_parse_governance(data),
         ci=_parse_ci(data),

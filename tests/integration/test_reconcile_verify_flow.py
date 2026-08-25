@@ -32,10 +32,10 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from ocx_indexbot.adapters.github_api import GitHubApi
 from ocx_indexbot.adapters.registry_v2 import RegistryV2
 from ocx_indexbot.cli.main import main
 from ocx_indexbot.exit_codes import ExitCode
+from tests.integration.conftest import write_policy
 from tests.integration.fixtures.canonical import (
     CANONICAL_LEAF,
     CANONICAL_REPO_PATH,
@@ -105,15 +105,17 @@ def _wire_adapters(
     monkeypatch.setenv("GITHUB_WORKSPACE", str(index_tree))
     monkeypatch.setenv("GITHUB_REPOSITORY", _REPOSITORY)
     monkeypatch.setenv("GITHUB_TOKEN", _FORGE_WRITE_SENTINEL)
-    monkeypatch.setattr(
-        _WIRING_GITHUB,
-        functools.partial(
-            GitHubApi, base_url=forge.base_url, graphql_url=f"{forge.base_url}/graphql"
-        ),
-    )
-    monkeypatch.setattr(
-        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=ghcr.base_url, client=client)
-    )
+    # The forge seam is the runner's own variables — the pair GitHub Actions
+    # sets on github.com and GitHub Enterprise Server alike, and the reason a
+    # GHES-hosted index needs no code change.
+    monkeypatch.setenv("GITHUB_API_URL", forge.base_url)
+    monkeypatch.setenv("GITHUB_GRAPHQL_URL", f"{forge.base_url}/graphql")
+    # The registry's address comes from the checkout's own policy — the same
+    # field a corporate deployment names its Artifactory with. Only the httpx
+    # client (which records the headers the leak assertions inspect) is still
+    # threaded through the constructor.
+    write_policy(index_tree, [{"host": "ghcr.io", "base_url": ghcr.base_url}])
+    monkeypatch.setattr(_WIRING_REGISTRY, functools.partial(RegistryV2, client=client))
 
 
 def _assert_no_ghcr_credential_leak(sent_headers: list[dict[str, str]]) -> None:

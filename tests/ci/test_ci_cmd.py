@@ -15,6 +15,7 @@ import pytest
 
 from ocx_indexbot.ci import render
 from ocx_indexbot.cli import ci_cmd
+from ocx_indexbot.core.policy import IndexPolicy, RegistryConfig
 from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from tests.fakes import InMemoryFiles, make_policy
@@ -414,3 +415,73 @@ def test_the_gitlab_jobs_install_git_before_using_it() -> None:
     default image ships without."""
     text = _rendered(forge="gitlab").read_text(".gitlab-ci/indexbot.yml") or ""
     assert "command -v git" in text
+
+
+# --- registry credentials: rendered passthrough ------------------------------
+
+
+def _credentialed_policy(**overrides: object) -> IndexPolicy:
+    return make_policy(
+        registries={
+            "ghcr.io": RegistryConfig(host="ghcr.io"),
+            "artifactory.corp": RegistryConfig(
+                host="artifactory.corp", credentials_env="OCX_REGISTRY_ART"
+            ),
+        },
+        **overrides,
+    )
+
+
+def test_a_credentialed_registry_reaches_only_the_reconcile_job() -> None:
+    """The privileged lane is the one that verifies registry truth, so it is
+    the one that gets the secret. The fork gate runs a pull request's own head
+    code and must never see it."""
+    plan = render.build_render_plan(_credentialed_policy(), existing={})
+
+    reconcile = plan[".github/workflows/reconcile.yml"]
+    assert "          OCX_REGISTRY_ART: ${{ secrets.OCX_REGISTRY_ART }}" in reconcile
+    assert "OCX_REGISTRY_ART" not in plan[".github/workflows/validate.yml"]
+    assert "OCX_REGISTRY_ART" not in plan[".github/workflows/governance.yml"]
+
+
+def test_no_credentialed_registry_renders_no_env_line() -> None:
+    """An index with only anonymous registries renders exactly what it
+    rendered before this existed — the empty placeholder line is dropped
+    rather than left blank."""
+    plan = render.build_render_plan(make_policy(), existing={})
+    reconcile = plan[".github/workflows/reconcile.yml"]
+
+    assert "secrets." not in reconcile
+    assert "\n\n        run:" not in reconcile
+
+
+def test_every_declared_variable_is_rendered_once_and_sorted() -> None:
+    """Two registries sharing one variable name is one secret, and the order
+    is the sorted one so the rendered file is byte-stable."""
+    policy = make_policy(
+        registries={
+            "a.corp": RegistryConfig(host="a.corp", credentials_env="Z_CREDS"),
+            "b.corp": RegistryConfig(host="b.corp", credentials_env="A_CREDS"),
+            "c.corp": RegistryConfig(host="c.corp", credentials_env="Z_CREDS"),
+        }
+    )
+    reconcile = render.build_render_plan(policy, existing={})[".github/workflows/reconcile.yml"]
+    lines = [line.strip() for line in reconcile.splitlines() if "secrets." in line]
+
+    assert lines == [
+        "A_CREDS: ${{ secrets.A_CREDS }}",
+        "Z_CREDS: ${{ secrets.Z_CREDS }}",
+    ]
+
+
+def test_gitlab_renders_the_variable_as_an_operator_note_only() -> None:
+    """GitLab has no `secrets.` context: the variable is a masked, protected
+    project variable that is simply ambient to the scheduled job, exactly as
+    `$GITLAB_TOKEN` already is. Writing it into `variables:` would put a
+    credential-shaped name on a file whose merge-request job a fork runs
+    (GL-03)."""
+    plan = render.build_render_plan(_credentialed_policy(forge="gitlab"), existing={})
+    pipeline = plan[".gitlab-ci/indexbot.yml"]
+
+    assert "Settings > CI/CD > Variables > OCX_REGISTRY_ART" in pipeline
+    assert "OCX_REGISTRY_ART:" not in pipeline

@@ -30,17 +30,12 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
-from ocx_indexbot.adapters.github_api import GitHubApi
+from ocx_indexbot.adapters.github_api import GITHUB_API_URL, GITHUB_GRAPHQL_URL, GitHubApi
 from ocx_indexbot.adapters.gitlab_api import GITLAB_API_URL, GitLabApi
 from ocx_indexbot.adapters.local_files import LocalFiles
 from ocx_indexbot.adapters.local_git import LocalGit
 from ocx_indexbot.adapters.registry_v2 import (
-    GHCR_HOST,
-    GITLAB_HOST,
-    GITLAB_REALM,
-    GITLAB_SERVICE,
-    OCX_SH_HOST,
-    OCX_SH_REALM,
+    BUILTIN_REGISTRIES,
     RegistryV2,
     RoutedRegistry,
 )
@@ -65,6 +60,7 @@ from ocx_indexbot.core.policy import (
     INDEX_POLICY_PATH,
     Forge,
     IndexPolicy,
+    RegistryConfig,
     parse_index_policy,
 )
 from ocx_indexbot.errors import ValidationError
@@ -113,42 +109,98 @@ def _repo_root() -> Path:
     return Path(os.environ.get("GITHUB_WORKSPACE", "."))
 
 
-REGISTRY_ADAPTER_HOSTS: Final[frozenset[str]] = frozenset({GHCR_HOST, OCX_SH_HOST, GITLAB_HOST})
-"""Every registry host some `RegistryPort` adapter can actually serve.
+def _registry_client(config: RegistryConfig, environ: Mapping[str, str]) -> RegistryV2:
+    """One `RegistryV2` for one allowlisted host, from that host's own
+    committed entry.
 
-Exactly the hosts `_registry()` below wires a client for — `_index_policy`
-refuses any deployment policy that exceeds this set. Extending it without
-also wiring a client re-opens exactly the gap the guard exists to close
-(roots that validate and then cannot be fetched), so the two are edited
-together and `tests/cli/test_wiring.py` pins them to each other."""
+    A bare-string entry states nothing, so it takes the built-in table's
+    facts where there are any (`adapters/registry_v2.BUILTIN_REGISTRIES` —
+    Artifactory's token path for `ocx.sh`, GitLab's fixed `service`) and the
+    Registry v2 conventions otherwise. An entry that states its own
+    `base_url` is explicit about where it lives, so the built-in table is not
+    consulted for it at all: inheriting `ocx.sh`'s token path into a policy
+    that repointed `ocx.sh` at an internal mirror would send credentials to
+    an address nobody wrote down.
+
+    The credential is read here, from the process environment, by the name
+    the entry gives — never from the file, which is committed. A named
+    variable that is unset yields an anonymous client; whether that is a
+    degradation or a failure is the lane's decision, not this function's
+    (`_require_registry_credentials` below).
+    """
+    empty: Mapping[str, str] = {}
+    defaults = empty if config.base_url else BUILTIN_REGISTRIES.get(config.host, empty)
+    return RegistryV2(
+        base_url=config.base_url or f"https://{config.host}",
+        host=config.host,
+        realm=config.realm or defaults.get("realm", ""),
+        service=config.service or defaults.get("service", ""),
+        auth=config.auth,
+        credentials=environ.get(config.credentials_env, "") if config.credentials_env else "",
+    )
 
 
-def _registry() -> RoutedRegistry:
-    """One `RegistryV2` per servable host, dispatched per call by the
+def _registry(policy: IndexPolicy, *, credentialed: bool) -> RoutedRegistry:
+    """One `RegistryV2` per allowlisted host, dispatched per call by the
     `oci://<host>/…` repository URI.
 
     Per call, not per run: `validate` is handed whatever roots a PR changed
     and `reconcile` walks every root in the index, so a single run routinely
-    spans more than one host. All three are the same Registry v2 client;
-    they differ only in where an anonymous pull token comes from, and — for
-    GitLab — in what the token is requested *for*.
+    spans more than one host.
+
+    Built from `policy.registries`, so every host this index admits has a
+    client by construction. That is what retired the old
+    "allowlisted-but-unservable" refusal: a host could not be named in the
+    allowlist and be unreachable by this bot, because the allowlist entry IS
+    the client's configuration.
+
+    `credentialed=False` is the fork lane, and it is a construction, not a
+    condition: the clients are built from an empty environment, so no
+    credential exists to be sent no matter what the policy in front of this
+    process declares. That matters because `validate` reads its policy out of
+    PR-head content, and an entry states both the address a credential is
+    sent to (`base_url`) and the variable it is read from — a pair a pull
+    request must never get to choose. The privileged lanes read a policy
+    nobody but a reviewer wrote, and pass `True`.
     """
+    environ: Mapping[str, str] = os.environ if credentialed else {}
     return RoutedRegistry(
-        {
-            GHCR_HOST: RegistryV2(),
-            OCX_SH_HOST: RegistryV2(
-                base_url=f"https://{OCX_SH_HOST}",
-                host=OCX_SH_HOST,
-                realm=OCX_SH_REALM,
-            ),
-            GITLAB_HOST: RegistryV2(
-                base_url=f"https://{GITLAB_HOST}",
-                host=GITLAB_HOST,
-                realm=GITLAB_REALM,
-                service=GITLAB_SERVICE,
-            ),
-        }
+        {host: _registry_client(config, environ) for host, config in policy.registries.items()}
     )
+
+
+def _anonymous_registry(policy: IndexPolicy) -> RoutedRegistry:
+    """`_registry(..., credentialed=False)` as a one-argument factory, for
+    `validate-pr` — which builds its registry from the *base-ref* policy it
+    reads mid-run, not from the one this module can see."""
+    return _registry(policy, credentialed=False)
+
+
+def _require_registry_credentials(policy: IndexPolicy) -> None:
+    """Refuse to start a privileged lane that is missing a credential its own
+    policy declares.
+
+    `reconcile` is the lane that carries registry truth for every root,
+    including the ones the unprivileged fork lane could only check the shape
+    of (a fork's pipeline holds no secret, by design). If this lane ran with
+    a silently anonymous client, those roots would be verified by nobody at
+    all, and the whole degrade-then-cover arrangement would quietly become
+    degrade-then-forget. Missing credentials fail the job instead, naming
+    every variable that is unset.
+    """
+    missing = sorted(
+        config.credentials_env
+        for config in policy.registries.values()
+        if config.credentials_env and not os.environ.get(config.credentials_env)
+    )
+    if missing:
+        raise ValidationError(
+            f"registry credentials are not set: {missing} — {INDEX_POLICY_PATH} declares them "
+            "for this index's registries, and this lane is what verifies registry truth for "
+            "roots the fork lane can only check the shape of. Set them as repository secrets "
+            "(GitHub, rendered into the job by `indexbot ci`) or masked, protected CI/CD "
+            "variables (GitLab)."
+        )
 
 
 def _index_policy(raw: bytes | None) -> IndexPolicy:
@@ -162,16 +214,18 @@ def _index_policy(raw: bytes | None) -> IndexPolicy:
     never check the repository out — both return `None` when the path does
     not exist).
 
-    Two failure modes, both raised here at wiring time, before the subcommand
-    does any work:
+    One failure mode, raised here at wiring time before the subcommand does
+    any work: **no policy file**. Fail closed rather than fall back to a
+    compiled-in default — an index copy that never stated a policy must say
+    so out loud, not silently inherit the public index's `ghcr.io`.
 
-    - **No policy file.** Fail closed rather than fall back to a compiled-in
-      default: an index copy that never stated a policy must say so out loud,
-      not silently inherit the public index's `ghcr.io`.
-    - **A host no adapter can serve** — the important one. Allowlisting
-      `harbor.corp.internal` today would let a root pass every validation
-      check and then fail every byte fetch, which is strictly worse than the
-      honest refusal it replaces. Refused up front, naming the missing piece.
+    The second failure this used to raise — "a host no registry adapter can
+    serve" — no longer exists to raise. It guarded a real gap while the
+    servable hosts were a compiled-in triple: allowlisting
+    `harbor.corp.internal` produced roots that validated and then failed
+    every byte fetch. Now the allowlist entry *is* the client's
+    configuration (`_registry` above), so a host cannot be admitted and
+    unreachable at the same time.
     """
     if raw is None:
         raise ValidationError(
@@ -180,18 +234,7 @@ def _index_policy(raw: bytes | None) -> IndexPolicy:
             'variable): {"name": "acme.corp", "name_segments": 2, '
             '"registry_hosts": ["ghcr.io"]}'
         )
-    policy = parse_index_policy(raw)
-    unservable = sorted(policy.registry_hosts - REGISTRY_ADAPTER_HOSTS)
-    if unservable:
-        raise ValidationError(
-            f"{INDEX_POLICY_PATH}: no registry adapter can serve {unservable} — indexbot "
-            f"only implements {sorted(REGISTRY_ADAPTER_HOSTS)}. Allowlisting a host with no "
-            "adapter produces roots that pass validation and then cannot be fetched, so it "
-            "is refused here instead: implement a RegistryPort for it in "
-            "src/ocx_indexbot/adapters/, add its host to REGISTRY_ADAPTER_HOSTS, and dispatch "
-            "it from cli/_wiring.py first."
-        )
-    return policy
+    return parse_index_policy(raw)
 
 
 def _local_policy(files: FilePort) -> IndexPolicy:
@@ -236,7 +279,13 @@ def _project_api(project: str, *, kind: Forge, token: str) -> ForgePort:
             base_url=os.environ.get("CI_API_V4_URL", GITLAB_API_URL),
         )
     owner, _, repo = project.partition("/")
-    return GitHubApi(owner=owner, repo=repo, token=token)
+    return GitHubApi(
+        owner=owner,
+        repo=repo,
+        token=token,
+        base_url=os.environ.get("GITHUB_API_URL", GITHUB_API_URL),
+        graphql_url=os.environ.get("GITHUB_GRAPHQL_URL", GITHUB_GRAPHQL_URL),
+    )
 
 
 def _forge_api() -> ForgePort:
@@ -265,12 +314,16 @@ def _forge_api() -> ForgePort:
 
 def _run_reconcile(args: argparse.Namespace) -> ExitCode:
     files = LocalFiles(root=_repo_root())
+    policy = _local_policy(files)
+    # The privileged lane: it must hold every credential its policy declares,
+    # because it is what covers the roots the fork lane could not verify.
+    _require_registry_credentials(policy)
     return reconcile.run(
         args,
         files=files,
-        registry=_registry(),
+        registry=_registry(policy, credentialed=True),
         github=_forge_api(),
-        policy=_local_policy(files),
+        policy=policy,
     )
 
 
@@ -279,11 +332,12 @@ def _run_validate(args: argparse.Namespace) -> ExitCode:
     # `--base-dir` is optional: absent, `validate` sees no base-ref bytes and
     # treats every reserved-segment root as a fresh claim (fail-closed).
     base_dir = cast("str | None", args.base_dir)
+    policy = _local_policy(files)
     return validate.run(
         args,
         files=files,
-        registry=_registry(),
-        policy=_local_policy(files),
+        registry=_registry(policy, credentialed=False),
+        policy=policy,
         base_files=LocalFiles(root=Path(base_dir)) if base_dir else None,
     )
 
@@ -312,7 +366,7 @@ def _run_validate_pr(args: argparse.Namespace) -> ExitCode:
         args,
         git=LocalGit(repo=_repo_root()),
         files=LocalFiles(root=_repo_root()),
-        registry=_registry(),
+        registry_for=_anonymous_registry,
         base_files=LocalFiles(root=Path(tempfile.mkdtemp(prefix="indexbot-base-"))),
     )
 
@@ -333,12 +387,14 @@ def _run_render(args: argparse.Namespace) -> ExitCode:
 
 def _run_seed_import(args: argparse.Namespace) -> ExitCode:
     files = LocalFiles(root=_repo_root())
+    policy = _local_policy(files)
+    _require_registry_credentials(policy)
     return seed_import.run(
         args,
-        registry=_registry(),
+        registry=_registry(policy, credentialed=True),
         files=files,
         clock=SystemClock(),
-        policy=_local_policy(files),
+        policy=policy,
     )
 
 

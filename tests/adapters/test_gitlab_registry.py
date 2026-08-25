@@ -78,11 +78,16 @@ def test_service_defaults_to_the_host_for_every_other_registry() -> None:
 
 
 def test_gitlab_is_a_servable_host() -> None:
-    """The `policy ⊆ adapters` guard is what stops an index allowlisting a
-    host whose roots would validate and then fail every byte fetch. Adding the
-    adapter without adding it here would leave `registry.gitlab.com` refused
-    at wiring time."""
-    assert GITLAB_HOST in _wiring.REGISTRY_ADAPTER_HOSTS
+    """A GitLab-hosted index puts its bytes on `registry.gitlab.com`, and the
+    two facts no convention supplies — the `jwt/auth` realm and the fixed
+    `container_registry` service — come from the built-in table, so a bare
+    entry is enough."""
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "e2e.ocx.sh", "name_segments": 2, "registry_hosts": ["registry.gitlab.com"]}'
+    )
+    client = _wiring._registry(policy, credentialed=True).by_host[GITLAB_HOST]  # pyright: ignore[reportPrivateUsage]
+    assert client.realm == GITLAB_REALM
+    assert client.service == "container_registry"
 
 
 def test_gitlab_policy_is_accepted_at_wiring_time() -> None:
@@ -99,9 +104,12 @@ def test_the_realm_is_pinned_not_followed_from_the_response() -> None:
     assert GITLAB_REALM == "https://gitlab.com/jwt/auth"
 
 
-@pytest.mark.parametrize("host", ["ghcr.io", "ocx.sh", GITLAB_HOST])
-def test_every_adapter_host_is_dispatchable(host: str) -> None:
-    """A host in the table with no client wired for it is the failure the
-    table exists to prevent, so assert the two agree rather than trusting
-    that they were edited together."""
-    assert host in _wiring.REGISTRY_ADAPTER_HOSTS
+@pytest.mark.parametrize("host", ["ghcr.io", "ocx.sh", GITLAB_HOST, "harbor.corp.internal"])
+def test_every_allowlisted_host_is_dispatchable(host: str) -> None:
+    """The invariant that replaced the compiled-in host table: whatever a
+    policy allowlists gets a client, built from that entry — including a host
+    this package has never heard of."""
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "acme.corp", "name_segments": 2, "registry_hosts": ["' + host.encode() + b'"]}'
+    )
+    assert set(_wiring._registry(policy, credentialed=True).by_host) == {host}  # pyright: ignore[reportPrivateUsage]

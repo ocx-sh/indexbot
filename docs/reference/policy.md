@@ -30,7 +30,7 @@ that cannot be what it claims to be.
 |---|---|---|---|
 | `name` | yes | — | Logical prefix every published root carries. `acme.corp/team/tool` |
 | `name_segments` | yes | — | Segments after the prefix, 1–8. Published in the rendered `config.json` |
-| `registry_hosts` | yes | — | Hosts whose `oci://` repositories this index admits |
+| `registry_hosts` | yes | — | The registries this index admits and how to reach them — a bare host string, or an object (below) |
 | `reserved_namespaces` | no | none | First segments this operator reserves |
 | `governance.auto_merge` | no | `owners` | `owners` \| `never` \| `always` — see [`governance-check`](cli.md#governance-check) |
 | `ci.forge` | no | `github` | `github` \| `gitlab` — which pipeline files [`indexbot ci`](cli.md#ci) renders |
@@ -136,18 +136,100 @@ two are held together by a shared fixture corpus in the package's test suite:
 every accepted example must be accepted by both, every rejected one rejected
 by both.
 
-## Registries this bot can serve
+## Registries
 
-An allowlisted host must also have a registry client wired for it, or its
-roots would validate and then fail every byte fetch. Today that set is:
+A `registry_hosts` entry is either a bare host string or an object. The entry
+*is* the client's configuration: allowlisting a host and being able to fetch
+from it are the same statement, so there is no such thing as a host this bot
+admits and cannot reach.
 
-| Host | Token endpoint | Notes |
+| Field | Required | Default | Meaning |
+|---|---|---|---|
+| `host` | yes | — | The bare host, exactly as it appears in `oci://<host>/…`. No scheme, no port |
+| `base_url` | no | `https://<host>` | Where the Registry v2 API actually lives — scheme, port and path prefix |
+| `realm` | no | `<base_url>/token` | The token endpoint, for `auth: "token"` |
+| `service` | no | `host` | The `service` parameter the realm expects |
+| `auth` | no | `token` | `token` \| `basic` — see below |
+| `credentials_env` | no | none | Name of the environment variable holding `user:password`. Absent → anonymous |
+
+A bare string is `{"host": "…"}` with every default taken, which is why
+`["ghcr.io"]` keeps meaning what it always meant.
+
+### The two auth flows
+
+`token` is the Docker/OCI dance: the bot asks the configured `realm` for a
+`repository:<path>:pull` token — authenticating that one request with the
+credential, if there is one — and sends the short-lived Bearer it gets back to
+`/v2/`. This is ghcr.io, GitLab, Harbor, Artifactory's OCI endpoints.
+
+`basic` sends RFC 7617 credentials on every `/v2/` request and never asks for
+a token. Some Nexus and ECR-alike deployments answer that way; there is no
+realm to ask.
+
+The realm is **configured, never discovered**. A `401` carries a
+`WWW-Authenticate` header naming a realm, and following it would let whatever
+answers `base_url` choose the address the operator's credential is sent to.
+This bot ignores that header. Same reason a credential is dropped on any
+cross-origin redirect.
+
+### Anonymous stays the default
+
+No `credentials_env` means the exact code path a public index has always run:
+no `Authorization` header is built at all. Public registries are first-class,
+not a degraded case of the private one.
+
+### Built-in defaults
+
+Three hosts carry facts no convention supplies, so a bare entry for them is
+enough:
+
+| Host | What is filled in |
+|---|---|
+| `ghcr.io` | nothing — Registry v2 defaults are correct |
+| `ocx.sh` | its Artifactory token path, not `https://ocx.sh/token`, which 404s |
+| `registry.gitlab.com` | realm `https://gitlab.com/jwt/auth`, `service` the literal `container_registry`, **not** the host |
+
+An entry that states its own `base_url` is not given these. Repointing
+`ocx.sh` at an internal mirror and inheriting the public realm would send that
+mirror's credentials to an address nobody wrote down.
+
+### A private registry, end to end
+
+```json
+"registry_hosts": [
+  "ghcr.io",
+  {
+    "host": "artifactory.corp",
+    "base_url": "https://oci-prod.artifactory.corp:8443",
+    "realm": "https://oci-prod.artifactory.corp:8443/v2/token",
+    "auth": "token",
+    "credentials_env": "OCX_REGISTRY_ARTIFACTORY"
+  }
+]
+```
+
+The **name** is committed and reviewed. The **value** never is: set it as a
+repository secret (GitHub — [`indexbot ci`](cli.md#ci) renders it into the
+`reconcile` job's `env:` for you) or a masked, protected CI/CD variable
+(GitLab, ambient exactly like `$GITLAB_TOKEN`).
+
+### Which lanes hold it
+
+| Lane | Credential | What it verifies |
 |---|---|---|
-| `ghcr.io` | `https://ghcr.io/token` | Registry v2 default |
-| `ocx.sh` | Artifactory's own path | not `https://ocx.sh/token`, which 404s |
-| `registry.gitlab.com` | `https://gitlab.com/jwt/auth` | token `service` is the literal `container_registry`, **not** the host |
+| `validate` / `validate-pr` (`pull_request`, `merge_request_event`) | never | Shape and bytes. For a credentialed host, registry checks are **skipped with a WARN naming the variable** |
+| `reconcile`, `seed-import` (privileged) | yes — **refuses to start without it** | Registry truth, including every root the fork lane could only shape-check |
 
-Allowlisting anything else is refused at startup, naming what is missing.
+A fork's pipeline holds no secret; that is the privileged/unprivileged split
+working as designed, not a gap. What would be a gap is skipping silently, so
+the skip is printed per root and the covering lane fails loudly rather than
+running anonymous.
+
+That the fork lane holds no credential is a *construction*, not a
+configuration: its registry clients are built from an empty environment. This
+matters because `validate` reads the policy out of pull-request-head content,
+and an entry names both where a credential is sent (`base_url`) and which
+variable holds it — a pair a pull request must never get to choose.
 
 ## Why the host shape is strict
 
@@ -159,7 +241,8 @@ them at parse time is the difference between a loud error and an index where
 every download fails for a reason nobody can see.
 
 A registry on a non-standard port is allowlisted by its bare host:
-`harbor.corp` admits `oci://harbor.corp:5000/team/tool`.
+`harbor.corp` admits `oci://harbor.corp:5000/team/tool`. The port belongs in
+`base_url`, which is where the bot reads it from.
 
 ## Why it is a committed file
 
@@ -174,17 +257,16 @@ Keeping it under `.github/**` also puts it on the same surface branch
 protection and CODEOWNERS already guard, beside the other governance data the
 bot reads.
 
-## Two failures, both early and loud
+## Fail closed on a missing policy
 
-**No policy file — fail closed.** An index copy that never stated a policy
-says so, rather than inheriting the public index's hosts by accident.
+An index copy that never stated a policy says so at startup, rather than
+inheriting the public index's hosts by accident.
 
-**A host no adapter can serve.** The bot fetches from the hosts it has a
-registry client wired for, and nothing else. Allowlisting
-`harbor.corp.internal` today would produce roots that pass every validation
-check and then cannot be fetched — strictly worse than the honest refusal it
-replaces. The error names the missing piece: implement the client, add its
-host, dispatch it, in the same change.
+There used to be a second early failure here — "a host no adapter can serve" —
+because the servable hosts were a compiled-in triple and allowlisting
+`harbor.corp.internal` produced roots that validated and then could not be
+fetched. It has nothing left to guard: the allowlist entry is the client's
+configuration, so a host cannot be admitted and unreachable at the same time.
 
 ## The PR-head question
 
@@ -196,8 +278,11 @@ self-authorization hole:
 - The policy path is outside every package root's refresh scope, so a pull
   request touching it is classified human-lane and can never auto-merge.
   Merging a widened policy requires a human, which is precisely the control.
-- The no-adapter guard closes it independently: a PR-head policy naming a host
-  with no client fails the run outright.
+- The credential is out of reach independently: the unprivileged lane builds
+  its registry clients from an empty environment, so a PR-head policy can
+  name any `base_url` and any `credentials_env` it likes and there is nothing
+  for either to move. What it buys is a WARN saying its own claims went
+  unverified.
 
 The privileged subcommands deliberately do not read a local policy — they
 never check the repository out, so they read the committed policy at the base

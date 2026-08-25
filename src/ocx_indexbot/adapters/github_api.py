@@ -47,6 +47,18 @@ from ocx_indexbot.model import CommitStatusState, PullRequestHeadMatch, PullRequ
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+GITHUB_API_URL: Final[str] = "https://api.github.com"
+"""github.com's API root. GitHub Enterprise Server has its own
+(`https://ghe.acme.corp/api/v3`); in CI that is `$GITHUB_API_URL`, which every
+runner sets — the same shape as GitLab's `$CI_API_V4_URL`. Where an index
+repository is *hosted* is independent of where its packages live, so this and
+the registry policy move separately."""
+
+GITHUB_GRAPHQL_URL: Final[str] = "https://api.github.com/graphql"
+"""github.com's GraphQL endpoint. On GHES it is `$GITHUB_GRAPHQL_URL`, which
+is NOT `<base_url>/graphql` — the REST root ends in `/api/v3` and the GraphQL
+one in `/api/graphql`, so it is carried separately rather than derived."""
+
 _ACCEPT = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
 _FORGE = "GitHub"
@@ -164,8 +176,8 @@ class GitHubApi:
     repo: str
     token: str = field(default="", repr=False)
     timeout: float = 30.0
-    base_url: str = "https://api.github.com"
-    graphql_url: str = "https://api.github.com/graphql"
+    base_url: str = GITHUB_API_URL
+    graphql_url: str = GITHUB_GRAPHQL_URL
     _cache: dict[str, Any] = field(
         default_factory=dict[str, Any], repr=False, compare=False, init=False
     )

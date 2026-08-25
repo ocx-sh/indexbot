@@ -19,14 +19,16 @@ from __future__ import annotations
 import hashlib
 import json
 import posixpath
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 from ocx_indexbot.core.policy import (
     DEFAULT_RECONCILE_CRON,
     DEFAULT_STALE_CRON,
     CiConfig,
     IndexPolicy,
+    RegistryConfig,
 )
 from ocx_indexbot.errors import TransientError, ValidationError
 from ocx_indexbot.model import (
@@ -418,11 +420,18 @@ def make_policy(**overrides: object) -> IndexPolicy:
     fields: dict[str, object] = {
         "name": "ocx.sh",
         "name_segments": 2,
-        "registry_hosts": frozenset({"ghcr.io"}),
+        "registries": {"ghcr.io": RegistryConfig(host="ghcr.io")},
         "reserved_namespaces": frozenset({"ocx", "ocx-sh", "ocx-contrib", "ocx-rs"}),
         "auto_merge": "owners",
     }
     for key, value in overrides.items():
+        # `registry_hosts` is a derived property on the real dataclass, but it
+        # is what a test that only cares about G-03's allowlist wants to say —
+        # so it keeps working, as anonymous default-configured registries.
+        if key == "registry_hosts":
+            hosts = cast("Iterable[str]", value)
+            fields["registries"] = {host: RegistryConfig(host=host) for host in hosts}
+            continue
         target = ci_fields if key in ci_fields else fields
         target[key] = value
     fields["ci"] = CiConfig(**ci_fields)  # pyright: ignore[reportArgumentType]

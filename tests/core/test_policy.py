@@ -26,7 +26,9 @@ from ocx_indexbot.core.policy import (
     MAX_NAME_SEGMENTS,
     CiConfig,
     IndexPolicy,
+    RegistryConfig,
     parse_index_policy,
+    registry_credential_env,
     resolves_at_runtime,
 )
 from ocx_indexbot.errors import ValidationError
@@ -56,7 +58,7 @@ def test_parses_the_minimal_shape() -> None:
     assert policy == IndexPolicy(
         name="ocx.sh",
         name_segments=2,
-        registry_hosts=frozenset({"ghcr.io"}),
+        registries={"ghcr.io": RegistryConfig(host="ghcr.io")},
         reserved_namespaces=frozenset(),
         auto_merge="owners",
         ci=CiConfig(
@@ -241,6 +243,185 @@ def test_over_long_host_entry_raises() -> None:
 def test_non_bare_host_raises(host: str) -> None:
     with pytest.raises(ValidationError, match="bare lowercase registry host"):
         parse_index_policy(_policy(registry_hosts=[host]))
+
+
+# --- registry_hosts: object entries -----------------------------------------
+
+
+def _entry(**fields: object) -> bytes:
+    return _policy(registry_hosts=[{"host": "artifactory.corp", **fields}])
+
+
+def test_object_entry_defaults_to_an_anonymous_token_registry() -> None:
+    """The only required key is `host`. Everything else has a convention
+    behind it, and an entry that states nothing more describes exactly what
+    a bare string would."""
+    config = parse_index_policy(_entry()).registries["artifactory.corp"]
+    assert config == RegistryConfig(host="artifactory.corp")
+    assert config.auth == "token"
+    assert config.credentials_env == ""
+
+
+def test_object_entry_carries_address_realm_service_auth_and_credential() -> None:
+    config = parse_index_policy(
+        _entry(
+            base_url="https://oci.artifactory.corp:8443",
+            realm="https://oci.artifactory.corp:8443/v2/token",
+            service="artifactory",
+            auth="basic",
+            credentials_env="OCX_REGISTRY_ART",
+        )
+    ).registries["artifactory.corp"]
+    assert config.base_url == "https://oci.artifactory.corp:8443"
+    assert config.realm == "https://oci.artifactory.corp:8443/v2/token"
+    assert config.service == "artifactory"
+    assert config.auth == "basic"
+    assert config.credentials_env == "OCX_REGISTRY_ART"
+
+
+def test_registry_hosts_mixes_bare_strings_and_objects() -> None:
+    raw = _policy(
+        registry_hosts=["ghcr.io", {"host": "artifactory.corp", "credentials_env": "ART"}]
+    )
+    policy = parse_index_policy(raw)
+    assert policy.registry_hosts == frozenset({"ghcr.io", "artifactory.corp"})
+    assert policy.registries["ghcr.io"].credentials_env == ""
+
+
+def test_object_entry_missing_host_raises() -> None:
+    with pytest.raises(ValidationError, match="missing required 'host'"):
+        parse_index_policy(_policy(registry_hosts=[{"base_url": "https://oci.corp"}]))
+
+
+def test_object_entry_with_a_non_bare_host_raises() -> None:
+    with pytest.raises(ValidationError, match="bare lowercase registry host"):
+        parse_index_policy(_policy(registry_hosts=[{"host": "oci.corp:8443"}]))
+
+
+def test_object_entry_unknown_key_raises() -> None:
+    with pytest.raises(ValidationError, match="unknown key"):
+        parse_index_policy(_entry(token="hunter2"))  # noqa: S106
+
+
+@pytest.mark.parametrize(
+    ("base_url", "match"),
+    [
+        ("ftp://oci.corp", "must start with"),
+        ("https://", "must include a host"),
+        ("https://svc:secret@oci.corp", "must not embed credentials"),
+        ("https://oci.corp?x=1", "no query or fragment"),
+        ("https://oci.corp#frag", "no query or fragment"),
+        ("https://oci.corp/", "must not end with"),
+    ],
+)
+def test_bad_base_url_raises(base_url: str, match: str) -> None:
+    """`base_url` is used verbatim as a request-URL prefix, so it is validated
+    as one — and a credential inside it would be a secret in a committed,
+    reviewed file."""
+    with pytest.raises(ValidationError, match=match):
+        parse_index_policy(_entry(base_url=base_url))
+
+
+def test_non_string_base_url_raises() -> None:
+    with pytest.raises(ValidationError, match="'base_url' must be a string URL"):
+        parse_index_policy(_entry(base_url=8443))
+
+
+def test_over_long_base_url_raises() -> None:
+    with pytest.raises(ValidationError, match="'base_url' must be a string URL"):
+        parse_index_policy(_entry(base_url="https://oci.corp/" + "a" * 2048))
+
+
+@pytest.mark.parametrize(
+    ("realm", "match"),
+    [
+        ("oci.corp/token", r"must be an http\(s\) URL"),
+        ("https://svc:secret@oci.corp/token", "must not embed credentials"),
+        (7, "must be a string URL"),
+    ],
+)
+def test_bad_realm_raises(realm: object, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        parse_index_policy(_entry(realm=realm))
+
+
+def test_non_string_service_raises() -> None:
+    with pytest.raises(ValidationError, match="'service' must be a single-line string"):
+        parse_index_policy(_entry(service="container\nregistry"))
+
+
+def test_unknown_auth_mode_raises() -> None:
+    with pytest.raises(ValidationError, match="'auth' must be one of"):
+        parse_index_policy(_entry(auth="mtls"))
+
+
+@pytest.mark.parametrize("name", ["1_LEADING_DIGIT", "HAS-HYPHEN", "has space", "$INTERPOLATED"])
+def test_bad_credentials_env_name_raises(name: str) -> None:
+    """The field names an environment variable; anything that cannot be one
+    would silently mean "anonymous" at wiring time."""
+    with pytest.raises(ValidationError, match="not a bare environment-variable name"):
+        parse_index_policy(_entry(credentials_env=name))
+
+
+def test_non_string_credentials_env_raises() -> None:
+    with pytest.raises(ValidationError, match="must be an environment-variable name"):
+        parse_index_policy(_entry(credentials_env=["ART"]))
+
+
+def test_duplicate_host_with_identical_configuration_is_accepted() -> None:
+    raw = _policy(registry_hosts=["ghcr.io", "ghcr.io"])
+    assert parse_index_policy(raw).registry_hosts == frozenset({"ghcr.io"})
+
+
+def test_duplicate_host_with_conflicting_configuration_raises() -> None:
+    """Letting the last entry win would make which registry the bot talks to
+    depend on array order — unreadable, and silent."""
+    raw = _policy(
+        registry_hosts=[
+            {"host": "artifactory.corp", "base_url": "https://a.corp"},
+            {"host": "artifactory.corp", "base_url": "https://b.corp"},
+        ]
+    )
+    with pytest.raises(ValidationError, match="more than once with different configuration"):
+        parse_index_policy(raw)
+
+
+def test_registries_mapping_is_read_only() -> None:
+    """Policy is committed configuration; nothing downstream gets to edit it
+    in place."""
+    policy = parse_index_policy(_MINIMAL)
+    with pytest.raises(TypeError):
+        policy.registries["harbor.corp"] = RegistryConfig(host="harbor.corp")  # type: ignore[index]
+
+
+# --- registry_credential_env ------------------------------------------------
+
+
+def test_registry_credential_env_names_the_hosts_variable() -> None:
+    policy = parse_index_policy(_entry(credentials_env="OCX_REGISTRY_ART"))
+    assert registry_credential_env(policy, "oci://artifactory.corp/team/tool") == "OCX_REGISTRY_ART"
+
+
+def test_registry_credential_env_is_empty_for_an_anonymous_registry() -> None:
+    policy = parse_index_policy(_MINIMAL)
+    assert registry_credential_env(policy, "oci://ghcr.io/ocx-contrib/cmake") == ""
+
+
+def test_registry_credential_env_is_empty_for_an_unknown_host() -> None:
+    """G-03 has already refused such a repository before any caller reaches
+    here; this is the fail-safe answer, not a policy decision."""
+    policy = parse_index_policy(_MINIMAL)
+    assert registry_credential_env(policy, "oci://elsewhere.corp/team/tool") == ""
+    assert registry_credential_env(policy, "not-a-uri") == ""
+
+
+def test_registry_credential_env_ignores_a_port_in_the_repository() -> None:
+    """G-03 matches the port-stripped hostname, so this lookup must too."""
+    policy = parse_index_policy(_entry(credentials_env="OCX_REGISTRY_ART"))
+    assert (
+        registry_credential_env(policy, "oci://artifactory.corp:8443/team/tool")
+        == "OCX_REGISTRY_ART"
+    )
 
 
 # --- reserved_namespaces ----------------------------------------------------

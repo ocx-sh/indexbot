@@ -32,7 +32,7 @@ from ocx_indexbot.exit_codes import ExitCode
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from ocx_indexbot.core.policy import IndexPolicy
     from ocx_indexbot.ports import FilePort, GitPort, RegistryPort
@@ -385,7 +385,7 @@ def run(
     *,
     git: GitPort,
     files: FilePort,
-    registry: RegistryPort,
+    registry_for: Callable[[IndexPolicy], RegistryPort],
     base_files: FilePort,
 ) -> ExitCode:
     """`indexbot validate-pr [--base-sha SHA] [--offline] [--same-repo-pr | --fork-pr]`.
@@ -425,7 +425,7 @@ def run(
     reports = validate.validate_paths(
         paths,
         files=files,
-        registry=registry,
+        registry=registry_for(policy),
         policy=policy,
         offline=cast(bool, args.offline),
         allow_reserved=_same_repo_pr(args, os.environ),

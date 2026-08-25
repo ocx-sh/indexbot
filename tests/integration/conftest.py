@@ -7,6 +7,7 @@ after the test). `index_tree` is a fresh, empty checkout root for
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -32,6 +33,21 @@ def fake_forge() -> Iterator[FakeForgeServer]:
         yield server
 
 
+def write_policy(root: Path, registry_hosts: list[object]) -> None:
+    """Seed an index checkout's `.github/index-policy.json`.
+
+    The registry entries are the interesting part: `cli/_wiring.py` builds one
+    client per entry, so pointing `ghcr.io`'s `base_url` at the loopback fake
+    is how an integration flow reaches the fake at all — the same field a
+    corporate deployment uses to name its own registry, exercised rather than
+    monkeypatched.
+    """
+    policy = root / INDEX_POLICY_PATH
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    document = {"name": "ocx.sh", "name_segments": 2, "registry_hosts": registry_hosts}
+    policy.write_bytes(json.dumps(document).encode() + b"\n")
+
+
 @pytest.fixture
 def index_tree(tmp_path: Path) -> Path:
     root = tmp_path / "index"
@@ -40,7 +56,5 @@ def index_tree(tmp_path: Path) -> Path:
     # `cli/_wiring.py` loads before `validate`/`reconcile` touch a registry.
     # Seeded with the public index's own `{"ghcr.io"}` so these flows exercise
     # the shipped policy end to end.
-    policy = root / INDEX_POLICY_PATH
-    policy.parent.mkdir(parents=True, exist_ok=True)
-    policy.write_bytes(b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["ghcr.io"]}\n')
+    write_policy(root, ["ghcr.io"])
     return root

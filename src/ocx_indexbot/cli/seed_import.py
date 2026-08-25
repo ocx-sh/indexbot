@@ -199,10 +199,9 @@ def _resolve_repository(
         if registry not in allowed_hosts:
             raise ValidationError(
                 f"{source}: mirror target registry {registry!r} is not an allowlisted "
-                f"physical registry ({sorted(allowed_hosts)!r}) — the index "
-                "requires the physical repository to live on an allowlisted registry, "
-                "which this package has not been republished to yet (pending the "
-                "human-gated M-1 ghcr.io republish); pass --repository once it has been"
+                f"physical registry ({sorted(allowed_hosts)!r}) — every root this index "
+                "publishes must point at a registry its own policy admits. Either republish "
+                "the package to one of those, or pass --repository to name where it lives"
             )
         return f"oci://{registry}/{repository_path}"
 

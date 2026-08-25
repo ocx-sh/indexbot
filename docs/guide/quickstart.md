@@ -71,9 +71,25 @@ declare its own identity would publish under another deployment's. Everything
 else the file accepts is in [Deployment policy](../reference/policy.md).
 
 There is no compiled-in default. An index that never states a policy fails
-closed rather than silently inheriting someone else's. A host that no
-registry adapter can fetch is refused at wiring time — allowlisting what
-cannot be served produces roots that validate and then fail every download.
+closed rather than silently inheriting someone else's.
+
+A private registry states where it lives and which variable holds its
+credential, instead of a bare host string:
+
+```json
+"registry_hosts": [
+  {
+    "host": "artifactory.corp",
+    "base_url": "https://oci-prod.artifactory.corp:8443",
+    "credentials_env": "OCX_REGISTRY_ARTIFACTORY"
+  }
+]
+```
+
+The variable **name** is committed; its value is a repository secret or a
+masked CI/CD variable, read only by the privileged lanes. Anonymous registries
+need none of this — see
+[Registries](../reference/policy.md#registries).
 
 ## 2. Seed a package
 

@@ -452,7 +452,7 @@ def test_mirror_yml_nested_target_shape_not_allowlisted_raises_precise_error() -
     message = str(excinfo.value)
     assert "ocx.sh" in message
     assert "not an allowlisted physical registry" in message
-    assert "M-1" in message
+    assert "--repository" in message
 
 
 def test_mirror_yml_nested_target_missing_repository_key_raises() -> None:

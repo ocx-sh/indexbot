@@ -40,6 +40,7 @@ from ocx_indexbot.adapters.registry_v2 import RegistryV2
 from ocx_indexbot.cli.main import main
 from ocx_indexbot.core.validate_entry import parse_package_root, serialize_package_root
 from ocx_indexbot.exit_codes import ExitCode
+from tests.integration.conftest import write_policy
 from tests.integration.fixtures.canonical import (
     CANONICAL_ROOT_PATH,
     CANONICAL_SPEC,
@@ -78,8 +79,16 @@ def _capturing_client(sink: list[dict[str, str]]) -> httpx.Client:
     return httpx.Client(event_hooks={"request": [_record]})
 
 
-def _seed_workspace(index_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _seed_workspace(
+    index_tree: Path, monkeypatch: pytest.MonkeyPatch, ghcr: FakeGhcrServer
+) -> None:
     build_git_tree(index_tree, CANONICAL_SPEC)
+    # The registry seam is the deployment's own policy: `ghcr.io` is declared
+    # with the loopback fake's address as its `base_url`, exactly the field a
+    # corporate index uses to name its own registry. Roots still say
+    # `oci://ghcr.io/...`, so routing, scope strings and error messages all
+    # name the real host.
+    write_policy(index_tree, [{"host": "ghcr.io", "base_url": ghcr.base_url}])
     monkeypatch.setenv("GITHUB_WORKSPACE", str(index_tree))
     # A planted forge write credential that validate has no legitimate reason
     # to send anywhere — X6 asserts it never leaks into a GHCR-bound header.
@@ -96,15 +105,12 @@ def _cas_object_path(index_tree: Path) -> Path:
 def test_validate_clean_tree_exits_ok_with_no_credential_leak(
     fake_ghcr: FakeGhcrServer, index_tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed_workspace(index_tree, monkeypatch)
+    _seed_workspace(index_tree, monkeypatch, fake_ghcr)
     seed_registry(fake_ghcr)
 
     sent_headers: list[dict[str, str]] = []
     with _capturing_client(sent_headers) as client:
-        monkeypatch.setattr(
-            _WIRING_REGISTRY,
-            functools.partial(RegistryV2, base_url=fake_ghcr.base_url, client=client),
-        )
+        monkeypatch.setattr(_WIRING_REGISTRY, functools.partial(RegistryV2, client=client))
         exit_code = main(["validate", CANONICAL_ROOT_PATH])
 
     assert exit_code == ExitCode.OK
@@ -129,11 +135,8 @@ def test_validate_clean_tree_exits_ok_with_no_credential_leak(
 def test_validate_tampered_cas_object_is_anomaly_without_summary_floor(
     fake_ghcr: FakeGhcrServer, index_tree: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _seed_workspace(index_tree, monkeypatch)
+    _seed_workspace(index_tree, monkeypatch, fake_ghcr)
     seed_registry(fake_ghcr)
-    monkeypatch.setattr(
-        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=fake_ghcr.base_url)
-    )
 
     # Corrupt the committed CAS object's bytes in place (its filename digest is
     # left untouched, so this is a self-consistency violation, not a dangling
@@ -157,11 +160,8 @@ def test_validate_tampered_cas_object_is_anomaly_without_summary_floor(
 def test_validate_non_canonical_root_bytes_is_validation_failure(
     fake_ghcr: FakeGhcrServer, index_tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed_workspace(index_tree, monkeypatch)
+    _seed_workspace(index_tree, monkeypatch, fake_ghcr)
     seed_registry(fake_ghcr)
-    monkeypatch.setattr(
-        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=fake_ghcr.base_url)
-    )
 
     # Re-emit the committed root as compact JSON: it still parses to the exact
     # same PackageRoot, but its bytes are not the canonical pretty-printed
@@ -199,11 +199,8 @@ def test_validate_rejects_a_tag_whose_cas_object_is_not_an_image_index(
     rejection *reason* is asserted on stderr — delete or reorder the D4(c) check
     and this fails, rather than passing on the second failure path.
     """
-    _seed_workspace(index_tree, monkeypatch)
+    _seed_workspace(index_tree, monkeypatch, fake_ghcr)
     seed_registry(fake_ghcr)
-    monkeypatch.setattr(
-        _WIRING_REGISTRY, functools.partial(RegistryV2, base_url=fake_ghcr.base_url)
-    )
 
     cas_dir = _cas_object_path(index_tree).parent
     _cas_object_path(index_tree).unlink()

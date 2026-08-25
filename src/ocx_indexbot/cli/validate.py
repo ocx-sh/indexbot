@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from ocx_indexbot.core.diff import classify_change
-from ocx_indexbot.core.policy import IndexPolicy
+from ocx_indexbot.core.policy import IndexPolicy, registry_credential_env
 from ocx_indexbot.core.registry_checks import check_digest_in_scope, check_ownership
 from ocx_indexbot.core.validate_entry import (
     check_digest_self_consistent,
@@ -91,8 +91,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--allow-reserved-namespace",
         action="store_true",
         help=(
-            "admit OCX's own brand namespace segments (ocx, ocx-sh, ocx-contrib, ocx-rs) only "
-            "— control-path and generic reserved segments (p, admin, ...) stay blocked"
+            "admit this index's own reserved_namespaces segments only — control-path and "
+            "generic reserved segments (p, admin, ...) stay blocked"
         ),
     )
     parser.add_argument(
@@ -323,8 +323,27 @@ def _validate_one(
             for tag_name, object_bytes in object_bytes_by_tag.items()
         }
 
+        # Never conditional on what happens to be in this process's
+        # environment: `validate` is the lane that reads a policy out of
+        # PR-head content, so a credentialed client here would let that
+        # content name both the address to send a credential to (`base_url`)
+        # and the variable to read it from. It is built anonymous by
+        # construction in `cli/_wiring.py`, and this says so per root.
+        credential_env = "" if offline else registry_credential_env(policy, root.repository)
         if offline:
             warnings.append("G-15 registry checks skipped (--offline)")
+        elif credential_env:
+            # The fork lane, against a private registry. A pull request's own
+            # pipeline holds no secret — that is the point of the split, not
+            # an oversight — so the claims that need registry truth are left
+            # to `reconcile`, which holds the credential and refuses to run
+            # without it. Said out loud, per root, so a green check here is
+            # never mistaken for "the registry agreed".
+            warnings.append(
+                f"G-15 registry checks skipped for {root.repository!r}: its registry needs "
+                f"credentials (${credential_env}), which this lane does not hold — "
+                "verified by the privileged reconcile lane instead"
+            )
         else:
             for tag_name in sorted(index_digests_by_tag):
                 for manifest_digest in index_digests_by_tag[tag_name]:

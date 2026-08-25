@@ -108,16 +108,16 @@ def _add_seed_import_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "override physical oci://<host>/<path> repository (validated against the host "
-            "allowlist + OCI repository grammar); wins over mirror.yml — the post-M-1 escape "
-            "hatch for a package whose mirror.yml still names a non-allowlisted registry"
+            "allowlist + OCI repository grammar); wins over mirror.yml, for a package whose "
+            "mirror.yml still names a registry this index does not admit"
         ),
     )
     parser.add_argument(
         "--allow-reserved-namespace",
         action="store_true",
         help=(
-            "admit OCX's own brand namespace segments (ocx, ocx-sh, ocx-contrib, ocx-rs) only "
-            "— control-path and generic reserved segments (p, admin, ...) stay blocked"
+            "admit this index's own reserved_namespaces segments only — control-path and "
+            "generic reserved segments (p, admin, ...) stay blocked"
         ),
     )
 

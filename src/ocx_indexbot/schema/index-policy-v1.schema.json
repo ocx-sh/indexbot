@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ocx-sh.github.io/indexbot/schema/index-policy-v1.schema.json",
   "title": "OCX index deployment policy",
-  "description": "`.github/index-policy.json` — one index deployment's committed configuration. Not wire contract: the served URL shapes are frozen for every index alike, and this decides only what THIS index puts in them. `core/policy.py`'s parse_index_policy is the runtime authority; this file exists so an operator's editor can autocomplete and pre-flight the config. The two are held together by the shared fixture corpus in tests/fixtures/policy/.",
+  "description": "`.github/index-policy.json` \u2014 one index deployment's committed configuration. Not wire contract: the served URL shapes are frozen for every index alike, and this decides only what THIS index puts in them. `core/policy.py`'s parse_index_policy is the runtime authority; this file exists so an operator's editor can autocomplete and pre-flight the config. The two are held together by the shared fixture corpus in tests/fixtures/policy/.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -19,7 +19,7 @@
       "type": "string",
       "maxLength": 253,
       "pattern": "^[a-z0-9]+(?:-+[a-z0-9]+)*(?:\\.[a-z0-9]+(?:-+[a-z0-9]+)*)*$",
-      "description": "Logical prefix every published root carries — `ocx.sh` for the public index, `acme.corp` for a corporate one. Also the registry key an ocx client configures as [registries.\"<name>\"] index = \"…\", which is why it has exactly the registry-host grammar: no scheme, no port, no path, no trailing dot, lowercase. Required, with no default — an index that does not declare its own name would publish under another deployment's.",
+      "description": "Logical prefix every published root carries \u2014 `ocx.sh` for the public index, `acme.corp` for a corporate one. Also the registry key an ocx client configures as [registries.\"<name>\"] index = \"\u2026\", which is why it has exactly the registry-host grammar: no scheme, no port, no path, no trailing dot, lowercase. Required, with no default \u2014 an index that does not declare its own name would publish under another deployment's.",
       "examples": [
         "ocx.sh",
         "acme.corp",
@@ -30,7 +30,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 8,
-      "description": "How many `/`-separated segments follow `name` in a package id, and so how deep `p/**` nests. `2` gives `acme.corp/<namespace>/<package>`. Published in the rendered config.json because no client can derive it from a tree. The upper bound is not an opinion about hierarchy depth — it exists so every derived path length stays bounded. Required, with no default.",
+      "description": "How many `/`-separated segments follow `name` in a package id, and so how deep `p/**` nests. `2` gives `acme.corp/<namespace>/<package>`. Published in the rendered config.json because no client can derive it from a tree. The upper bound is not an opinion about hierarchy depth \u2014 it exists so every derived path length stays bounded. Required, with no default.",
       "examples": [
         2
       ]
@@ -38,27 +38,87 @@
     "registry_hosts": {
       "type": "array",
       "minItems": 1,
-      "description": "G-03's allowlist: hosts whose `oci://` repositories this index will admit. Widening it is a supply-chain trust decision, which is why it lives in a reviewed file and never in a settings-page variable. Bare lowercase hosts only — a scheme, a port or a path would allowlist nothing, because the check compares against a URL's parsed hostname. A registry on a non-default port is still allowlisted by its bare host.",
+      "description": "G-03's allowlist, and how to reach each host on it. Widening it is a supply-chain trust decision, which is why it lives in a reviewed file and never in a settings-page variable. An entry is either a bare host string \u2014 the Registry v2 conventions apply, plus the built-in facts for ghcr.io, ocx.sh and registry.gitlab.com \u2014 or an object stating what no convention can supply: a corporate registry's real address, its token endpoint, and the NAME of the environment variable holding `user:password` for it. The host itself is always bare and lowercase in both forms: it is what a root's `oci://<host>/<path>` is matched and routed by, and a scheme, port or path there would allowlist nothing. A port belongs in `base_url`.",
       "items": {
-        "type": "string",
-        "maxLength": 253,
-        "pattern": "^[a-z0-9]+(?:-+[a-z0-9]+)*(?:\\.[a-z0-9]+(?:-+[a-z0-9]+)*)*$"
+        "oneOf": [
+          {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^[a-z0-9]+(?:-+[a-z0-9]+)*(?:\\.[a-z0-9]+(?:-+[a-z0-9]+)*)*$"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "host"
+            ],
+            "properties": {
+              "host": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[a-z0-9]+(?:-+[a-z0-9]+)*(?:\\.[a-z0-9]+(?:-+[a-z0-9]+)*)*$",
+                "description": "The bare lowercase host, and the `oci://<host>/\u2026` key every root naming this registry is routed by."
+              },
+              "base_url": {
+                "type": "string",
+                "maxLength": 2048,
+                "pattern": "^https?://[^/?#@]+(?:/[^?#]*[^/?#])?$",
+                "description": "Where this registry's `/v2/` API lives \u2014 scheme, host, optional port and path prefix, no trailing slash. Defaults to `https://<host>`. Never a URL with credentials in it: this file is committed and reviewed, so the secret is named by `credentials_env` instead.",
+                "examples": [
+                  "https://oci-prod.artifactory.corp:8443",
+                  "https://harbor.corp"
+                ]
+              },
+              "realm": {
+                "type": "string",
+                "maxLength": 2048,
+                "pattern": "^https?://[^/?#@]+(?:/[^#]*)?$",
+                "description": "The token endpoint, when it is not `<base_url>/token`. Configured rather than followed from a 401's `WWW-Authenticate`: a realm is a URL the server chooses, and following one widens where this bot sends credentials with no diff and no reviewer."
+              },
+              "service": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[^\\r\\n]*$",
+                "description": "The token request's `service` parameter, when it is not the host. GitLab's is the fixed literal `container_registry`."
+              },
+              "auth": {
+                "enum": [
+                  "token",
+                  "basic"
+                ],
+                "default": "token",
+                "description": "`token` \u2014 the Registry v2 dance (401, then a realm request that answers with a short-lived Bearer), authenticated with the credential when one is configured. `basic` \u2014 RFC 7617 credentials on every `/v2/` call, no realm at all, which is what ECR and some Nexus deployments want."
+              },
+              "credentials_env": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                "description": "NAME of the environment variable holding `user:password` for this registry (Docker's own convention) \u2014 never the secret itself. Absent means anonymous pull. `indexbot ci` renders the variable into the privileged reconcile job; the unprivileged fork lane never receives it and reports the registry checks it therefore skipped.",
+                "examples": [
+                  "OCX_REGISTRY_ARTIFACTORY"
+                ]
+              }
+            }
+          }
+        ]
       },
       "examples": [
         [
           "ghcr.io"
         ],
         [
-          "registry.gitlab.com"
-        ],
-        [
-          "harbor.corp"
+          "ghcr.io",
+          {
+            "host": "artifactory.corp",
+            "base_url": "https://oci-prod.artifactory.corp:8443",
+            "credentials_env": "OCX_REGISTRY_ARTIFACTORY"
+          }
         ]
       ]
     },
     "reserved_namespaces": {
       "type": "array",
-      "description": "First path segments this operator reserves — a brand, an internal prefix. The STRUCTURAL reservations (`p`, `o`, `c`, `config`, `schema`, …) are deliberately not expressible here: they follow from the served URL shapes and hold for every index, so the bot applies them unconditionally. Defaults to none.",
+      "description": "First path segments this operator reserves \u2014 a brand, an internal prefix. The STRUCTURAL reservations (`p`, `o`, `c`, `config`, `schema`, \u2026) are deliberately not expressible here: they follow from the served URL shapes and hold for every index, so the bot applies them unconditionally. Defaults to none.",
       "items": {
         "type": "string",
         "maxLength": 39,
@@ -83,14 +143,14 @@
             "always"
           ],
           "default": "owners",
-          "description": "`owners` — a machine-lane PR auto-merges when its author owns every touched root (the public index's policy). `never` — every PR waits for a human. `always` — any machine-lane PR auto-merges."
+          "description": "`owners` \u2014 a machine-lane PR auto-merges when its author owns every touched root (the public index's policy). `never` \u2014 every PR waits for a human. `always` \u2014 any machine-lane PR auto-merges."
         }
       }
     },
     "ci": {
       "type": "object",
       "additionalProperties": false,
-      "description": "What `indexbot ci` renders, and for which forge. Not how the bot picks a forge API at run time — that comes from the runner's own variables. Defaults apply when the block is absent or empty.",
+      "description": "What `indexbot ci` renders, and for which forge. Not how the bot picks a forge API at run time \u2014 that comes from the runner's own variables. Defaults apply when the block is absent or empty.",
       "properties": {
         "forge": {
           "enum": [
@@ -104,12 +164,12 @@
           "type": "string",
           "pattern": "^$|^[a-z0-9](?:-?[a-z0-9])*(?:/[a-z0-9](?:-?[a-z0-9])*)*$",
           "default": "",
-          "description": "The repository owner / GitLab namespace, for the cron-upstream-only guard every scheduled job carries. `indexbot ci` refuses to render without it rather than guess: a fork inherits every schedule in a workflow file and would run it against its own stale copy. It renders inside a quoted expression scalar (`github.repository_owner == '<owner>'`, `$CI_PROJECT_NAMESPACE == \"<owner>\"`), so — unlike `run` and `setup` below — it takes the package-namespace grammar (letters, digits, single hyphens), composed with `/` for a GitLab subgroup path, rather than just a newline ban: a `'` or `\"` would break out of that scalar."
+          "description": "The repository owner / GitLab namespace, for the cron-upstream-only guard every scheduled job carries. `indexbot ci` refuses to render without it rather than guess: a fork inherits every schedule in a workflow file and would run it against its own stale copy. It renders inside a quoted expression scalar (`github.repository_owner == '<owner>'`, `$CI_PROJECT_NAMESPACE == \"<owner>\"`), so \u2014 unlike `run` and `setup` below \u2014 it takes the package-namespace grammar (letters, digits, single hyphens), composed with `/` for a GitLab subgroup path, rather than just a newline ban: a `'` or `\"` would break out of that scalar."
         },
         "run": {
           "type": "string",
           "pattern": "^[^\\r\\n]*$",
-          "description": "The command a generated job uses to invoke the bot. REQUIRED for `indexbot ci`, with no default, and it must not resolve the version at job start. It is what the privileged governance job runs — on GitHub, a job holding `contents: write` under `pull_request_target`, whose token can move an unprotected base branch and squash-merge a pull request — so `uvx ocx-indexbot`, which fetches the latest release when the step starts, is refused rather than defaulted to. Pin by lockfile (`uv run --project bot-tools --frozen -- indexbot`; without `--frozen` or `--locked`, `uv run` re-locks a stale lockfile and a git source moves), by exact specifier (`uvx --from 'ocx-indexbot==0.2.0' indexbot`), or by naming no resolver at all (`indexbot`, a container entrypoint, a vendored install). The value is otherwise free-form shell — only a newline is banned, since it IS the command a step runs, not a value substituted into one. The pattern here cannot express the pinning rule; `indexbot ci` enforces it at render time and WF-08 audits the rendered tree.",
+          "description": "The command a generated job uses to invoke the bot. REQUIRED for `indexbot ci`, with no default, and it must not resolve the version at job start. It is what the privileged governance job runs \u2014 on GitHub, a job holding `contents: write` under `pull_request_target`, whose token can move an unprotected base branch and squash-merge a pull request \u2014 so `uvx ocx-indexbot`, which fetches the latest release when the step starts, is refused rather than defaulted to. Pin by lockfile (`uv run --project bot-tools --frozen -- indexbot`; without `--frozen` or `--locked`, `uv run` re-locks a stale lockfile and a git source moves), by exact specifier (`uvx --from 'ocx-indexbot==0.2.0' indexbot`), or by naming no resolver at all (`indexbot`, a container entrypoint, a vendored install). The value is otherwise free-form shell \u2014 only a newline is banned, since it IS the command a step runs, not a value substituted into one. The pattern here cannot express the pinning rule; `indexbot ci` enforces it at render time and WF-08 audits the rendered tree.",
           "examples": [
             "uv run --project bot-tools --frozen -- indexbot",
             "uvx --from 'ocx-indexbot==0.2.0' indexbot",
@@ -120,13 +180,13 @@
           "type": "string",
           "pattern": "^[^\\r\\n]*$",
           "default": "",
-          "description": "A step that installs whatever `run` needs — a `uses:` target on GitHub (typically a local composite action), an `image:` on GitLab. Empty renders no setup step at all. No newline — see `run`."
+          "description": "A step that installs whatever `run` needs \u2014 a `uses:` target on GitHub (typically a local composite action), an `image:` on GitLab. Empty renders no setup step at all. No newline \u2014 see `run`."
         },
         "deploy_workflow": {
           "type": "string",
           "pattern": "^$|^[A-Za-z0-9._-]+$",
           "default": "",
-          "description": "The workflow file a merged machine-lane PR should dispatch, if this deployment has one. Empty renders no such job at all. Renders unquoted into a shell command (`gh workflow run <deploy_workflow> --repo \"$REPO\" --ref main`) in a job holding `actions: write` + `contents: write`, so it takes a bare-filename grammar (letters, digits, `.`, `_`, `-`) rather than just a newline ban — nothing a path component or a shell word boundary could hide in."
+          "description": "The workflow file a merged machine-lane PR should dispatch, if this deployment has one. Empty renders no such job at all. Renders unquoted into a shell command (`gh workflow run <deploy_workflow> --repo \"$REPO\" --ref main`) in a job holding `actions: write` + `contents: write`, so it takes a bare-filename grammar (letters, digits, `.`, `_`, `-`) rather than just a newline ban \u2014 nothing a path component or a shell word boundary could hide in."
         },
         "schedules": {
           "type": "object",

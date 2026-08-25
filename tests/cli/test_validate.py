@@ -8,6 +8,7 @@ import pytest
 
 from ocx_indexbot.cli import validate
 from ocx_indexbot.core.observe import observe_one_tag
+from ocx_indexbot.core.policy import RegistryConfig
 from ocx_indexbot.core.validate_entry import serialize_package_root
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import (
@@ -161,6 +162,64 @@ def test_run_offline_skips_registry_checks_and_warns(capsys: pytest.CaptureFixtu
     assert result == ExitCode.OK
     err = capsys.readouterr().err
     assert f"{_PATH}: WARN - G-15 registry checks skipped (--offline)" in err
+
+
+def test_run_skips_registry_checks_for_a_credentialed_registry_this_lane_cannot_reach(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The fork lane against a private registry. A pull request's own pipeline
+    holds no secret — that is the split working, not an oversight — so the
+    claims needing registry truth are left to `reconcile`, which holds the
+    credential and refuses to start without it
+    (`_wiring._require_registry_credentials`).
+
+    `_PoisonRegistry` is the half of this that matters: the checks really did
+    not run. The WARN is the other half — a green check here must never read
+    as "the registry agreed"."""
+    files, _registry = _valid_package()
+    policy = make_policy(
+        registries={"ghcr.io": RegistryConfig(host="ghcr.io", credentials_env="OCX_REGISTRY_ART")}
+    )
+
+    result = validate.run(_args([_PATH]), files=files, registry=_PoisonRegistry(), policy=policy)
+
+    assert result == ExitCode.OK
+    err = capsys.readouterr().err
+    assert f"{_PATH}: WARN - G-15 registry checks skipped" in err
+    assert "$OCX_REGISTRY_ART" in err
+    assert "reconcile" in err
+
+
+def test_the_skip_does_not_depend_on_what_is_in_the_environment(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exporting the variable does not turn the skip off, because this lane's
+    client is built from an empty environment either way
+    (`_wiring._anonymous_registry`). If the skip keyed on `os.environ`
+    instead, a PR-head policy naming an attacker's `base_url` and any
+    variable that happened to be exported would decide where a credential
+    goes — so the environment is not consulted here at all."""
+    monkeypatch.setenv("OCX_REGISTRY_ART", "svc-ocx:secret")
+    files, _registry = _valid_package()
+    policy = make_policy(
+        registries={"ghcr.io": RegistryConfig(host="ghcr.io", credentials_env="OCX_REGISTRY_ART")}
+    )
+
+    result = validate.run(_args([_PATH]), files=files, registry=_PoisonRegistry(), policy=policy)
+
+    assert result == ExitCode.OK
+    assert "$OCX_REGISTRY_ART" in capsys.readouterr().err
+
+
+def test_run_performs_registry_checks_for_an_anonymous_registry() -> None:
+    """A policy entry that declares no credential is the unchanged path: the
+    fork lane verifies registry truth itself, exactly as it always did."""
+    files, registry = _valid_package()
+    policy = make_policy(registries={"ghcr.io": RegistryConfig(host="ghcr.io")})
+
+    result = validate.run(_args([_PATH]), files=files, registry=registry, policy=policy)
+
+    assert result == ExitCode.OK
 
 
 def test_run_no_tags_online_passes_and_still_probes_ownership() -> None:

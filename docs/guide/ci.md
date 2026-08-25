@@ -447,6 +447,8 @@ its lane uses.
 | `GITHUB_OUTPUT` | GitHub jobs | step outputs |
 | `INDEXBOT_OUTPUT` | GitLab jobs | `dotenv` report path |
 | `GITHUB_STEP_SUMMARY` | GitHub jobs | failure summaries |
+| `GITHUB_API_URL` / `GITHUB_GRAPHQL_URL` | GitHub jobs | API roots — GitHub Enterprise Server sets both |
+| *your* `credentials_env` names | `reconcile`, `seed-import` | `user:password` for a private registry. `indexbot ci` renders the GitHub passthrough; on GitLab set a masked, protected variable. Never reaches a fork-triggered job |
 
 A command that finds no token runs read-only where that is meaningful
 (`validate`, `render`) and fails with a clear message where it is not.

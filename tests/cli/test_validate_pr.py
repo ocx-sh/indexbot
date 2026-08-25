@@ -145,7 +145,7 @@ def _run(
         args,
         git=git,
         files=files,
-        registry=FakeRegistry(),
+        registry_for=lambda _policy: FakeRegistry(),
         base_files=InMemoryFiles() if base_files is None else base_files,
     )
 

@@ -64,6 +64,7 @@
 #   Settings > CI/CD > Variables > GITLAB_TOKEN              — masked, and a
 #     project or group access token with `api` scope. NOT `$CI_JOB_TOKEN`,
 #     which cannot write labels, notes or merge requests.
+{{registry_credentials_note}}
 #
 # ## What the image must provide
 #

@@ -19,10 +19,8 @@ reconcile flow)."""
 from __future__ import annotations
 
 import base64
-import functools
 from typing import TYPE_CHECKING
 
-from ocx_indexbot.adapters.github_api import GitHubApi
 from ocx_indexbot.cli.main import main
 from ocx_indexbot.core.validate_entry import serialize_package_root
 from ocx_indexbot.exit_codes import ExitCode
@@ -80,12 +78,11 @@ def _setup_env(monkeypatch: pytest.MonkeyPatch, forge: FakeForgeServer, output_f
     monkeypatch.setenv("GITHUB_REPOSITORY", _REPOSITORY)
     monkeypatch.setenv("GITHUB_TOKEN", _FORGE_TOKEN)
     monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
-    monkeypatch.setattr(
-        _WIRING_GITHUB,
-        functools.partial(
-            GitHubApi, base_url=forge.base_url, graphql_url=f"{forge.base_url}/graphql"
-        ),
-    )
+    # The forge seam is the runner's own variables — the pair GitHub Actions
+    # sets on github.com and GitHub Enterprise Server alike, and the reason a
+    # GHES-hosted index needs no code change.
+    monkeypatch.setenv("GITHUB_API_URL", forge.base_url)
+    monkeypatch.setenv("GITHUB_GRAPHQL_URL", f"{forge.base_url}/graphql")
 
 
 _POLICY_SEGMENTS = ("contents", ".github", "index-policy.json")

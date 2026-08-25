@@ -90,6 +90,25 @@ _GITHUB_FILES: Final[tuple[str, ...]] = (
 )
 
 
+def _credential_env_names(policy: IndexPolicy) -> list[str]:
+    """Every environment variable this index's registries declare, sorted and
+    deduplicated so the rendered pipeline is byte-stable.
+
+    Only the privileged reconcile lane ever receives these — the job matrix
+    below is where that is decided. It is belt to `cli/_wiring`'s braces: the
+    `pull_request`/`merge_request_event` lane builds its registry clients from
+    an empty environment, so it holds no credential even if a hand-edit put
+    one in its job. What it does instead is say so, per root — `cli/validate.py`
+    reports the registry checks it skipped rather than pretending to have made
+    them.
+
+    An index with no credentialed registry yields an empty list, and every
+    placeholder built from it renders as an empty line that `render_string`
+    drops — so a policy that changed nothing renders byte-identically.
+    """
+    return sorted({config.credentials_env for config in policy.registries.values()} - {""})
+
+
 def parse_header_version(first_line: str) -> int | None:
     """The version a file's header names, or `None` when it has no header at
     all — which the caller must read as "not ours": never drift-checked, never
@@ -243,6 +262,7 @@ def build_render_plan(policy: IndexPolicy, *, existing: Mapping[str, str]) -> di
             "or name an exact version (`uvx --from 'ocx-indexbot==<version>' indexbot`)."
         )
 
+    credential_env = _credential_env_names(policy)
     variables: dict[str, str] = {
         "owner": policy.ci.owner,
         "run": policy.ci.run,
@@ -252,6 +272,15 @@ def build_render_plan(policy: IndexPolicy, *, existing: Mapping[str, str]) -> di
         "setup_step": f"      - uses: {policy.ci.setup}" if policy.ci.setup else "",
         "image": policy.ci.setup or DEFAULT_GITLAB_IMAGE,
         "deploy_job": "",
+        "registry_credentials_env": "\n".join(
+            f"          {name}: ${{{{ secrets.{name} }}}}" for name in credential_env
+        ),
+        "registry_credentials_note": "\n".join(
+            f"#   Settings > CI/CD > Variables > {name}  — masked AND protected, holding this"
+            f"\n#     registry's `user:password`. Declared by a registry_hosts entry's"
+            f"\n#     credentials_env; the reconcile lane refuses to start without it."
+            for name in credential_env
+        ),
     }
     if policy.ci.forge == "gitlab":
         sources = {GITLAB_FILE: "gitlab/indexbot.yml"}
