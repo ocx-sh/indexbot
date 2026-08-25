@@ -13,6 +13,7 @@ shared by every public method — those response classes are exercised once
 from __future__ import annotations
 
 import hashlib
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -28,6 +29,17 @@ _REPO_PATH = "ocx-contrib/cmake"
 _REPOSITORY = f"oci://ghcr.io/{_REPO_PATH}"
 _TAGS_URL = f"{_BASE}/v2/{_REPO_PATH}/tags/list"
 _DESC_URL = f"{_BASE}/v2/{_REPO_PATH}/manifests/__ocx.desc"
+
+
+def _served(payload: object) -> tuple[str, httpx.Response]:
+    """A manifest response and the digest its bytes really hash to.
+
+    A digest reference is a demand: `get_manifest` refuses a response whose
+    bytes hash to something else. A fixture that names an arbitrary digest
+    beside unrelated bytes is not describing a registry that exists.
+    """
+    response = httpx.Response(200, json=payload)
+    return f"sha256:{hashlib.sha256(response.content).hexdigest()}", response
 
 
 def _no_sleep(seconds: float) -> None:
@@ -257,6 +269,46 @@ def test_get_manifest_persistent_401_raises_transient() -> None:
     registry = RegistryV2()
     with pytest.raises(TransientError, match="persistent 401"):
         registry.get_manifest(_REPOSITORY, "v1.0.0")
+
+
+# --- URL encoding of untrusted `reference`/`repo_path` (A-5) -------------
+
+
+@respx.mock
+def test_get_manifest_hostile_reference_cannot_escape_the_manifests_segment() -> None:
+    """A tag containing `../` must not retarget the request onto a sibling
+    path segment (e.g. `blobs/`) in the same repository — the exact shape
+    A-5 exploited before `reference` was percent-encoded. Routing the mock
+    only at the fully-encoded URL, and never at the unencoded (would-be
+    traversal) target, proves no request ever reaches the escaped path."""
+    hostile_reference = "../blobs/sha256:" + "a" * 64
+    encoded_url = f"{_BASE}/v2/{_REPO_PATH}/manifests/{quote(hostile_reference, safe=':')}"
+    respx.get(encoded_url).mock(return_value=httpx.Response(200, json={"ok": True}))
+    registry = RegistryV2()
+    assert registry.get_manifest(_REPOSITORY, hostile_reference).parsed == {"ok": True}
+
+
+@respx.mock
+def test_get_manifest_digest_reference_reaches_the_transport_unmangled() -> None:
+    """The legitimate case the encoding must not disturb: a digest reference
+    keeps its `:` literal and reaches exactly `/manifests/sha256:<hex>`."""
+    digest, served = _served({"ok": True})
+    route = respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(return_value=served)
+    registry = RegistryV2()
+    assert registry.get_manifest(_REPOSITORY, digest).parsed == {"ok": True}
+    assert route.calls.last.request.url.path == f"/v2/{_REPO_PATH}/manifests/{digest}"
+
+
+@respx.mock
+def test_get_blob_hostile_digest_cannot_escape_the_blobs_segment() -> None:
+    """Same percent-encoding, the other builder that takes untrusted-shaped
+    input directly (`core/desc.py` calls this with a `parse_digest`-checked
+    digest in production, but the adapter does not rely on that)."""
+    hostile_digest = "../manifests/sha256:" + "b" * 64
+    encoded_url = f"{_BASE}/v2/{_REPO_PATH}/blobs/{quote(hostile_digest, safe=':')}"
+    respx.get(encoded_url).mock(return_value=httpx.Response(200, content=b"blob"))
+    registry = RegistryV2()
+    assert registry.get_blob(_REPOSITORY, hostile_digest) == b"blob"
 
 
 # --- 403 DENIED (missing/private repository) ----------------------------
@@ -502,13 +554,11 @@ def test_probe_ownership_unconfirmed_when_no_desc_tag() -> None:
 
 @respx.mock
 def test_probe_ownership_unconfirmed_when_annotation_missing() -> None:
-    digest = "sha256:" + "d" * 64
+    digest, served = _served({"annotations": {}})
     respx.head(_DESC_URL).mock(
         return_value=httpx.Response(200, headers={"Docker-Content-Digest": digest})
     )
-    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(
-        return_value=httpx.Response(200, json={"annotations": {}})
-    )
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(return_value=served)
     registry = RegistryV2()
     assert registry.probe_ownership(_REPOSITORY, "ocx.sh/kitware/cmake") == "unconfirmed"
 
@@ -517,43 +567,33 @@ def test_probe_ownership_unconfirmed_when_annotation_missing() -> None:
 def test_probe_ownership_unconfirmed_when_annotations_key_absent() -> None:
     # Distinct from the "present but empty" case above — no `annotations`
     # key at all in the manifest, not merely an empty one.
-    digest = "sha256:" + "9" * 64
+    digest, served = _served({})
     respx.head(_DESC_URL).mock(
         return_value=httpx.Response(200, headers={"Docker-Content-Digest": digest})
     )
-    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(
-        return_value=httpx.Response(200, json={})
-    )
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(return_value=served)
     registry = RegistryV2()
     assert registry.probe_ownership(_REPOSITORY, "ocx.sh/kitware/cmake") == "unconfirmed"
 
 
 @respx.mock
 def test_probe_ownership_confirmed() -> None:
-    digest = "sha256:" + "e" * 64
+    digest, served = _served({"annotations": {"sh.ocx.name": "ocx.sh/kitware/cmake"}})
     respx.head(_DESC_URL).mock(
         return_value=httpx.Response(200, headers={"Docker-Content-Digest": digest})
     )
-    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(
-        return_value=httpx.Response(
-            200, json={"annotations": {"sh.ocx.name": "ocx.sh/kitware/cmake"}}
-        )
-    )
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(return_value=served)
     registry = RegistryV2()
     assert registry.probe_ownership(_REPOSITORY, "ocx.sh/kitware/cmake") == "confirmed"
 
 
 @respx.mock
 def test_probe_ownership_mismatch() -> None:
-    digest = "sha256:" + "f" * 64
+    digest, served = _served({"annotations": {"sh.ocx.name": "ocx.sh/someone-else/cmake"}})
     respx.head(_DESC_URL).mock(
         return_value=httpx.Response(200, headers={"Docker-Content-Digest": digest})
     )
-    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(
-        return_value=httpx.Response(
-            200, json={"annotations": {"sh.ocx.name": "ocx.sh/someone-else/cmake"}}
-        )
-    )
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{digest}").mock(return_value=served)
     registry = RegistryV2()
     assert registry.probe_ownership(_REPOSITORY, "ocx.sh/kitware/cmake") == "mismatch"
 
@@ -698,3 +738,112 @@ def test_routed_registry_refuses_a_host_it_has_no_client_for() -> None:
     exactly like an out-of-policy host does."""
     with pytest.raises(ValidationError, match="no registry client for host"):
         _router().list_tags("oci://harbor.corp.internal/team/thing")
+
+
+@respx.mock
+def test_a_digest_reference_that_serves_other_bytes_is_an_anomaly() -> None:
+    """A digest reference is a demand, not a lookup key. Registries that omit
+    `Docker-Content-Digest` — the response header this otherwise cross-checks
+    — would leave nothing at all comparing what was asked for against what
+    came back, and every lock in this index is an image-index digest."""
+    asked = "sha256:" + "a" * 64
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/{asked}").mock(
+        return_value=httpx.Response(200, json={"schemaVersion": 2})
+    )
+
+    with pytest.raises(AnomalyError, match="served bytes hash to"):
+        RegistryV2().get_manifest(_REPOSITORY, asked)
+
+
+# --- redirects: CDN-fronted blobs, and the token that must not follow ----
+
+
+_BLOB_DIGEST = "sha256:" + "c" * 64
+_BLOB_URL = f"{_BASE}/v2/{_REPO_PATH}/blobs/{_BLOB_DIGEST}"
+
+
+@respx.mock
+def test_a_blob_redirect_is_followed_to_its_cdn() -> None:
+    """Measured on ghcr.io: `GET /v2/<repo>/blobs/<digest>` answers 307 to
+    `pkg-containers.githubusercontent.com` with a pre-signed URL. httpx does
+    not follow redirects by default and `raise_for_status()` does not treat a
+    3xx as an error, so before this `get_blob` returned the redirect body as
+    if it were the blob — every desc blob read from ghcr.io was wrong bytes."""
+    respx.get(_BLOB_URL).mock(
+        return_value=httpx.Response(
+            307, headers={"Location": "https://cdn.example/blobs/abc?sig=xyz"}
+        )
+    )
+    cdn = respx.get("https://cdn.example/blobs/abc").mock(
+        return_value=httpx.Response(200, content=b"# readme")
+    )
+
+    assert RegistryV2().get_blob(_REPOSITORY, _BLOB_DIGEST) == b"# readme"
+    assert cdn.called
+
+
+@respx.mock
+def test_the_registry_token_does_not_travel_to_the_redirect_target() -> None:
+    """The target is pre-signed and needs no `Authorization` of its own.
+    Sending one anyway hands a registry pull token to whatever host the
+    redirect names — the leak the OCI distribution spec warns about, and one
+    the registry itself chooses the destination for."""
+    respx.get(f"{_BASE}/token").mock(return_value=httpx.Response(200, json={"token": "pull-token"}))
+    respx.get(_BLOB_URL).mock(
+        side_effect=[
+            httpx.Response(401),
+            httpx.Response(307, headers={"Location": "https://cdn.example/blobs/abc"}),
+        ]
+    )
+    cdn = respx.get("https://cdn.example/blobs/abc").mock(
+        return_value=httpx.Response(200, content=b"# readme")
+    )
+
+    assert RegistryV2().get_blob(_REPOSITORY, _BLOB_DIGEST) == b"# readme"
+
+    headers = cdn.calls.last.request.headers
+    assert "authorization" not in {name.lower() for name in headers}
+
+
+@respx.mock
+def test_a_same_origin_redirect_keeps_the_token() -> None:
+    """A registry that redirects within itself — a path rewrite, a regional
+    host of its own — still needs the pull token, and dropping it there would
+    turn a working fetch into a 401 loop."""
+    respx.get(f"{_BASE}/token").mock(return_value=httpx.Response(200, json={"token": "pull-token"}))
+    respx.get(_BLOB_URL).mock(
+        side_effect=[
+            httpx.Response(401),
+            httpx.Response(307, headers={"Location": f"{_BASE}/v2/elsewhere"}),
+        ]
+    )
+    same_host = respx.get(f"{_BASE}/v2/elsewhere").mock(
+        return_value=httpx.Response(200, content=b"# readme")
+    )
+
+    assert RegistryV2().get_blob(_REPOSITORY, _BLOB_DIGEST) == b"# readme"
+
+    assert same_host.calls.last.request.headers["Authorization"] == "Bearer pull-token"
+
+
+@respx.mock
+def test_a_redirect_without_a_location_is_not_mistaken_for_content() -> None:
+    """A 3xx is not an error status, so returning it would put the caller
+    back at the original bug: a response whose body is not the resource."""
+    respx.get(_BLOB_URL).mock(return_value=httpx.Response(307))
+
+    with pytest.raises(TransientError, match="without a location"):
+        RegistryV2().get_blob(_REPOSITORY, _BLOB_DIGEST)
+
+
+@respx.mock
+def test_a_redirect_loop_is_transient_not_an_infinite_fetch() -> None:
+    respx.get(_BLOB_URL).mock(
+        return_value=httpx.Response(307, headers={"Location": "https://cdn.example/a"})
+    )
+    respx.get("https://cdn.example/a").mock(
+        return_value=httpx.Response(307, headers={"Location": "https://cdn.example/a"})
+    )
+
+    with pytest.raises(TransientError, match="redirected more than"):
+        RegistryV2().get_blob(_REPOSITORY, _BLOB_DIGEST)

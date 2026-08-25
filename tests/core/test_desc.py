@@ -6,7 +6,7 @@ import hashlib
 import pytest
 
 from ocx_indexbot.core.desc import DescUpdate, check_desc_change
-from ocx_indexbot.errors import ValidationError
+from ocx_indexbot.errors import AnomalyError, ValidationError
 from ocx_indexbot.model import Desc
 from tests.fakes import FakeRegistry
 
@@ -53,11 +53,11 @@ def test_first_publish_builds_desc_and_readme() -> None:
                     _KEYWORDS_KEY: "build, cmake, cpp",
                 },
                 "layers": [
-                    {"mediaType": "application/markdown", "digest": "sha256:" + "c" * 64},
+                    {"mediaType": "application/markdown", "digest": _cas_digest(readme_bytes)},
                 ],
             }
         },
-        blobs={(_REPO, "sha256:" + "c" * 64): readme_bytes},
+        blobs={(_REPO, _cas_digest(readme_bytes)): readme_bytes},
     )
     result = check_desc_change(_REPO, None, registry, name=_NAME)
     assert result is not None
@@ -80,14 +80,14 @@ def test_publish_with_logo_layer() -> None:
             (_REPO, _DESC_TAG): {
                 "annotations": {_TITLE_KEY: "CMake", _DESCRIPTION_KEY: "desc"},
                 "layers": [
-                    {"mediaType": "application/markdown", "digest": "sha256:" + "e" * 64},
-                    {"mediaType": "image/svg+xml", "digest": "sha256:" + "f" * 64},
+                    {"mediaType": "application/markdown", "digest": _cas_digest(readme_bytes)},
+                    {"mediaType": "image/svg+xml", "digest": _cas_digest(logo_bytes)},
                 ],
             }
         },
         blobs={
-            (_REPO, "sha256:" + "e" * 64): readme_bytes,
-            (_REPO, "sha256:" + "f" * 64): logo_bytes,
+            (_REPO, _cas_digest(readme_bytes)): readme_bytes,
+            (_REPO, _cas_digest(logo_bytes)): logo_bytes,
         },
     )
     result = check_desc_change(_REPO, None, registry, name=_NAME)
@@ -104,11 +104,11 @@ def test_missing_keywords_annotation_defaults_empty() -> None:
             (_REPO, _DESC_TAG): {
                 "annotations": {_TITLE_KEY: "CMake", _DESCRIPTION_KEY: "desc"},
                 "layers": [
-                    {"mediaType": "application/markdown", "digest": "sha256:" + "2" * 64},
+                    {"mediaType": "application/markdown", "digest": _cas_digest(readme_bytes)},
                 ],
             }
         },
-        blobs={(_REPO, "sha256:" + "2" * 64): readme_bytes},
+        blobs={(_REPO, _cas_digest(readme_bytes)): readme_bytes},
     )
     result = check_desc_change(_REPO, None, registry, name=_NAME)
     assert result is not None
@@ -124,11 +124,11 @@ def test_unrecognized_layer_media_type_is_ignored() -> None:
                 "annotations": {_TITLE_KEY: "CMake", _DESCRIPTION_KEY: "desc"},
                 "layers": [
                     {"mediaType": "application/vnd.unknown+json", "digest": "sha256:" + "5" * 64},
-                    {"mediaType": "application/markdown", "digest": "sha256:" + "6" * 64},
+                    {"mediaType": "application/markdown", "digest": _cas_digest(readme_bytes)},
                 ],
             }
         },
-        blobs={(_REPO, "sha256:" + "6" * 64): readme_bytes},
+        blobs={(_REPO, _cas_digest(readme_bytes)): readme_bytes},
     )
     result = check_desc_change(_REPO, None, registry, name=_NAME)
     assert result is not None
@@ -177,7 +177,8 @@ def test_desc_update_is_frozen() -> None:
 
 def _readme_only_registry(digest_fill: str, annotations: dict[str, str]) -> FakeRegistry:
     """A registry serving one `__ocx.desc` with a readme layer and nothing else."""
-    readme_digest = "sha256:" + digest_fill * 64
+    readme_bytes = b"# readme\n"
+    readme_digest = _cas_digest(readme_bytes)
     return FakeRegistry(
         desc_digests={_REPO: "sha256:" + digest_fill * 64},
         manifests={
@@ -186,7 +187,7 @@ def _readme_only_registry(digest_fill: str, annotations: dict[str, str]) -> Fake
                 "layers": [{"mediaType": "application/markdown", "digest": readme_digest}],
             }
         },
-        blobs={(_REPO, readme_digest): b"# readme\n"},
+        blobs={(_REPO, readme_digest): readme_bytes},
     )
 
 
@@ -220,3 +221,24 @@ def test_present_title_annotation_wins_over_every_fallback() -> None:
     result = check_desc_change(_REPO, None, registry, name=_NAME)
     assert result is not None
     assert result.desc.title == "CMake"
+
+
+def test_a_layer_whose_bytes_do_not_hash_to_its_digest_is_an_anomaly() -> None:
+    """Without this the index stores whatever the fetch returned, addressed
+    by its own hash — self-consistent, and therefore silent about a registry,
+    proxy or CDN that served something else. It was silent: a blob redirect
+    that was not followed returned the redirect body, and that body was
+    committed as a package's README."""
+    registry = FakeRegistry(
+        desc_digests={_REPO: "sha256:" + "b" * 64},
+        manifests={
+            (_REPO, _DESC_TAG): {
+                "annotations": {_TITLE_KEY: "CMake", _DESCRIPTION_KEY: "desc"},
+                "layers": [{"mediaType": "application/markdown", "digest": "sha256:" + "c" * 64}],
+            }
+        },
+        blobs={(_REPO, "sha256:" + "c" * 64): b"not what the manifest promised"},
+    )
+
+    with pytest.raises(AnomalyError, match="served bytes that hash to"):
+        check_desc_change(_REPO, None, registry, name=_NAME)

@@ -45,6 +45,15 @@ in `PackageRoot.repository` (see `core/validate_entry.py`'s
 against this same string before any `RegistryPort` call reaches here per BD-1's
 SSRF ordering) — `RegistryV2` only ever parses out the `<path>` portion; the
 host is re-read exactly once, by `RoutedRegistry`, to choose a client.
+
+`reference` (a tag name or digest passed to `get_manifest`/`get_blob`) carries
+no equivalent upstream gate against the registry-URL grammar specifically —
+it is a tag KEY straight from a PR-authored root, validated only against the
+wire tag grammar (`core/validate_entry.py`'s `parse_package_root`), never
+against "safe to drop unescaped into a URL path segment". `_url_repo_path`/
+`_url_reference` below percent-encode both interpolated components at every
+URL builder in this module, so a hostile `reference` can never retarget a
+request outside the path segment it was built for (A-5).
 """
 
 from __future__ import annotations
@@ -54,7 +63,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, cast
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -94,6 +103,25 @@ follow a server-supplied cross-host pagination link (`_parse_next_link`) for
 the same SSRF reason. If JFrog ever moves it, the token fetch 404s loudly at
 `raise_for_status` — a visible break, not a silent widening of where this bot
 sends requests."""
+
+GITLAB_HOST: Final[str] = "registry.gitlab.com"
+"""GitLab's shared container registry. Every GitLab project gets one, which
+makes it the natural physical layer for a GitLab-hosted index — and a host no
+OCX deployment allowlists, so it only ever arrives through a copy's own
+committed policy."""
+
+GITLAB_REALM: Final[str] = "https://gitlab.com/jwt/auth"
+"""`registry.gitlab.com`'s pull-token endpoint, from the `realm` its `/v2/`
+`401` advertises. Pinned rather than followed from the response header for
+the same SSRF reason as `OCX_SH_REALM`."""
+
+GITLAB_SERVICE: Final[str] = "container_registry"
+"""GitLab's token `service`, which is a fixed literal and NOT its host.
+
+GHCR and `ocx.sh` both name themselves here, so the adapter passed `host` for
+this parameter and the coupling went unnoticed. Sending
+`service=registry.gitlab.com` yields a token that is not valid for the
+requested scope — an index whose downloads 401 rather than one that works."""
 
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 """Per-request deadline handed to every `httpx` call.
@@ -141,6 +169,40 @@ def _repo_path(repository: str) -> str:
     """`oci://ghcr.io/<path>` -> `<path>`, mirroring
     `core/validate_entry.py`'s `check_repository_shape` parse exactly."""
     return urlsplit(repository).path.lstrip("/")
+
+
+def _url_repo_path(repo_path: str) -> str:
+    """Percent-encode `repo_path` for interpolation into a `/v2/` URL path.
+    `/` stays literal — a multi-component repository path is legitimate —
+    everything else percent-encodes per RFC 3986.
+
+    Defence in depth (A-5), not the primary control: `repo_path` is always
+    the parsed-out path of a `repository` string `check_repository_allowlisted`/
+    `check_repository_shape` already ran against (module docstring, BD-1 SSRF
+    ordering), so this is a no-op for every value that reaches here in
+    practice. It exists so an adapter bug upstream of that gate fails safe
+    rather than open.
+    """
+    return quote(repo_path, safe="/")
+
+
+def _url_reference(reference: str) -> str:
+    """Percent-encode `reference` — a tag name or digest — for interpolation
+    into a `/manifests/<reference>` or `/blobs/<digest>` URL path segment.
+    `:` stays literal (a digest reference `sha256:<hex>` legitimately
+    contains one); everything else, including `/`, percent-encodes.
+
+    This is the fix for A-5: `reference` is a tag KEY straight from a
+    PR-authored root, and nothing upstream of this adapter validates its
+    shape against the registry-URL grammar (only
+    `core/validate_entry.py`'s `parse_package_root` enforces the wire tag
+    grammar, which is a different, narrower property). Before this encoding,
+    a tag named `../blobs/sha256:<hex>` retargeted the request at a sibling
+    URL segment in the same repository — httpx collapses a literal `../` in
+    a path client-side. Percent-encoding `/` here means there is no longer a
+    literal path separator in `reference` for that collapse to act on.
+    """
+    return quote(reference, safe=":")
 
 
 def _parse_retry_after(value: str | None) -> float | None:
@@ -192,6 +254,19 @@ def _parse_next_link(link_header: str | None, *, base_url: str) -> str | None:
     return None
 
 
+_MAX_REDIRECTS: Final[int] = 5
+"""Redirect hops a single registry request may take.
+
+One is what a CDN-fronted blob costs. A chain longer than this is either a
+loop or a redirector being used as one, and neither is worth a request.
+"""
+
+
+def _same_origin(current: str, target: str) -> bool:
+    left, right = urlsplit(current), urlsplit(target)
+    return (left.scheme, left.netloc) == (right.scheme, right.netloc)
+
+
 def _denied_message(host: str, repo_path: str) -> str:
     """`403`/`DENIED` from the registry (token endpoint or a `/v2/` call),
     body present or empty — the repository is missing or private and does not
@@ -234,6 +309,7 @@ class RegistryV2:
     base_url: str = f"https://{GHCR_HOST}"
     host: str = GHCR_HOST
     realm: str = ""
+    service: str = ""
     timeout: float = _DEFAULT_TIMEOUT_SECONDS
     policy: BackoffPolicy = field(default_factory=BackoffPolicy)
     max_pages: int = _DEFAULT_MAX_PAGES
@@ -245,13 +321,18 @@ class RegistryV2:
         convention GHCR follows, and the shape the integration harness's fake
         serves, so repointing `base_url` at a loopback fake moves the token
         endpoint with it. `ocx.sh` passes its own `realm` explicitly
-        because Artifactory issues tokens from a different path."""
+        because Artifactory issues tokens from a different path.
+
+        `service` defaults to `host` — the convention GHCR and `ocx.sh` both
+        follow. GitLab does not, and passes its own literal."""
+        if not self.service:
+            self.service = self.host
         if not self.realm:
             self.realm = f"{self.base_url}/token"
 
     def list_tags(self, repository: str) -> list[str]:
         repo_path = _repo_path(repository)
-        url: str | None = f"{self.base_url}/v2/{repo_path}/tags/list"
+        url: str | None = f"{self.base_url}/v2/{_url_repo_path(repo_path)}/tags/list"
         params: Mapping[str, str] | None = {"n": str(_TAGS_PAGE_SIZE)}
         tags: list[str] = []
         for _page in range(self.max_pages):
@@ -270,7 +351,9 @@ class RegistryV2:
 
     def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
         repo_path = _repo_path(repository)
-        url = f"{self.base_url}/v2/{repo_path}/manifests/{reference}"
+        url = (
+            f"{self.base_url}/v2/{_url_repo_path(repo_path)}/manifests/{_url_reference(reference)}"
+        )
         response = self._send("GET", url, repo_path=repo_path, headers={"Accept": _MANIFEST_ACCEPT})
         if response.status_code == 404:
             raise KeyError(f"no manifest for {repository}@{reference}")
@@ -286,11 +369,19 @@ class RegistryV2:
                 f"manifest digest mismatch for {repository}@{reference}: "
                 f"Docker-Content-Digest header {header_digest!r} != computed {computed_digest!r}"
             )
+        # A digest reference is a *demand*, not a lookup key: whatever comes
+        # back must be the content that was asked for. A tag reference makes
+        # no such claim — the computed digest is the answer there.
+        if reference.startswith("sha256:") and reference != computed_digest:
+            raise AnomalyError(
+                f"manifest digest mismatch for {repository}@{reference}: "
+                f"served bytes hash to {computed_digest!r}"
+            )
         return ManifestFetch(raw=raw, digest=computed_digest, parsed=response.json())
 
     def get_desc_tag_digest(self, repository: str) -> str | None:
         repo_path = _repo_path(repository)
-        url = f"{self.base_url}/v2/{repo_path}/manifests/{_DESC_TAG}"
+        url = f"{self.base_url}/v2/{_url_repo_path(repo_path)}/manifests/{_DESC_TAG}"
         response = self._send(
             "HEAD", url, repo_path=repo_path, headers={"Accept": _MANIFEST_ACCEPT}
         )
@@ -301,7 +392,7 @@ class RegistryV2:
 
     def get_blob(self, repository: str, digest: str) -> bytes:
         repo_path = _repo_path(repository)
-        url = f"{self.base_url}/v2/{repo_path}/blobs/{digest}"
+        url = f"{self.base_url}/v2/{_url_repo_path(repo_path)}/blobs/{_url_reference(digest)}"
         response = self._send("GET", url, repo_path=repo_path)
         if response.status_code == 404:
             raise KeyError(f"no blob {digest} for {repository}")
@@ -372,6 +463,9 @@ class RegistryV2:
             if response.status_code == 403:
                 raise ValidationError(_denied_message(self.host, repo_path))
 
+            if response.is_redirect:
+                return self._follow(response, repo_path=repo_path)
+
             if is_retryable_status(response.status_code):
                 if attempt >= self.policy.max_attempts:
                     raise TransientError(
@@ -386,10 +480,47 @@ class RegistryV2:
 
             return response
 
+    def _follow(self, response: httpx.Response, *, repo_path: str) -> httpx.Response:
+        """Follow a registry redirect, **without carrying the token across a
+        host boundary**.
+
+        Blob GETs are redirected by every registry that fronts storage with a
+        CDN. Measured on ghcr.io: `GET /v2/<repo>/blobs/<digest>` answers
+        `307` to `pkg-containers.githubusercontent.com` with a pre-signed URL.
+        httpx does not follow redirects by default, so before this the 307
+        itself was returned — `raise_for_status()` does not consider a 3xx an
+        error — and `get_blob` handed back the redirect body as if it were the
+        blob. Every desc blob (README, logo) read from ghcr.io was wrong bytes.
+
+        The redirect target is pre-signed and needs no `Authorization` of its
+        own; sending one anyway hands a registry pull token to whatever host
+        the redirect names, which is the leak the OCI distribution spec warns
+        about. So the header is dropped whenever the hop leaves the current
+        host, and kept only on a same-origin hop.
+        """
+        seen = 0
+        while response.is_redirect and seen < _MAX_REDIRECTS:
+            if response.next_request is None:
+                # A 3xx with no usable `Location`. Returning it would put the
+                # caller back where this method started: a non-error status
+                # whose body is not the resource.
+                raise TransientError(f"registry redirected {response.url} without a location")
+            target = str(response.next_request.url)
+            headers: dict[str, str] = {}
+            if _same_origin(str(response.url), target):
+                token = self._tokens.get(repo_path)
+                if token is not None:
+                    headers["Authorization"] = f"Bearer {token}"
+            response = self.client.request("GET", target, headers=headers, timeout=self.timeout)
+            seen += 1
+        if response.is_redirect:
+            raise TransientError(f"registry redirected more than {_MAX_REDIRECTS} times")
+        return response
+
     def _fetch_token(self, repo_path: str) -> str:
         response = self.client.get(
             self.realm,
-            params={"service": self.host, "scope": f"repository:{repo_path}:pull"},
+            params={"service": self.service, "scope": f"repository:{repo_path}:pull"},
             timeout=self.timeout,
         )
         if response.status_code == 403:

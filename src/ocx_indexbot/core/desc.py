@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.core.validate_entry import parse_digest
+from ocx_indexbot.errors import AnomalyError
 from ocx_indexbot.model import Desc
 
 if TYPE_CHECKING:
@@ -89,12 +90,38 @@ def _parse_keywords(raw: object) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
+def _fetch_layer(registry: RegistryPort, repository: str, layer: _Manifest) -> bytes:
+    """One `__ocx.desc` layer's bytes, verified against the digest the
+    manifest declared for them.
+
+    The comparison is the point. Without it this index stores whatever the
+    fetch returned, addressed by *its own* hash — self-consistent, and
+    therefore silent about a registry, proxy or CDN that served something
+    else. It was silent: a blob redirect that was not followed returned the
+    redirect body, and that body was committed as a package's README under a
+    digest derived from it.
+
+    A registry that contradicts its own manifest is an integrity anomaly, not
+    a validation failure of the announcing PR — nothing the author did
+    produced it, and nothing they can change fixes it.
+    """
+    declared = parse_digest(cast(str, layer["digest"]))
+    content = registry.get_blob(repository, declared)
+    observed = _cas_digest(content)
+    if observed != declared:
+        raise AnomalyError(
+            f"{repository}: __ocx.desc layer {declared} served bytes that hash to {observed}"
+        )
+    return content
+
+
 def _cas_digest(content: bytes) -> str:
     """This index's CAS address for `content` — sha256 over the exact bytes
     fetched, computed here rather than copied from the `__ocx.desc` layer
     descriptor's `digest` field. This index never adopts a digest it did not
     derive from content it holds (`ports.py`'s digest doctrine, D2/D5); that
-    the two agree for a conforming registry is a check, not a shortcut."""
+    the two agree for a conforming registry is a check `_fetch_layer` makes,
+    not a shortcut this takes."""
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
@@ -148,9 +175,9 @@ def check_desc_change(
         # from a registry-fetched manifest that the entry's own repository
         # owner fully controls, not yet validated at this point.
         if media_type == _README_MEDIA_TYPE:
-            readme_bytes = registry.get_blob(repository, parse_digest(cast(str, layer["digest"])))
+            readme_bytes = _fetch_layer(registry, repository, layer)
         elif media_type in _LOGO_MEDIA_TYPES:
-            logo_bytes = registry.get_blob(repository, parse_digest(cast(str, layer["digest"])))
+            logo_bytes = _fetch_layer(registry, repository, layer)
 
     if readme_bytes is None:
         raise ValueError(f"__ocx.desc manifest for {repository!r} has no markdown readme layer")

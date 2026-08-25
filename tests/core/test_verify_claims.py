@@ -7,7 +7,7 @@ from ocx_indexbot.core.verify_claims import ClaimFinding, verify_claims
 from ocx_indexbot.model import Desc, Owner, PackageId, PackageRoot, TagEntry
 from tests.fakes import FakeRegistry
 
-_PACKAGE_ID = PackageId(namespace="kitware", package="cmake")
+_PACKAGE_ID = PackageId(segments=("kitware", "cmake"))
 _REPO = "oci://ghcr.io/ocx-contrib/cmake"
 _OWNER = Owner(github="alice", github_id=1)
 
