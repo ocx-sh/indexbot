@@ -112,9 +112,14 @@ tasks:
 
   wheel:check:
     desc: >-
-      The built wheel actually ships py.typed (PY-PKG-08) — present in src/ and
-      absent from the archive means every downstream --strict consumer silently
-      sees this package as untyped, with no error anywhere.
+      The built wheel actually ships its non-.py payload: py.typed (PY-PKG-08)
+      — present in src/ and absent from the archive means every downstream
+      --strict consumer silently sees this package as untyped, with no error
+      anywhere — the policy JSON Schema, whose absence would make
+      `indexbot schema` fail at an operator's runtime rather than here, and
+      every `indexbot ci` template, whose absence would do the same to the
+      generator. All three are read through importlib.resources, so nothing
+      in the test suite can tell a packaged file from a source-tree one.
     set: [e, u, pipefail]
     deps: [build]
     cmds:
@@ -128,10 +133,22 @@ tasks:
         # locally and on one CI run while failing another, reporting a missing
         # py.typed that was present all along.
         listing=$(unzip -l "$wheel")
-        if ! printf '%s\n' "$listing" | grep -q 'ocx_indexbot/py.typed'; then
-          echo "py.typed is MISSING from $wheel" >&2
-          exit 1
-        fi
+        for want in \
+          'ocx_indexbot/py.typed' \
+          'ocx_indexbot/schema/index-policy-v1.schema.json' \
+          'ocx_indexbot/ci/templates/github/validate.yml' \
+          'ocx_indexbot/ci/templates/github/governance.yml' \
+          'ocx_indexbot/ci/templates/github/governance-deploy-job.yml' \
+          'ocx_indexbot/ci/templates/github/reconcile.yml' \
+          'ocx_indexbot/ci/templates/github/pr-checks-label.yml' \
+          'ocx_indexbot/ci/templates/github/stale.yml' \
+          'ocx_indexbot/ci/templates/gitlab/indexbot.yml'
+        do
+          if ! printf '%s\n' "$listing" | grep -q "$want"; then
+            echo "$want is MISSING from $wheel" >&2
+            exit 1
+          fi
+        done
         echo "wheel:check: OK"
 
   docs:serve:
@@ -145,6 +162,7 @@ tasks:
       - uv run --group docs mkdocs build --strict
     sources:
       - 'docs/**/*'
+      - 'CHANGELOG.md'
       - 'src/ocx_indexbot/**/*.py'
       - 'mkdocs.yml'
     generates:

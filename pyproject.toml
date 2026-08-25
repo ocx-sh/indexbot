@@ -52,6 +52,7 @@ dev = [
     "check-jsonschema>=0.29",
     "coverage[toml]>=7.6",
     "hypothesis>=6.112",
+    "jsonschema>=4.23",
     "mutmut>=3.2",
     "pip-audit>=2.7",
     "pyright>=1.1",

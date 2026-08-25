@@ -90,6 +90,7 @@ nav:
   - Home: index.md
   - Guide:
       - Quickstart: guide/quickstart.md
+      - Build your own pipeline: guide/ci.md
   - Reference:
       - CLI: reference/cli.md
       - Deployment policy: reference/policy.md

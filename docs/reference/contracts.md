@@ -15,7 +15,7 @@ settle: `adr_locked_observation_index_format.md` (wire format, "ADR-1"),
 ## 0. How "pure `core/`" actually works
 
 `core/` modules import nothing from `adapters/` or `httpx` — but several take
-a `RegistryPort`/`GitHubPort`/`FilePort`/`ClockPort` argument directly (e.g.
+a `RegistryPort`/`ForgePort`/`FilePort`/`ClockPort` argument directly (e.g.
 `core/observe.py`'s `registry: RegistryPort` parameter). This is not a
 contradiction: **"pure" here means deterministic given its explicit inputs,
 including injected ports** — a unit test passes a `tests/fakes/` fake and gets
@@ -84,7 +84,7 @@ digested. `desc.digest` comparisons and desc-blob digests are likewise
 
 New since scaffold: `OwnershipProbeResult`, `CommitStatusState`,
 `PullRequestInfo` (model.py); `RegistryPort.get_blob`/`probe_ownership`,
-`GitHubPort.get_ref_sha`/`commit_files`/`get_pull_request_info`/
+`ForgePort.get_ref_sha`/`commit_files`/`get_pull_request_info`/
 `set_commit_status`, `FilePort.read_bytes`/`write_bytes`/`list_files`
 (ports.py). Read the docstrings in those files — they are the exception
 contract (which raises `KeyError` vs `TransientError` vs `ValidationError`)
@@ -94,10 +94,10 @@ Further additions, fork-PR announce revamp (2026-07-18): `PullRequestInfo`
 gains `author_login: str = ""`/`author_id: int = 0` (defaulted so every
 pre-existing `classify_pr`-only construction site stays unchanged — only
 `cli/governance_check.py`'s G-19 gate needs both set for real).
-`GitHubPort.open_or_update_pull_request` gains an optional
+`ForgePort.open_or_update_pull_request` gains an optional
 `head_owner: str | None = None` keyword (cross-repo/fork-PR head,
 `f"{head_owner}:{branch}"`, vs. the same-repo plain `branch`).
-`GitHubPort` gains `request_reviewers(pr_number, logins)`,
+`ForgePort` gains `request_reviewers(pr_number, logins)`,
 `create_comment(pr_number, body, *, marker)` (idempotent via a hidden HTML
 marker), and `create_or_update_issue(*, title, body, labels=None)` (promoted
 from an adapter-only capability — see §13 item 4). All three implemented in
@@ -248,7 +248,7 @@ Functions (each raises `ValidationError` on failure, never returns a bool):
   — thin pass-through to `registry.probe_ownership`. The caller (`cli/validate.py`)
   decides disposition: `"mismatch"` -> `ValidationError` (block); `"unconfirmed"`
   -> **do not raise** — return the result so the caller can attach a WARN
-  annotation to the PR (`GitHubPort.add_labels` with something like
+  annotation to the PR (`ForgePort.add_labels` with something like
   `ownership-unconfirmed`, or a PR comment — `cli/validate.py`'s call,
   WP2-H..L). Never silently treat `"unconfirmed"` as `"confirmed"`.
 
@@ -789,7 +789,7 @@ rather than an unbounded loop).
 
 ## 10. `adapters/github_api.py` (WP2-D)
 
-Implements `GitHubPort`. REST for contents/refs/PRs/labels/commit-status,
+Implements `ForgePort`. REST for contents/refs/PRs/labels/commit-status,
 GraphQL only for `enablePullRequestAutoMerge` (the one mutation with no REST
 equivalent). `commit_files` uses the Git Data API (create tree from
 `base_sha`'s tree + `files`, create commit, update ref with
@@ -832,7 +832,7 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   one required) + `--index-repo` (default `ocx-sh/index`) +
   `--yank`/`--unyank`/`--yank-reason`. Pipeline: resolve the curated tag set
   -> read the current root from the index repo at `main`
-  (`GitHubPort.get_file_contents`, via a keyword-only `index_github` port —
+  (`ForgePort.get_file_contents`, via a keyword-only `index_github` port —
   unauthenticated is fine for `--out`; missing root -> `ValidationError`,
   "unclaimed namespace — new packages go through the human lane") ->
   `check_repository_allowlisted` (SSRF ordering; `allowed_hosts` comes from
@@ -885,7 +885,7 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   check — `_PackageReport` carries the committed root's yanked-tag names
   precisely so `_escalating_findings` can tell a yanked-and-vanished tag
   apart from a plain silent drop. A non-empty escalating-finding set
-  opens/updates one anomaly issue via `GitHubPort.create_or_update_issue`
+  opens/updates one anomaly issue via `ForgePort.create_or_update_issue`
   (promoted onto the port this stage, see §3/§10) before raising.
 - **`cli/validate.py`** (extended, fork-PR announce revamp — byte-exact
   discipline): takes changed-file paths as CLI positional args (unchanged).
@@ -914,9 +914,9 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   under one — so when `check_namespace_not_reserved` rejects a segment, the
   rejection is retracted iff (a) the same path exists at the base ref and
   (b) `core/diff.classify_change(base, head) == "refresh"`, and even then
-  only for `RESERVED_BRAND_SEGMENTS` (the exact set
-  `--allow-reserved-namespace` opens; control-path and generic segments are
-  never admitted by any amount of base-ref state). Without `--base-dir`,
+  only for the deployment's own `reserved_namespaces` (the exact set
+  `--allow-reserved-namespace` opens; `ALWAYS_RESERVED_SEGMENTS` — control-path
+  and generic — is never admitted by any amount of base-ref state). Without `--base-dir`,
   or with no such root at the base ref, every reserved segment is a fresh
   claim — fail-closed. This is what makes `ocx package announce --fork`
   usable for the operator's own first-party roots: that command can open
@@ -954,7 +954,7 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   — or parse `mirror.yml` with a deliberately tiny hand-rolled `key: value`
   reader if its real shape turns out to be that simple (confirm shape
   against actual seed data before choosing).
-- **`cli/classify_pr.py`**: `GitHubPort.get_pull_request_info(pr_number)`
+- **`cli/classify_pr.py`**: `ForgePort.get_pull_request_info(pr_number)`
   (from `--pr-number` CLI arg) -> for each `.changed_paths` entry matching
   a root path shape, `get_file_contents(path, info.base_sha)` and
   `get_file_contents(path, info.head_sha)`, parse each (missing base file ->
@@ -977,8 +977,8 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   (parsed via `core/maintainers.py::parse_maintainers`, read from the base
   ref) minus the PR author (self-review carve-out — GitHub's API itself
   rejects assigning a PR's own author as their own reviewer) via
-  `GitHubPort.request_reviewers`, plus one idempotent comment via
-  `GitHubPort.create_comment` (hidden HTML marker
+  `ForgePort.request_reviewers`, plus one idempotent comment via
+  `ForgePort.create_comment` (hidden HTML marker
   `<!-- indexbot:governance -->` — update-in-place on repeated runs, never
   reposted). Never `failure` — nothing has actually gone wrong, the PR just
   needs a human. (ADR-4 BD-5's fuller "green for refresh PRs once
@@ -986,9 +986,13 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   the original entry this replaces — unaffected by G-19/G-20.) Writes the
   resulting commit-status state (`"success"`/`"pending"`) to `$GITHUB_OUTPUT`
   as `disposition` — `.github/workflows/governance.yml`'s `arm-auto-merge` job
-  arms auto-merge strictly on `steps.governance_check.outputs.disposition ==
-  'success'`, never on the raw `classify-pr` label (announce-revamp
-  Phase 3 — a label-based check cannot see the G-19 ownership result).
+  runs `indexbot governance-gate --arm-only --disposition <that value>`, and
+  arms strictly on `success`, never on the raw `classify-pr` label
+  (announce-revamp Phase 3 — a label-based check cannot see the G-19 ownership
+  result). Anything else, the empty string a FAILED gate job publishes
+  included, withdraws instead: that job runs on `if: ${{ !cancelled() }}` so a
+  gate that errored cannot leave a pull request armed on an evaluation that
+  never finished.
 
 ## 13. Consolidated open questions carried into Phase 2
 
@@ -1010,9 +1014,9 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
    ("exact `X.Y.Z` only is pinned") was the exact inverse of OCX's cascade
    semantics and shipped that way — both failure modes this item warned
    about were live simultaneously on the nightly sweep. See §7.
-4. **Issue-creation on `GitHubPort`** (`cli/reconcile.py`, §12) — **resolved,
+4. **Issue-creation on `ForgePort`** (`cli/reconcile.py`, §12) — **resolved,
    fork-PR announce revamp 2026-07-18**: `create_or_update_issue` promoted
-   onto `ports.GitHubPort` (§3/§10), implemented in `GitHubApi` (unchanged
+   onto `ports.ForgePort` (§3/§10), implemented in `GitHubApi` (unchanged
    body — it already existed as an adapter-only capability) and `FakeGitHub`.
    `cli/reconcile.py`'s verify-only sweep now calls it directly on a
    non-empty escalating-finding set, before raising `AnomalyError`.
@@ -1119,12 +1123,17 @@ Each index repo commits its own policy:
 
 ```json
 {
+  "name": "ocx.sh",
+  "name_segments": 2,
   "registry_hosts": ["ghcr.io"]
 }
 ```
 
-`parse_index_policy(raw: bytes) -> frozenset[str]` is that file's whole
-grammar. `ValidationError` on anything else: malformed JSON, a non-object
+`parse_index_policy(raw: bytes) -> IndexPolicy` is that file's whole
+grammar — `name` and `name_segments` are required with no defaults, since an
+index that does not declare its own identity would publish under another
+deployment's. The optional keys (`reserved_namespaces`, `governance`, `ci`)
+and the full grammar are in [Deployment policy](policy.md). `ValidationError` on anything else: malformed JSON, a non-object
 document, an unknown key (a typo'd `registry_host` would otherwise leave a
 deployment with no policy while looking like it had one), a missing or
 non-array `registry_hosts`, an empty array, or an entry that is not a bare
@@ -1165,7 +1174,7 @@ work, and passes the resulting `frozenset[str]` into `announce.run`,
 per-subcommand independence that already governs env-var requirements there).
 Source of the bytes: the local checkout via `FilePort` for
 `validate`/`reconcile`/`seed-import`; the index repo at `main` via
-`GitHubPort` for `announce`, whose publisher runs outside any checkout.
+`ForgePort` for `announce`, whose publisher runs outside any checkout.
 
 Two failures are raised there, both loud and both early:
 

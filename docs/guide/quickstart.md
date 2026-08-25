@@ -36,12 +36,18 @@ committed lockfile where a bump is a reviewed pull request:
 name = "index-bot-tools"
 version = "0"
 requires-python = ">=3.12"
-dependencies = ["ocx-indexbot==0.1.0"]
+dependencies = ["ocx-indexbot==0.2.0"]
 ```
 
 ```bash
-uv run --project bot-tools -- indexbot render --index-dir "" --out dist
+uv run --project bot-tools --frozen -- indexbot render --index-dir . --out dist
 ```
+
+`--frozen` is the half that makes the lockfile binding: without it (or
+`--locked`), `uv run` re-locks whenever the lock is stale against
+`pyproject.toml`. `indexbot ci` refuses to render a pipeline whose `ci.run`
+lacks it, and [WF-08](../reference/workflow-invariants.md) fails the audit if a
+hand-written one does.
 
 ## 1. State your registry policy
 
@@ -51,8 +57,18 @@ variable: widening registry trust is a supply-chain decision, and "extend only
 via reviewed pull request" is the control.
 
 ```json
-{ "registry_hosts": ["ghcr.io"] }
+{
+  "name": "acme.corp",
+  "name_segments": 2,
+  "registry_hosts": ["ghcr.io"]
+}
 ```
+
+`name` is the logical prefix every root under this index carries, and the
+registry key an `ocx` client configures. `name_segments` is how deep `p/**`
+nests below it. Both are required with no default: an index that does not
+declare its own identity would publish under another deployment's. Everything
+else the file accepts is in [Deployment policy](../reference/policy.md).
 
 There is no compiled-in default. An index that never states a policy fails
 closed rather than silently inheriting someone else's. A host that no
@@ -108,11 +124,20 @@ a human-lane change and cannot self-authorize.
 ## 5. Render and deploy
 
 ```bash
-indexbot render --index-dir "" --out dist
+indexbot render --index-dir . --out dist
 ```
 
 Emits `config.json`, the `/p/**` mirror, and `c/index.json` into `dist`.
 Publish that directory to any static host.
+
+Before the first package lands there is nothing under `p/` to render, and a
+render that discovers no roots is refused: the same thing happens when
+`--index-dir` has a typo, and the result — a valid, empty index deployed over
+a populated one — is the same too. Say you mean it:
+
+```bash
+indexbot render --index-dir . --out dist --allow-empty
+```
 
 Two operational rules for whatever serves it:
 

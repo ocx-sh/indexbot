@@ -39,10 +39,17 @@ Full detail in the [CLI reference](reference/cli.md).
 | `announce` | Record an owner-curated tag, CI-verified against the physical registry |
 | `reconcile` | Verify committed index state against registry truth; file anomalies, never auto-heal |
 | `validate` | The unprivileged PR gate — semantic checks a JSON Schema cannot express |
+| `validate-pr` | The same gate as one command: resolve the PR's changed roots, their base-ref bytes and its provenance, then validate |
 | `render` | Emit the served wire tree (`config.json`, `/p/**`, `/c/index.json`) |
 | `seed-import` | Bulk-import package roots from mirror metadata |
 | `classify-pr` | Route a pull request to the machine lane or the human lane |
-| `governance-check` | The privileged gate: ownership, review requirements, auto-merge arming |
+| `governance-check` | The privileged gate: ownership, review requirements, auto-merge disposition |
+| `governance-gate` | The same gate for one pull request, in one process: classify, label, gate, arm or withdraw auto-merge |
+| `governance-poll` | The whole governance lane as a scheduled sweep — GitLab, which has no privileged pull-request trigger |
+| `label-failed-run` | Label the pull request whose head a failed pipeline ran on |
+| `stale` | Close abandoned pull requests, either forge, no third-party action |
+| `ci` | Render this index's pipeline files from its committed policy, or check them for drift |
+| `schema` | Print the shipped deployment-policy JSON Schema |
 | `workflows-check` | Assert the workflow security invariants over an index repo's `.github/workflows/` |
 
 ## Exit codes
