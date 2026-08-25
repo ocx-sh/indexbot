@@ -61,6 +61,10 @@ commit_parsers = [
     { message = "^refactor", group = "Changed" },
     { message = "^perf", group = "Changed" },
     { message = "^doc", group = "Documentation" },
+    # A merge commit's subject is not a change; the commits it brings in are
+    # already parsed on their own. Without this, every non-fast-forward merge
+    # adds a "### Merge" section to the release notes.
+    { message = "^merge", skip = true },
     { message = "^chore", skip = true },
     { message = "^ci", skip = true },
     { message = "^style", skip = true },
