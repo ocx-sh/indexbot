@@ -36,15 +36,15 @@ footer = """
     {% if release.version -%}
         {% if release.previous.version -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
-                https://github.com/ocx-sh/ocx-sdk-python\
+                https://github.com/ocx-sh/indexbot\
                     /compare/{{ release.previous.version }}..{{ release.version }}
         {% else -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
-                https://github.com/ocx-sh/ocx-sdk-python/tree/{{ release.version }}
+                https://github.com/ocx-sh/indexbot/tree/{{ release.version }}
         {% endif -%}
     {% else -%}
         {% if release.previous.version -%}
-            [unreleased]: https://github.com/ocx-sh/ocx-sdk-python\
+            [unreleased]: https://github.com/ocx-sh/indexbot\
                 /compare/{{ release.previous.version }}..HEAD
         {% endif -%}
     {% endif -%}

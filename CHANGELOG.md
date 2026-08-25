@@ -129,12 +129,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump locked pip to 26.2.1 for PYSEC-2026-3721 (#718)
 - Apply index-side review findings (round 1) (#720)
 - Wheel:check failed because its search succeeded *(ci)*
-[0.4.1]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.4.0..v0.4.1
-[0.4.0]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.3.1..v0.4.0
-[0.3.1]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.3.0..v0.3.1
-[0.3.0]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.2.2..v0.3.0
-[0.2.2]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.2.1..v0.2.2
-[0.2.1]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.2.0..v0.2.1
-[0.2.0]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.1.0..v0.2.0
-[0.1.0]: https://github.com/ocx-sh/ocx-sdk-python/tree/v0.1.0
+[0.4.1]: https://github.com/ocx-sh/indexbot/compare/v0.4.0..v0.4.1
+[0.4.0]: https://github.com/ocx-sh/indexbot/compare/v0.3.1..v0.4.0
+[0.3.1]: https://github.com/ocx-sh/indexbot/compare/v0.3.0..v0.3.1
+[0.3.0]: https://github.com/ocx-sh/indexbot/compare/v0.2.2..v0.3.0
+[0.2.2]: https://github.com/ocx-sh/indexbot/compare/v0.2.1..v0.2.2
+[0.2.1]: https://github.com/ocx-sh/indexbot/compare/v0.2.0..v0.2.1
+[0.2.0]: https://github.com/ocx-sh/indexbot/compare/v0.1.0..v0.2.0
+[0.1.0]: https://github.com/ocx-sh/indexbot/tree/v0.1.0
 
