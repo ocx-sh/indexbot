@@ -391,7 +391,7 @@ def _check_write_jobs_do_not_persist_credentials(
 
 
 def _check_write_jobs_run_a_pinned_bot(
-    name: str, text: str, events: frozenset[str]
+    name: str, text: str, events: frozenset[str], actions: Mapping[str, str] | None = None
 ) -> list[Finding]:
     """A job holding `contents: write` under `pull_request_target` must not
     decide at job start which version of the bot it runs.
@@ -412,33 +412,63 @@ def _check_write_jobs_run_a_pinned_bot(
     that is fine — it holds no token, so a compromised release there reaches
     nothing a fork's own runner did not already have.
 
-    What it cannot see: a composite action the job `uses:`, whose own steps
-    are in `actions/**` and never audited here (`cli/workflows_check.py`
-    reads the top level of the workflow directory and nothing below it). A
-    deployment that hides its resolver in `ci.setup` passes this check and
-    should not expect to.
+    A **local composite action** the job `uses:` is followed, when the caller
+    supplied one (`actions`). It has to be: `ci.setup` renders a `uses:` step
+    into exactly this job, a composite action's `run:` steps execute in the
+    caller's job with the caller's token, and a resolver moved one file down
+    would otherwise satisfy this rule while changing nothing about the risk.
+    Only `uses: ./…` is followed — a third-party action is SHA-pinned by WF-02
+    and its contents are not in this tree to read.
     """
     findings: list[Finding] = []
     for job, block in _privileged_write_jobs(text, events):
-        for line in block.splitlines():
-            # Whole-line comments only: the argument for a rule is written out
-            # beside it in these files, and `# a `uv` resolution failure` is
-            # prose, not a step. A trailing comment on a real command line
-            # stays in scope, where it cannot hide an invocation either.
-            if line.lstrip().startswith("#") or not resolves_at_runtime(line):
-                continue
-            findings.append(
-                Finding(
+        finding = _first_runtime_resolution(name, job, block, actions or {})
+        if finding is not None:
+            findings.append(finding)
+    return findings
+
+
+def _first_runtime_resolution(
+    name: str, job: str, block: str, actions: Mapping[str, str]
+) -> Finding | None:
+    """The job's first command that resolves the bot at job start, whether it
+    is written in the job or in a local composite action the job `uses:`."""
+    for line in block.splitlines():
+        # Whole-line comments only: the argument for a rule is written out
+        # beside it in these files, and `# a `uv` resolution failure` is
+        # prose, not a step. A trailing comment on a real command line
+        # stays in scope, where it cannot hide an invocation either.
+        if line.lstrip().startswith("#"):
+            continue
+        if resolves_at_runtime(line):
+            return Finding(name, "WF-08", _wf08_message(job, line.strip()))
+        match = _USES_RE.match(line)
+        if match is None or not match[1].startswith("./"):
+            continue
+        for inner in actions.get(match[1].rstrip("/"), "").splitlines():
+            if not inner.lstrip().startswith("#") and resolves_at_runtime(inner):
+                return Finding(
                     name,
                     "WF-08",
-                    f"job `{job}` holds `contents: write` and resolves what it runs at "
-                    f"job start — {line.strip()!r}. Pin the version by lockfile "
-                    "(`--frozen`/`--locked`) or by exact specifier, so a reviewed commit "
-                    "decides what executes with a token that can merge a pull request",
+                    _wf08_message(job, inner.strip(), via=match[1]),
                 )
-            )
-            break
-    return findings
+    return None
+
+
+def _wf08_message(job: str, command: str, *, via: str | None = None) -> str:
+    where = (
+        f"resolves what it runs at job start — {command!r}"
+        if via is None
+        else (
+            f"uses `{via}`, whose steps run in this job with this job's token, and "
+            f"that action resolves what it runs at job start — {command!r}"
+        )
+    )
+    return (
+        f"job `{job}` holds `contents: write` and {where}. Pin the version by "
+        "lockfile (`--frozen`/`--locked`) or by exact specifier, so a reviewed "
+        "commit decides what executes with a token that can merge a pull request"
+    )
 
 
 def _job_needs(block: str) -> list[str]:
@@ -520,12 +550,25 @@ def _check_cron_is_upstream_only(
     ]
 
 
-def check_workflows(workflows: Mapping[str, str], *, owner: str | None) -> tuple[Finding, ...]:
+def check_workflows(
+    workflows: Mapping[str, str],
+    *,
+    owner: str | None,
+    actions: Mapping[str, str] | None = None,
+) -> tuple[Finding, ...]:
     """Every invariant, over every given workflow, sorted by file name.
 
     `workflows` maps a display name (the file's basename) to its text.
     `owner` enables the cron guard check (WF-07); `None` skips it, for a
     caller that cannot name the upstream owner.
+
+    `actions` maps a local composite action's `uses:` path (`./.github/
+    actions/<name>`) to its `action.yml` text. Both halves of what a composite
+    action can smuggle into its caller's job are checked there: WF-08 for a
+    `run:` that resolves the bot at job start, WF-02 for a `uses:` that is not
+    SHA-pinned. Both execute with the caller's token, so a rule that stops at
+    the workflow file stops one file short. Omitted, both see only what is
+    written in the workflow itself.
     """
     findings: list[Finding] = []
     for name in sorted(workflows):
@@ -537,7 +580,15 @@ def check_workflows(workflows: Mapping[str, str], *, owner: str | None) -> tuple
         findings.extend(_check_no_event_name_if(name, text, events))
         findings.extend(_check_no_head_checkout(name, text, events))
         findings.extend(_check_write_jobs_do_not_persist_credentials(name, text, events))
-        findings.extend(_check_write_jobs_run_a_pinned_bot(name, text, events))
+        findings.extend(_check_write_jobs_run_a_pinned_bot(name, text, events, actions))
         if owner is not None:
             findings.extend(_check_cron_is_upstream_only(name, text, events, owner))
+    for name in sorted(actions or {}):
+        # WF-02 over the composite actions too. A `uses:` inside an
+        # `action.yml` pulls third-party code into whatever job called it,
+        # with that job's token — the same property WF-02 exists for, in a
+        # file the workflow scan never opened. `ocx-sh/index`'s own
+        # `setup-indexbot` is exactly this shape: no `run:` at all, one
+        # `uses:` that installs uv.
+        findings.extend(_check_sha_pins(name, (actions or {})[name]))
     return tuple(findings)

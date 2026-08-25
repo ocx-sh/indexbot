@@ -80,6 +80,33 @@ def _load_workflows(files: FilePort, directory: str) -> dict[str, str]:
     return loaded
 
 
+def _load_local_actions(files: FilePort, directory: str) -> dict[str, str]:
+    """Every local composite action's `action.yml`, keyed by the `uses:` path
+    a workflow would name it with (`./.github/actions/<name>`).
+
+    Sibling of the workflow directory, not inside it: GitHub reads workflows
+    from `.github/workflows/` and actions from `.github/actions/`. WF-08
+    follows these because a composite action's `run:` steps execute in the
+    calling job, with the calling job's token — a resolver moved one file down
+    is the same hole, and `ci.setup` renders exactly such a `uses:` step into
+    the credentialed job.
+
+    An action nested deeper (`.github/actions/<name>/<sub>/action.yml`) is
+    keyed by its own directory, which is what a `uses:` would have to name.
+    """
+    parent = directory.rstrip("/").rpartition("/")[0]
+    if not parent:
+        return {}
+    loaded: dict[str, str] = {}
+    for path in files.list_files(f"{parent}/actions"):
+        if not path.endswith(("/action.yml", "/action.yaml")):
+            continue
+        text = files.read_text(path)
+        if text is not None:
+            loaded[f"./{path.rpartition('/')[0]}"] = text
+    return loaded
+
+
 def _load_gitlab_pipeline(files: FilePort, directory: str) -> dict[str, str]:
     """The root `.gitlab-ci.yml` plus every `*.yml`/`*.yaml` under `directory`,
     keyed by their path from the checkout root.
@@ -117,7 +144,9 @@ def run(args: argparse.Namespace, *, files: FilePort) -> ExitCode:
     else:
         directory = directory if directory is not None else DEFAULT_DIR
         pipeline = _load_workflows(files, directory)
-        findings = check_workflows(pipeline, owner=owner)
+        findings = check_workflows(
+            pipeline, owner=owner, actions=_load_local_actions(files, directory)
+        )
         noun = "workflow"
 
     if not pipeline:

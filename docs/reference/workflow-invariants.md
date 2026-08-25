@@ -25,13 +25,13 @@ like.
 | Rule | Invariant | Why |
 |---|---|---|
 | **WF-01** | Every workflow declares top-level `permissions: {}` | Without an explicit default-deny a workflow inherits the repository default, which may be write. A trailing comment is fine. |
-| **WF-02** | Every `uses:` is pinned to a 40-hex commit SHA | A tag can be moved under you. `./` composite actions and `docker://` refs are exempt — neither is a marketplace ref. |
+| **WF-02** | Every `uses:` is pinned to a 40-hex commit SHA | A tag can be moved under you. `./` composite actions and `docker://` refs are exempt — neither is a marketplace ref. A local composite action's own `uses:` steps are checked too: they pull third-party code into whatever job called the action, with that job's token, and the workflow scan never opens that file. |
 | **WF-03** | No workflow declares both `pull_request` and `pull_request_target` | Both fire on the same head commit, so one file carrying both must discriminate with a job-level `if: github.event_name == …` — and a job skipped by such an `if:` **still emits a check run**, conclusion `skipped`. GitHub counts `skipped` as satisfying a required status check and resolves duplicate context names to the most recent run, so the privileged half publishes a green-equivalent impostor of the unprivileged half's required context. |
 | **WF-04** | No job `if:` compares `github.event_name` against a PR event, in a workflow with a PR trigger | The structural half of WF-03: with one trigger per file there is nothing for such a guard to decide, and reintroducing one is how the collision comes back. Comparisons against other events (`!= 'schedule'`) are ordinary and untouched. |
 | **WF-05** | No step sets `ref:` in a **privileged** workflow — `pull_request_target`, `workflow_run` or `issue_comment` | A checkout with no `ref:` takes the base branch tip; an explicit `ref:` is the only way to reach contributor-controlled code. All three triggers hand a job the base repository's token on an event an outside contributor causes, so all three must never execute what that contributor wrote. `workflow_call` is deliberately excluded: a reusable workflow's privilege is its caller's, and the caller is where this audit can see it. |
 | **WF-06** | A job holding `contents: write` under a privileged trigger sets `persist-credentials: false` on **every** checkout step, and hands no `${{ github.token }}` / `${{ secrets.* }}` to any `uses:` step | Two ways such a job leaks the token it was granted. A checkout taking the default `persist-credentials: true` writes it into `.git/config`, where every later step inherits it through plain `git` — dependency resolution and build backends included — with no `GITHUB_TOKEN` in sight to audit; the opt-out is read off each checkout's own `with:`, so a second checkout under a different `path:` cannot ride on the first one's hardening. Forwarding the credential into an action's inputs never touches `.git/config` at all and needs no checkout — it is the hazard the retired blanket `uses:` ban actually named. Other write scopes — `pull-requests`, `statuses`, `issues` — cannot move the base branch and are untouched. **This rule used to be stronger; see below.** |
 | **WF-07** | Every job a `schedule:` can reach is upstream-guarded, **by the job's own `if:`** | A fork inherits every cron and runs it off its own stale YAML. Satisfied by `if: github.repository_owner == '<owner>'`, by `if: github.event_name != 'schedule'`, or by `needs:` on a job that is guarded — inheritance is transitive, since a skipped dependency skips its dependents. Matched against the job-level `if:` expression, not searched for anywhere in the job: a *step*-level `if:` skips one step and leaves the job running with its token, and a guard deleted but kept as a comment is the most plausible way this rule ever goes quiet. |
-| **WF-08** | A job holding `contents: write` under `pull_request_target` runs no command that resolves the bot at job start | That job can move an unprotected base branch and squash-merge a pull request. `uvx ocx-indexbot` fetches whatever the index holds when the step starts — no version, no lockfile, no hash — so one malicious release executes with that token. Satisfied by a lockfile the command may not re-resolve (`--frozen`, `--locked`), by an exact version specifier, or by naming no resolver at all. **WF-02 does not cover this** — see below. |
+| **WF-08** | A job holding `contents: write` under `pull_request_target` runs no command that resolves the bot at job start | That job can move an unprotected base branch and squash-merge a pull request. `uvx ocx-indexbot` fetches whatever the index holds when the step starts — no version, no lockfile, no hash — so one malicious release executes with that token. Satisfied by a lockfile the command may not re-resolve (`--frozen`, `--locked`), by an exact version specifier, or by naming no resolver at all. **WF-02 does not cover this** — see below. A local composite action the job `uses:` is followed, because its `run:` steps execute in the calling job with the calling job's token — `ci.setup` renders exactly such a step into this job, so a resolver moved one file down would otherwise satisfy the rule while changing nothing. Only `uses: ./…`: a third-party action is SHA-pinned by WF-02 and its steps are not in the tree to read. |
 
 ## Rules (gitlab)
 
@@ -119,6 +119,16 @@ inspects `uses:` refs — it says nothing about how a `run:` command resolves a
 being checked: the actions were SHA-pinned and the bot was not. WF-08 is the
 rule that makes the sentence true, and it arrived after the gap was found, not
 with the narrowing.
+
+**And it had its own version of the same gap.** WF-08 originally read the
+credentialed job's own `run:` lines and stopped there, which left `ci.setup`
+as a documented way around it: a composite action's `run:` steps execute in
+the *calling* job, with the calling job's token, so a deployment could pin the
+command in the workflow and resolve the bot one file down. That is now
+followed — every `uses: ./…` step in such a job is read out of its
+`action.yml` and held to the same predicate. The lesson is the one above,
+twice: a rule that names a blind spot in its own docstring is a rule waiting
+for someone to walk into it.
 
 **What replaced it** is the pair of ways such a job can leak the token it was
 granted, which is what the blanket ban was a blunt instrument for:

@@ -41,6 +41,40 @@ jobs:
 _FLOATING = _CLEAN.replace(f"actions/checkout@{_SHA}", "actions/checkout@v4")
 
 
+_ARMING_VIA_SETUP = """\
+name: governance
+
+on:
+  pull_request_target:
+
+permissions: {}
+
+jobs:
+  arm-auto-merge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: ./.github/actions/setup-bot
+      - name: Arm
+        run: uv run --frozen --project bot-tools -- indexbot governance-gate --arm-only
+"""
+"""The credentialed job as `indexbot ci` renders it when the deployment
+declares a `ci.setup`: pinned in the workflow, and everything that decides
+what actually runs one file away."""
+
+_UNPINNED_ACTION = """\
+name: setup-bot
+description: install the bot
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: uvx ocx-indexbot --version
+"""
+
+
 def _args(
     directory: str | None = ".github/workflows",
     owner: str | None = None,
@@ -287,3 +321,79 @@ def test_gitlab_owner_flag_is_a_no_op() -> None:
     assert (
         workflows_check.run(_args(None, owner="ocx-sh", forge="gitlab"), files=files) == ExitCode.OK
     )
+
+
+def test_a_local_composite_action_beside_the_workflow_directory_is_loaded() -> None:
+    """`ci.setup` renders a `uses:` step into the credentialed job, and a
+    composite action's `run:` steps execute there with that job's token. The
+    action lives in `.github/actions/`, a SIBLING of the workflow directory —
+    so finding it means walking out of `--dir` by one level, which is the only
+    reason this loader is not part of `_load_workflows`."""
+    files = InMemoryFiles()
+    files.write_text(".github/workflows/governance.yml", _ARMING_VIA_SETUP)
+    files.write_text(".github/actions/setup-bot/action.yml", _UNPINNED_ACTION)
+
+    with pytest.raises(ValidationError, match="1 workflow invariant violation"):
+        workflows_check.run(_args(), files=files)
+
+
+def test_a_composite_action_that_pins_what_it_installs_passes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = InMemoryFiles()
+    files.write_text(".github/workflows/governance.yml", _ARMING_VIA_SETUP)
+    files.write_text(
+        ".github/actions/setup-bot/action.yml",
+        _UNPINNED_ACTION.replace("uvx ocx-indexbot --version", "uv sync --frozen"),
+    )
+
+    assert workflows_check.run(_args(), files=files) == ExitCode.OK
+    assert "1 workflow(s) audited, no findings" in capsys.readouterr().err
+
+
+def test_a_workflow_directory_with_no_parent_loads_no_actions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--dir workflows` has nowhere to look for a sibling `actions/`. That is
+    a caller getting less coverage, never a crash."""
+    files = InMemoryFiles()
+    files.write_text("workflows/governance.yml", _ARMING_VIA_SETUP)
+    files.write_text("actions/setup-bot/action.yml", _UNPINNED_ACTION)
+
+    assert workflows_check.run(_args(directory="workflows"), files=files) == ExitCode.OK
+    assert "1 workflow(s) audited, no findings" in capsys.readouterr().err
+
+
+def test_a_non_action_file_under_the_actions_tree_is_ignored(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only `action.yml`/`action.yaml` is a composite action. A README or a
+    fixture beside it is not one, and reading it as one would let its prose
+    decide a security verdict."""
+    files = InMemoryFiles()
+    files.write_text(".github/workflows/governance.yml", _ARMING_VIA_SETUP)
+    files.write_text(
+        ".github/actions/setup-bot/action.yml",
+        _UNPINNED_ACTION.replace("uvx ocx-indexbot --version", "uv sync --frozen"),
+    )
+    files.write_text(".github/actions/setup-bot/notes.yml", "run: uvx ocx-indexbot")
+
+    assert workflows_check.run(_args(), files=files) == ExitCode.OK
+    assert "1 workflow(s) audited, no findings" in capsys.readouterr().err
+
+
+def test_a_composite_action_that_vanishes_between_listing_and_reading_is_skipped() -> None:
+    """Same race as the workflow loader's, same answer. An action that reads
+    back as `None` must not become an empty one whose absent `run:` steps
+    silently satisfy WF-08 — the workflow it was called from is still audited
+    on what it says itself."""
+
+    class VanishingFiles(InMemoryFiles):
+        def read_text(self, path: str) -> str | None:
+            return None if path.endswith("action.yml") else super().read_text(path)
+
+    files = VanishingFiles()
+    files.write_text(".github/workflows/governance.yml", _ARMING_VIA_SETUP)
+    files.write_text(".github/actions/setup-bot/action.yml", _UNPINNED_ACTION)
+
+    assert workflows_check.run(_args(), files=files) == ExitCode.OK

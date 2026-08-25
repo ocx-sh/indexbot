@@ -53,8 +53,14 @@ jobs:
 """
 
 
-def _rules(text: str, *, owner: str | None = "ocx-sh", name: str = "wf.yml") -> list[str]:
-    return [finding.rule for finding in check_workflows({name: text}, owner=owner)]
+def _rules(
+    text: str,
+    *,
+    owner: str | None = "ocx-sh",
+    name: str = "wf.yml",
+    actions: dict[str, str] | None = None,
+) -> list[str]:
+    return [finding.rule for finding in check_workflows({name: text}, owner=owner, actions=actions)]
 
 
 def test_a_clean_workflow_has_no_findings() -> None:
@@ -788,3 +794,112 @@ def test_the_generated_workflow_tree_satisfies_every_invariant() -> None:
     plan = render.build_render_plan(make_policy(deploy_workflow="render-deploy.yml"), existing={})
     workflows = {path.rsplit("/", 1)[-1]: text for path, text in plan.items()}
     assert check_workflows(workflows, owner="ocx-sh") == ()
+
+
+# --- WF-08 through a local composite action ----------------------------------
+#
+# `ci.setup` renders a `uses:` step into the credentialed job, and a composite
+# action's `run:` steps execute in the CALLER's job with the caller's token.
+# A resolver moved one file down satisfied WF-08 while changing nothing about
+# the risk, which is the shape a documented blind spot has right up until
+# someone uses it.
+
+_SETUP_STEP = "      - uses: ./.github/actions/setup-bot\n      - name: Gate\n"
+
+
+def test_wf08_follows_a_local_composite_action_the_credentialed_job_uses() -> None:
+    """The blind spot, closed. The workflow itself names a pinned command; the
+    action it calls does not."""
+    calling = _ARMING.replace("      - name: Gate\n", _SETUP_STEP)
+    action = """\
+name: setup-bot
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: uvx ocx-indexbot --version
+"""
+
+    assert _rules(calling, actions={"./.github/actions/setup-bot": action}) == ["WF-08"]
+
+
+def test_wf08_accepts_a_composite_action_that_pins_what_it_installs() -> None:
+    """The same shape, done right — `ocx-sh/index`'s own `setup-indexbot`."""
+    calling = _ARMING.replace("      - name: Gate\n", _SETUP_STEP)
+    action = """\
+name: setup-bot
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: uv sync --frozen --project bot-tools
+"""
+
+    assert _rules(calling, actions={"./.github/actions/setup-bot": action}) == []
+
+
+def test_wf08_does_not_chase_a_third_party_action() -> None:
+    """Only `uses: ./…` is followed. A third-party action is SHA-pinned by
+    WF-02 and its steps are not in this tree to read, so following the path
+    would mean inventing a lookup that always misses."""
+    calling = _ARMING.replace(
+        "      - name: Gate\n", "      - uses: acme/setup-bot@" + _SHA + "\n      - name: Gate\n"
+    )
+
+    assert _rules(calling, actions={"acme/setup-bot": "run: uvx ocx-indexbot"}) == []
+
+
+def test_wf08_without_an_actions_mapping_sees_only_the_workflow() -> None:
+    """The parameter is optional, and a caller that cannot supply it gets the
+    pre-existing behaviour rather than a crash."""
+    calling = _ARMING.replace("      - name: Gate\n", _SETUP_STEP)
+
+    assert _rules(calling) == []
+
+
+def test_wf08_reads_past_a_commented_out_resolver_in_the_action() -> None:
+    """A commented resolver in a composite action is prose, exactly as it is
+    in the workflow — and the line after it still has to be read."""
+    calling = _ARMING.replace("      - name: Gate\n", _SETUP_STEP)
+    action = """\
+name: setup-bot
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      # run: uvx ocx-indexbot   <- was this, and must not be again
+      run: uvx --from 'ocx-indexbot==0.3.1' indexbot --version
+"""
+
+    assert _rules(calling, actions={"./.github/actions/setup-bot": action}) == []
+
+
+def test_wf02_reaches_inside_a_local_composite_action() -> None:
+    """A `uses:` inside an `action.yml` pulls third-party code into whatever
+    job called it, with that job's token — the property WF-02 exists for, in a
+    file the workflow scan never opens."""
+    calling = _ARMING.replace("      - name: Gate\n", _SETUP_STEP)
+    action = """\
+name: setup-bot
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v8
+"""
+
+    assert _rules(calling, actions={"./.github/actions/setup-bot": action}) == ["WF-02"]
+
+
+def test_a_sha_pinned_composite_action_passes_both_halves() -> None:
+    """`ocx-sh/index`'s own `setup-indexbot`: no `run:` at all, one SHA-pinned
+    `uses:` that installs uv."""
+    calling = _ARMING.replace("      - name: Gate\n", _SETUP_STEP)
+    action = f"""\
+name: setup-bot
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@{_SHA}
+"""
+
+    assert _rules(calling, actions={"./.github/actions/setup-bot": action}) == []
