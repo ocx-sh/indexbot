@@ -10,18 +10,16 @@ Per changed root: every `core/validate_entry.py` structural check, then
 aggregate across every path given — one structured line per file (plus any
 warnings) on stderr, one overall `ExitCode`.
 
-Ports are required keyword-only arguments on `run` rather than the bare
-`Callable[[argparse.Namespace], ExitCode]` shape CONTRACTS.md §12 quotes
-verbatim — WP2-M's production wiring is expected to bind the real adapters
-at `_DISPATCH` registration time (e.g.
-`functools.partial(run, files=LocalFiles(...), registry=RegistryV2())`),
-which still satisfies that single-argument dispatch shape once registered.
-Flagged in this work package's `open_questions` in case a different binding
-convention (e.g. a shared `Ports` bundle dataclass) was intended instead.
+Ports are required keyword-only arguments on `run`, and nothing in this
+module constructs one. `cli/_wiring.py` is the single construction site for
+every adapter in this package: its `_run_validate` builds the ports at call
+time and passes them in. That is what keeps this module testable against
+fakes with no monkeypatching, and what makes "which adapter does the
+credentialed path use" answerable by reading one file.
 
-This module registers nothing in `cli/main.py` — `add_arguments` exists so
-WP2-M's `subparsers.add_parser("validate")` wiring can populate the parser
-without duplicating this subcommand's arg shape by hand.
+`add_arguments` exists so `cli/main.py`'s `subparsers.add_parser("validate")`
+can populate this subcommand's parser without restating its arg shape by
+hand — the parser and the handler stay in the same module.
 """
 
 from __future__ import annotations

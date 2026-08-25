@@ -106,6 +106,14 @@ The tag list is **owner-curated**: the bot records what the owner announces,
 and CI verifies each claim against registry truth. It never enumerates a
 registry and never invents a tag.
 
+!!! warning "That list is the whole set, not an addition"
+
+    `--tags` writes the root's tag map from what this run names. A tag the
+    root already carries and this run omits is dropped. Announcing one tag per
+    push — `--tags "$CI_COMMIT_TAG"` — therefore publishes that tag and
+    deletes the rest. Pass every tag you want kept, every time; see
+    [`announce`](../reference/cli.md#announce).
+
 ## 4. Gate the pull request
 
 Two workflows, deliberately in two files (see
