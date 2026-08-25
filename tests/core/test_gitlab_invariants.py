@@ -306,3 +306,83 @@ def test_job_block_is_not_ended_by_a_column_zero_comment() -> None:
     block = job_block(text, "a")
     assert "# a separator" in block
     assert "echo b" not in block
+
+
+def test_a_token_inside_a_block_scalar_script_is_still_found() -> None:
+    """`script: |` is the ordinary spelling for a multi-line shell body, and
+    it puts a block-scalar indicator on the key line. A section matcher
+    anchored on end-of-line matched neither that nor `script: echo "$TOKEN"`,
+    read the section as empty, and reported a job holding a parent credential
+    as holding none — a silent clean, which is the only way a rule like this
+    really fails."""
+    text = """\
+leak:
+  image: alpine@sha256:%s
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script: |
+    echo "$INDEXBOT_TOKEN" | docker login --password-stdin
+""" % ("a" * 64)
+
+    findings = check_gitlab({".gitlab-ci.yml": text})
+
+    assert [f.rule for f in findings] == ["GL-03"]
+    assert "INDEXBOT_TOKEN" in findings[0].message
+
+
+def test_a_token_on_the_script_key_line_is_still_found() -> None:
+    """The one-line spelling, same failure, same fix."""
+    text = """\
+leak:
+  image: alpine@sha256:%s
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script: curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://gitlab.example/api
+""" % ("a" * 64)
+
+    findings = check_gitlab({".gitlab-ci.yml": text})
+
+    assert [f.rule for f in findings] == ["GL-03"]
+
+
+def test_a_credential_on_a_hidden_template_is_found_where_it_is_written() -> None:
+    """GL-03 reads each job's own block and does not follow `extends:`, so a
+    job inheriting both its `rules:` and its credential is not itself flagged.
+    The template is, because a hidden `.name:` key is a top-level mapping key
+    like any other — which is why the blind spot costs nothing in practice:
+    the finding lands on the line an operator has to edit anyway."""
+    text = """\
+.creds:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    INDEXBOT_TOKEN: $PARENT_WRITE_TOKEN
+
+victim:
+  extends: .creds
+  image: alpine@sha256:%s
+  script:
+    - echo no token named here
+""" % ("a" * 64)
+
+    findings = check_gitlab({".gitlab-ci.yml": text})
+
+    assert [(f.rule, "creds" in f.message) for f in findings] == [("GL-03", True)]
+
+
+def test_a_pages_job_is_not_exempt() -> None:
+    """GitLab spells both a special deploy job and a config block `pages:`.
+    Treating it as never-a-job would exempt a real one from GL-03, and the
+    e2e index's own pipeline has a real one."""
+    text = """\
+pages:
+  image: alpine@sha256:%s
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - echo "$DEPLOY_SECRET"
+""" % ("a" * 64)
+
+    findings = check_gitlab({".gitlab-ci.yml": text})
+
+    assert [f.rule for f in findings] == ["GL-03"]

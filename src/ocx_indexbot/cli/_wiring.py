@@ -411,6 +411,16 @@ at the default branch, and it has the property `announce.BASE_REF` does not:
 it agrees with the ref `cli/validate_pr.py` diffs against, so both halves of
 the gate judge one pull request under one policy even when it targets a branch
 that is not called `main`.
+
+The one thing this hands an author is the *choice* of which parent branch's
+policy applies, by choosing what to target. That choice is bounded by what the
+operator has published: every candidate is a branch only the parent can write,
+and a merge into one of them publishes nothing — the deploy lane runs on the
+default branch, and reaching it takes a second pull request judged under its
+policy. An operator keeping a branch with a weaker policy around is the whole
+of the exposure, and the previous behaviour hid it rather than removing it:
+the diff already came from the pull request's base while the policy came from
+`main`, so the two halves disagreed on which tree they were judging.
 """
 
 

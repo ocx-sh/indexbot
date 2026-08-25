@@ -100,11 +100,21 @@ def job_block(text: str, job: str) -> str:
 
 
 def _section_text(block: str, key: str) -> str:
-    """One `key:` section of a job block — from its own indentation to the
-    next line at the same or shallower indentation. Blank lines never end a
-    section; GitLab-authored YAML uses them freely for readability."""
+    """One `key:` section of a job block — the key's own line, plus everything
+    indented under it, up to the next line at the same or shallower
+    indentation. Blank lines never end a section; GitLab-authored YAML uses
+    them freely for readability.
+
+    The key line is part of the section, and whatever follows the colon on it
+    is not required to be empty. Both matter: `script: echo "$TOKEN"` puts the
+    credential on the key line itself, and `script: |` puts a block-scalar
+    indicator there — a pattern anchored on end-of-line matched neither, so
+    the section came back empty and GL-03 read a job holding a token as
+    holding none. That is a silent clean, which is the only failure mode a
+    rule like this really has.
+    """
     lines = block.splitlines()
-    pattern = re.compile(rf"^([ \t]*){re.escape(key)}:[ \t]*(?:#.*)?$")
+    pattern = re.compile(rf"^([ \t]*){re.escape(key)}:")
     for index, line in enumerate(lines):
         match = pattern.match(line)
         if match is None:
@@ -193,11 +203,14 @@ def _check_no_token_on_merge_request_event(name: str, text: str) -> list[Finding
     GitLab's own per-job token, scoped to the project the pipeline is running
     in — for a fork MR, the fork — so it carries none of this hazard.
 
-    Read off each job's own block, not through `extends:`. A job whose
-    `rules:` live entirely on an extended template is not caught; the
-    generated templates never split `rules:` out that way; a hand-written
-    pipeline that does should read the credential straight off the job it
-    actually appears in.
+    Read off each job's own block, not through `extends:`. A job inheriting
+    both its `rules:` and its credential from a template is therefore not
+    itself flagged — but the *template* is, because a hidden `.name:` key is
+    a top-level mapping key like any other and `job_names` returns it. The
+    finding lands on the line an operator has to edit anyway, which is why
+    resolving `extends:` chains buys nothing here. What genuinely escapes is
+    only the split case: `rules:` on the job and the credential on a template
+    it extends, or the reverse.
     """
     findings: list[Finding] = []
     for job in job_names(text):

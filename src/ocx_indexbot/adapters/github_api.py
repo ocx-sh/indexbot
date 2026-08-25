@@ -253,7 +253,13 @@ class GitHubApi:
     def remove_label(self, pr_number: int, label: str) -> None:
         """404 is the answer for both "no such label on this PR" and "no such
         label in this repository", and neither is a failure of the caller's
-        intent — the label is not on the PR either way."""
+        intent — the label is not on the PR either way.
+
+        It is also the answer for a pull request or repository that does not
+        exist, which would be a real failure hidden. Not reachable here: every
+        caller has already read this pull request through
+        `get_pull_request_info` in the same run, and a repository this token
+        cannot see fails every other call in the job first."""
         with self._client() as client:
             response = client.delete(self._repo_url("issues", str(pr_number), "labels", label))
         self._check_transient(response)
