@@ -342,6 +342,11 @@ def test_the_validate_workflow_says_its_policy_comes_from_the_base_ref() -> None
     # the file committed rather than a settings-page value.
     assert "that context is the only thing stopping a fork" not in prose
     assert "byte-compares the head's copy against the base ref's" not in prose
+    # And the bootstrap rule, which is the one place a reader could conclude
+    # the gate has no answer: the pull request that adopts or repairs the
+    # policy would otherwise be the single change this lane cannot pass.
+    assert "no policy this bot can read" in prose
+    assert "changes none" in prose
 
 
 def test_only_the_validate_lane_checks_anything_out() -> None:

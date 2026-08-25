@@ -267,24 +267,87 @@ def test_a_pull_request_may_still_propose_a_new_policy() -> None:
     assert git.diffed_glob == "p/*/*.json"
 
 
-def test_a_base_ref_with_no_policy_file_is_refused() -> None:
-    """A brand-new index, or a pull request that ADDS the policy file. Either
-    way the base ref states no policy, so there is none in force for this gate
-    to obey — and adopting the incoming branch's is the trust direction the
-    guard exists to reverse. The file lands on the default branch, by the
-    operator who owns it."""
-    git = ScriptedGit()
+def test_a_base_ref_with_no_policy_refuses_any_change_under_the_package_tree() -> None:
+    """A brand-new index, or one whose policy the running bot cannot read.
+    Nothing under `p/` is judgeable without a policy — the name prefix, the
+    segment count, the reserved segments and the registry allowlist all come
+    from it — and adopting the incoming branch's copy is the trust direction
+    the guard exists to reverse."""
+    git = ScriptedGit(changed=("p/kitware/cmake.json",))
     del git.at_base[INDEX_POLICY_PATH]
 
     with pytest.raises(ValidationError) as caught:
         _run(_args(base_sha="origin/main"), git=git, files=InMemoryFiles())
 
-    # An operator reading this in a job log has to know which file to look at
-    # and which ref stated no policy - the two facts a bare "policy missing"
-    # would make them go find.
+    # An operator reading this in a job log has to know which file to look at,
+    # which ref stated no policy, and which of their own paths tripped it.
     message = str(caught.value)
-    assert f"the base ref has no {INDEX_POLICY_PATH}" in message
+    assert INDEX_POLICY_PATH in message
     assert "origin/main" in message
+    assert "p/kitware/cmake.json" in message
+
+
+def test_a_base_ref_with_no_policy_selects_the_whole_package_tree() -> None:
+    """`root_glob` needs a `name_segments` there is no policy to supply, and a
+    CAS object is as unjudgeable as a root when nothing is in force. So the
+    refusal's pathspec is the widest one: everything under `p/`. A narrower one
+    would let an announce PR's CAS object through unexamined."""
+    git = ScriptedGit()
+    del git.at_base[INDEX_POLICY_PATH]
+
+    _run(_args(), git=git, files=InMemoryFiles())
+
+    assert git.diffed_glob == "p/**"
+
+
+def test_a_pull_request_that_adopts_the_first_policy_is_not_refused(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The bootstrap case, and the repair case with it. Refusing every pull
+    request that reaches a policy-less base ref would leave direct-push-to-
+    default as the only way to adopt or fix one — the same inversion
+    `_base_ref_policy` was corrected for. This branch changes no package data,
+    so there is nothing for the gate to judge and nothing it has to trust the
+    head for."""
+    git = ScriptedGit()
+    del git.at_base[INDEX_POLICY_PATH]
+
+    assert _run(_args(base_sha="origin/main"), git=git, files=InMemoryFiles()) == ExitCode.OK
+
+    err = capsys.readouterr().err
+    assert "no policy" in err.lower()
+    assert "nothing to validate" in err
+
+
+def test_a_base_policy_this_version_cannot_read_is_not_the_head_s_cue() -> None:
+    """A policy across a schema bump the running bot no longer parses is the
+    same state as no policy at all: unreadable is not an invitation to fall
+    back to the pull request's copy. The repair PR passes only because it
+    touches no package data — this one does."""
+    git = ScriptedGit(
+        changed=("p/kitware/cmake.json",),
+        at_base={INDEX_POLICY_PATH: b'{"registry_hosts":["ghcr.io"]}'},
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        _run(_args(), git=git, files=InMemoryFiles())
+
+    assert "p/kitware/cmake.json" in str(caught.value)
+
+
+def test_an_unreadable_base_policy_says_why_before_it_refuses(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The parse error is the operator's whole diagnosis — without it the job
+    log says only "no policy this bot can read" about a file that is right
+    there on the default branch."""
+    git = ScriptedGit(at_base={INDEX_POLICY_PATH: b'{"registry_hosts":["ghcr.io"]}'})
+
+    assert _run(_args(), git=git, files=InMemoryFiles()) == ExitCode.OK
+
+    err = capsys.readouterr().err
+    assert INDEX_POLICY_PATH in err
+    assert "missing required 'name'" in err
 
 
 def test_an_unchanged_policy_file_needs_no_special_case() -> None:

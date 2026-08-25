@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.cli import validate
 from ocx_indexbot.cli._common import write_ci_annotation, write_ci_summary
@@ -36,6 +36,14 @@ if TYPE_CHECKING:
 
     from ocx_indexbot.core.policy import IndexPolicy
     from ocx_indexbot.ports import FilePort, GitPort, RegistryPort
+
+_ANY_PACKAGE_PATH: Final[str] = "p/**"
+"""The `:(glob)` pathspec matching every path under the package tree.
+
+`_no_policy_in_force`'s only pathspec. `core/policy.root_glob` cannot be built
+without a `name_segments` to build it from, and this one deliberately selects
+CAS objects too — with no policy in force they are as unjudgeable as a root.
+"""
 
 _BASE_SHA_ENV: tuple[str, ...] = ("INDEXBOT_BASE_SHA", "CI_MERGE_REQUEST_DIFF_BASE_SHA")
 """Env vars naming the base commit, most explicit first.
@@ -176,8 +184,11 @@ def _same_repo_pr(args: argparse.Namespace, env: Mapping[str, str]) -> bool:
     return False
 
 
-def _base_ref_policy(base_sha: str, *, git: GitPort, files: FilePort) -> IndexPolicy:
+def _base_ref_policy(base_sha: str, *, git: GitPort, files: FilePort) -> IndexPolicy | None:
     """The deployment policy this gate obeys: the BASE ref's copy, always.
+
+    `None` means the base ref has no policy this bot can read — see
+    `_no_policy_in_force`, which is what `run` does about it.
 
     This job checks out `pull_request.head.sha` — it has to, it is the half
     that reads PR-head content (ADR-4 BD-5, ADR-6 FP-7) — so the policy
@@ -210,11 +221,12 @@ def _base_ref_policy(base_sha: str, *, git: GitPort, files: FilePort) -> IndexPo
     `cli/classify_pr.py` forces `human-review-required` on any changed path
     outside `p/**`, this file included, so the machine lane cannot reach it.
 
-    **A base ref with no policy file** is refused rather than falling back to
-    the pull request's. An index whose base ref never committed one has no
-    policy in force for this gate to obey, and adopting the incoming branch's
-    is exactly the trust direction this function exists to fix. Bootstrap the
-    file on the default branch first.
+    **A base ref with no policy this bot can read** — the file absent, or
+    present but rejected by `parse_index_policy` — never falls back to the pull
+    request's. Adopting the incoming branch's copy is exactly the trust
+    direction this function exists to fix. It returns `None` instead, and
+    `_no_policy_in_force` decides what a gate with no policy is allowed to
+    green.
 
     **Before the diff, not after.** The pathspec that decides "this pull
     request changed no roots" is derived from the policy, so resolving it late
@@ -223,14 +235,13 @@ def _base_ref_policy(base_sha: str, *, git: GitPort, files: FilePort) -> IndexPo
     """
     raw = git.file_at(base_sha, INDEX_POLICY_PATH)
     if raw is None:
-        raise ValidationError(
-            f"the base ref has no {INDEX_POLICY_PATH} ({base_sha}). It is the "
-            "deployment's own policy — which paths this gate validates, which "
-            "namespace segments it protects, which registry hosts it admits — and it "
-            "has to be in force on the base branch before a pull request can be judged "
-            "against it. This command will not fall back to the copy the pull request "
-            "itself carries."
+        write_ci_annotation(
+            "notice",
+            "indexbot validate-pr",
+            f"The base ref has no {INDEX_POLICY_PATH} ({base_sha}); this deployment "
+            "has not adopted a policy yet.",
         )
+        return None
     if raw != files.read_bytes(INDEX_POLICY_PATH):
         write_ci_annotation(
             "notice",
@@ -239,7 +250,63 @@ def _base_ref_policy(base_sha: str, *, git: GitPort, files: FilePort) -> IndexPo
             f"under the BASE ref's policy ({base_sha}); the proposed one takes effect "
             "when it merges.",
         )
-    return parse_index_policy(raw)
+    try:
+        return parse_index_policy(raw)
+    except ValidationError as exc:
+        write_ci_annotation(
+            "notice",
+            "indexbot validate-pr",
+            f"The base ref's {INDEX_POLICY_PATH} ({base_sha}) is not a policy this "
+            f"version of the bot can read: {exc}",
+        )
+        return None
+
+
+def _no_policy_in_force(base_sha: str, *, git: GitPort) -> ExitCode:
+    """What this gate may green when the base ref carries no readable policy.
+
+    Two real states reach here, and they want the same answer. A brand-new
+    deployment has not committed `.github/index-policy.json` yet. An existing
+    one is migrating the file across a schema the running bot no longer reads —
+    the pull request that *repairs* the policy is judged under the broken one,
+    so refusing outright would leave direct-push-to-default as the only route,
+    the same inversion `_base_ref_policy` was corrected for.
+
+    So the rule is about what the pull request touches, not whether it touches
+    the policy. Nothing under `p/**` can be judged without a policy: the name
+    prefix, the segment count, the reserved segments and the registry
+    allowlist all come from it. A pull request that changes any of it is
+    refused. One that changes none — every bootstrap and every repair — has
+    nothing for this gate to validate and exits `0`, exactly as a docs-only
+    pull request does.
+
+    The pathspec is deliberately `p/**` rather than `root_glob`: without a
+    policy there is no `name_segments` to build one from, and a CAS object is
+    as unvalidatable here as a root. Widest possible, refuse on any hit.
+
+    This is not the only lock on such a pull request. `cli/classify_pr.py`
+    forces `human-review-required` on any changed path outside `p/**`, so a
+    branch that touches the policy — or anything else off the package tree —
+    cannot reach the machine merge lane whatever this gate returns.
+    """
+    touched = git.changed_package_roots(base_sha, root_glob=_ANY_PACKAGE_PATH)
+    if touched:
+        raise ValidationError(
+            f"the base ref ({base_sha}) carries no {INDEX_POLICY_PATH} this bot can "
+            f"read, and this pull request changes {len(touched)} path(s) under `p/`, "
+            f"starting with {touched[0]}. Nothing under `p/` can be validated without "
+            "a policy — the name prefix, the segment count, the reserved segments and "
+            "the registry allowlist all come from it, and this command will not fall "
+            "back to the copy the pull request itself carries. Land the policy on the "
+            "default branch first, then announce."
+        )
+    write_ci_annotation(
+        "notice",
+        "indexbot validate-pr",
+        "No policy in force on the base ref and no changes under `p/` in this pull "
+        "request - nothing to validate.",
+    )
+    return ExitCode.OK
 
 
 def _materialize_base(
@@ -289,6 +356,8 @@ def run(
     """
     base_sha = _resolve_base_sha(cast("str | None", args.base_sha), os.environ)
     policy = _base_ref_policy(base_sha, git=git, files=files)
+    if policy is None:
+        return _no_policy_in_force(base_sha, git=git)
     paths = git.changed_package_roots(base_sha, root_glob=root_glob(policy.name_segments))
     if not paths:
         write_ci_annotation(

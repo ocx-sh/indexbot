@@ -122,7 +122,17 @@ A pull request may still *propose* a new policy — that file is committed
 rather than a settings-page value precisely so that widening it takes a
 reviewed pull request. Its roots are simply judged under the policy currently
 in force, with a notice saying so, and the proposal takes effect when it
-merges. The command refuses only when the base ref carries no policy at all.
+merges.
+
+When the base ref carries no policy this command can read — a deployment that
+has not adopted one, or one migrating across a schema this version no longer
+parses — there is nothing to judge roots against. It then refuses any pull
+request that changes a path under `p/` (the widest pathspec, CAS objects
+included: without `name_segments` there is no root glob to build, and an
+unvalidatable object is no safer than an unvalidatable root) and exits `0` on
+one that changes none. That keeps the pull request which *adopts or repairs*
+the policy mergeable, instead of making the one file the gate depends on the
+one file only a direct push to the default branch can change.
 
 The diff is `<base>...HEAD` — **three dots**, against the merge base, so a
 branch cut before another pull request merged does not re-validate stale copies

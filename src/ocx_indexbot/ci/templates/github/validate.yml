@@ -105,13 +105,17 @@ jobs:
       #     emptied is the shorter spelling. The command reads that file from
       #     the BASE ref through git and never parses the checkout's copy, so
       #     the pull request may propose any policy it likes and is judged
-      #     under the one in force. It refuses only when the base ref carries
-      #     no policy at all, which is a deployment that has not started yet.
-      #     Refusing every pull request that TOUCHES the file was the first
-      #     shape of this and was wrong: the file is committed rather than a
-      #     settings-page variable precisely so that widening it takes a
-      #     reviewed pull request, and a gate that refused those would leave
-      #     direct-push-to-default as the only way to change it.
+      #     under the one in force. Refusing every pull request that TOUCHES
+      #     the file was the first shape of this and was wrong: the file is
+      #     committed rather than a settings-page variable precisely so that
+      #     widening it takes a reviewed pull request, and a gate that refused
+      #     those would leave direct-push-to-default as the only way to change
+      #     it. When the base ref carries no policy this bot can read — a
+      #     deployment that has not adopted one, or one migrating across a
+      #     schema this version no longer parses — the command refuses any
+      #     pull request that changes anything under `p/` and greens one that
+      #     changes none, so the pull request that adopts or repairs the
+      #     policy is not the one thing this gate makes unmergeable.
       #   * ND-4's reserved-brand carve-out, gated on PR provenance. A segment
       #     this index reserves for itself cannot host the operator's own
       #     first-party roots without it, but granting it unconditionally

@@ -60,12 +60,18 @@ the reserved-namespace carve-out from the request's provenance, and validates.
 It needs **no token**. Give the job no secrets at all; that is the point of
 the lane.
 
-It also refuses to run when `.github/index-policy.json` in the checkout differs
-from the base ref's copy — or when the base ref has none. That file decides
-which paths this lane validates (`name_segments`), which namespace segments it
-protects and which registry hosts it admits, and the lane checks out the
-request's *head*: obeying the incoming branch's copy would let a merge request
-pick the rules it is judged by. Policy changes land on the default branch.
+It reads `.github/index-policy.json` from the **base ref**, never from the
+checkout. That file decides which paths this lane validates (`name_segments`),
+which namespace segments it protects and which registry hosts it admits, and
+the lane checks out the request's *head*: obeying the incoming branch's copy
+would let a merge request pick the rules it is judged by. A merge request may
+still propose a new policy — it is judged under the one in force, with a
+notice saying so, and its proposal takes effect when it merges.
+
+If the base ref carries no policy this version can read, nothing under `p/` is
+judgeable, so the lane refuses any request that changes something there and
+passes one that changes none — which is how the request that adopts or repairs
+the policy stays mergeable.
 
 ```yaml
 # GitHub Actions
