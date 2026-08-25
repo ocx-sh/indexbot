@@ -142,6 +142,54 @@ def test_changed_package_roots_excludes_deletes_but_keeps_type_changes(repo: Pat
     assert changed == ("p/kitware/cmake.json",)
 
 
+def test_the_root_glob_cannot_see_the_package_tree_swapped_for_a_symlink(repo: Path) -> None:
+    """Why `cli/validate_pr._check_package_tree_shape` exists, measured rather
+    than argued.
+
+    Deleting `p/` and committing a symlink under the same name repoints every
+    published package. Git reports one added blob, `p`, plus a delete per file
+    underneath — and `--diff-filter=d` drops the deletes, while `p/*/*.json`
+    describes leaves and never the directory they hang from. So the root glob
+    selects nothing at all, which is the required check going green over the
+    widest change a pull request can make to this tree.
+    """
+    base = _commit(repo, "existing", {"p/kitware/cmake.json": b"{}\n", "elsewhere/x.json": b"{}\n"})
+    _git(repo, "checkout", "-b", "swap")
+    (repo / "p" / "kitware" / "cmake.json").unlink()
+    (repo / "p" / "kitware").rmdir()
+    (repo / "p").rmdir()
+    (repo / "p").symlink_to("elsewhere")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "replace the package tree with a symlink")
+
+    git = LocalGit(repo=repo)
+    assert git.changed_package_roots(base, root_glob=_GLOB) == ()
+    # `p/**` was the policy-less lane's pathspec, chosen as "the widest
+    # possible" — and it is not: git reads a pathspec naming a directory as
+    # matching its contents, so the two agree on everything *inside* the tree
+    # and differ on exactly the path this branch changes.
+    assert git.changed_package_roots(base, root_glob="p/**") == ()
+    assert git.changed_package_roots(base, root_glob="p") == ("p",)
+
+
+def test_the_widest_pathspec_is_a_superset_of_the_root_glob(repo: Path) -> None:
+    """`p` selects the tree and everything in it, so the guard above costs the
+    normal announce nothing: every path it returns for one is deeper than a
+    root, and the guard only refuses what is shallower."""
+    base = _commit(repo, "existing", {"p/kitware/cmake.json": b"{}\n"})
+    _git(repo, "checkout", "-b", "announce")
+    cas = "p/kitware/cmake/o/sha256/" + "a" * 64 + ".json"
+    _commit(
+        repo, "announce", {"p/kitware/cmake.json": b'{"x":1}\n', cas: b"{}\n", "docs/x.md": b"x\n"}
+    )
+
+    git = LocalGit(repo=repo)
+    wide = git.changed_package_roots(base, root_glob="p")
+    assert set(git.changed_package_roots(base, root_glob=_GLOB)) <= set(wide)
+    assert wide == ("p/kitware/cmake.json", cas)
+    assert all(path.count("/") >= 2 for path in wide), "nothing an announce touches is shallow"
+
+
 def test_changed_package_roots_empty_when_the_branch_touches_no_root(repo: Path) -> None:
     """A docs-only PR selects nothing — the caller's "skip validation" case."""
     base = _git(repo, "rev-parse", "HEAD").strip()

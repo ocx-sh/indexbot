@@ -37,12 +37,21 @@ if TYPE_CHECKING:
     from ocx_indexbot.core.policy import IndexPolicy
     from ocx_indexbot.ports import FilePort, GitPort, RegistryPort
 
-_ANY_PACKAGE_PATH: Final[str] = "p/**"
-"""The `:(glob)` pathspec matching every path under the package tree.
+_PACKAGE_TREE: Final[str] = "p"
+"""The `:(glob)` pathspec matching the package tree and everything in it.
 
-`_no_policy_in_force`'s only pathspec. `core/policy.root_glob` cannot be built
-without a `name_segments` to build it from, and this one deliberately selects
-CAS objects too — with no policy in force they are as unjudgeable as a root.
+The widest pathspec this gate has, and both its callers want that width for
+different reasons. `_no_policy_in_force` has no `name_segments` to build
+`core/policy.root_glob` from and must refuse on any hit, CAS objects
+included — with no policy in force they are as unjudgeable as a root.
+`_check_package_tree_shape` needs it because a root glob describes leaves and
+therefore cannot see a change to the tree they hang from.
+
+Deliberately `p` and not `p/**`. Git reads a pathspec naming a directory as
+matching its contents, so the two select the same set for every path *inside*
+the tree — but only `p` also selects `p` itself, and a pull request that
+deletes the directory and commits a symlink in its place changes exactly that
+one path. Under `p/**` that pull request selected nothing at all.
 """
 
 _BASE_SHA_ENV: tuple[str, ...] = ("INDEXBOT_BASE_SHA", "CI_MERGE_REQUEST_DIFF_BASE_SHA")
@@ -280,16 +289,18 @@ def _no_policy_in_force(base_sha: str, *, git: GitPort) -> ExitCode:
     nothing for this gate to validate and exits `0`, exactly as a docs-only
     pull request does.
 
-    The pathspec is deliberately `p/**` rather than `root_glob`: without a
-    policy there is no `name_segments` to build one from, and a CAS object is
-    as unvalidatable here as a root. Widest possible, refuse on any hit.
+    The pathspec is deliberately `_PACKAGE_TREE` rather than `root_glob`:
+    without a policy there is no `name_segments` to build one from, and a CAS
+    object is as unvalidatable here as a root. Widest possible, refuse on any
+    hit — including a hit on `p` itself, which is what a pull request that
+    replaces the whole package tree with a symlink changes.
 
     This is not the only lock on such a pull request. `cli/classify_pr.py`
     forces `human-review-required` on any changed path outside `p/**`, so a
     branch that touches the policy — or anything else off the package tree —
     cannot reach the machine merge lane whatever this gate returns.
     """
-    touched = git.changed_package_roots(base_sha, root_glob=_ANY_PACKAGE_PATH)
+    touched = git.changed_package_roots(base_sha, root_glob=_PACKAGE_TREE)
     if touched:
         raise ValidationError(
             f"the base ref ({base_sha}) carries no {INDEX_POLICY_PATH} this bot can "
@@ -307,6 +318,45 @@ def _no_policy_in_force(base_sha: str, *, git: GitPort) -> ExitCode:
         "request - nothing to validate.",
     )
     return ExitCode.OK
+
+
+def _check_package_tree_shape(base_sha: str, *, git: GitPort, name_segments: int) -> None:
+    """Refuse a pull request that changes the package tree's own shape.
+
+    `core/policy.root_glob` describes package roots — `p/<seg>/…/<pkg>.json`,
+    one `*` per declared segment — so every path it selects is a leaf. The
+    directories those leaves hang from are not paths in that set, and a pull
+    request can change one: delete `p/` (or `p/<ns>/`) and commit a symlink
+    under the same name. Git reports that as one added blob plus a delete per
+    file underneath, and `--diff-filter=d` drops the deletes, so the root glob
+    selects nothing, `validate` runs over nothing, and this required check
+    goes green on a pull request that repoints every published package path.
+    Measured against real git, not inferred.
+
+    So the widest pathspec runs too, and anything it returns that is shallower
+    than a root is a change to a tree position rather than to a package. At
+    `name_segments = 2` a root is `p/<ns>/<pkg>.json` — two slashes — and the
+    two swaps above surface as `p` (none) and `p/<ns>` (one). A CAS object is
+    deeper than its root and never shallower, so no announce trips this.
+
+    Not the only lock: `cli/classify_pr.py` classifies a path of that shape
+    `human-review-required`, so the machine merge lane cannot take such a pull
+    request in any case. The green check was the whole of the defect, and a
+    green check is what a human reads before merging.
+    """
+    shallow = tuple(
+        path
+        for path in git.changed_package_roots(base_sha, root_glob=_PACKAGE_TREE)
+        if path.count("/") < name_segments
+    )
+    if shallow:
+        raise ValidationError(
+            f"this pull request changes the shape of the package tree itself, not a "
+            f"package in it: {', '.join(shallow)}. A path that shallow is a directory "
+            f"position, and replacing one with a file or a symlink repoints every "
+            f"package under it while matching no package-root pathspec. Nothing here "
+            f"is validatable as a root; land the change some other way."
+        )
 
 
 def _materialize_base(
@@ -341,9 +391,11 @@ def run(
     """`indexbot validate-pr [--base-sha SHA] [--offline] [--same-repo-pr | --fork-pr]`.
 
     Resolves the base commit, reads the deployment policy from that ref rather
-    than from the PR-head checkout (`_base_ref_policy`), diffs the base
-    three-dot against `HEAD` through a `:(glob)` pathspec built from the
-    deployment's own `name_segments`, materializes each changed root's
+    than from the PR-head checkout (`_base_ref_policy`), refuses a branch that
+    changes the package tree's own shape rather than a package in it
+    (`_check_package_tree_shape`), diffs the base three-dot against `HEAD`
+    through a `:(glob)` pathspec built from the deployment's own
+    `name_segments`, materializes each changed root's
     base-ref bytes, decides the reserved-namespace carve-out from PR
     provenance, and then runs exactly the validation `indexbot validate` runs
     — `cli/validate.validate_paths`, one implementation, so no rule can hold on
@@ -358,6 +410,7 @@ def run(
     policy = _base_ref_policy(base_sha, git=git, files=files)
     if policy is None:
         return _no_policy_in_force(base_sha, git=git)
+    _check_package_tree_shape(base_sha, git=git, name_segments=policy.name_segments)
     paths = git.changed_package_roots(base_sha, root_glob=root_glob(policy.name_segments))
     if not paths:
         write_ci_annotation(

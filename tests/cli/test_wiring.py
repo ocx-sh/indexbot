@@ -197,6 +197,22 @@ def test_dispatch_registers_exactly_the_fifteen_subcommands() -> None:
     }
 
 
+def test_schema_is_reachable_through_the_shipped_entrypoint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`schema` was the one subcommand no test ever invoked through dispatch.
+
+    Its registration is a plain assignment and `DISPATCH` is copied by value,
+    so the risk is small — but "small" is the argument for every dead
+    entrypoint, and comparing key sets proves the key exists, never that the
+    value behind it runs. This is the one assertion the other twelve have.
+    """
+    assert main_module.main(["schema"]) == int(ExitCode.OK)
+
+    printed = capsys.readouterr().out
+    assert '"$schema"' in printed, "the policy schema itself, not a summary of it"
+
+
 def test_workflows_check_is_wired_to_a_repo_root_file_port(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

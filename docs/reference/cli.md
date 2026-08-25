@@ -41,7 +41,7 @@ indexbot announce --index-repo REPO --package <ns>/<pkg>
 | Flag | Meaning |
 |---|---|
 | `--package` | `<namespace>/<package>` to announce |
-| `--tags` / `--tags-file` | The curated tag list, comma-separated or from a file. Exactly one |
+| `--tags` / `--tags-file` | The **entire** curated tag list, comma-separated or from a file. Exactly one. Not additive — see below |
 | `--out` | Write the root and new CAS objects under this directory. Exactly one of this or `--fork` |
 | `--fork` | The fork to commit to and open a pull request from |
 | `--index-repo` | **Required.** The index repository to announce into — `<owner>/<repo>` on GitHub, a namespace path or numeric project id on GitLab |
@@ -62,6 +62,33 @@ from [deployment policy](policy.md).
 The bot never enumerates a registry. It records the tags it is given, and each
 one is verified: the tag must resolve, and the bytes stored at
 `o/sha256/<hex>.json` must hash to the digest in their own path.
+
+!!! warning "`--tags` replaces the curated set — it does not add to it"
+
+    Every run writes the root's `tags` map from the list this run was given.
+    A tag the root already carries and this run does not name is **dropped**,
+    which is how a tag removed upstream leaves the index at all.
+
+    So the shape a pipeline reaches for first — one `announce` per tag push,
+    naming only the tag that was just pushed — publishes that tag and deletes
+    every other one the package had:
+
+    ```bash
+    # WRONG: the root now carries 3.31.1 and nothing else.
+    indexbot announce --package kitware/cmake --tags "$CI_COMMIT_TAG" --fork …
+    ```
+
+    Pass every tag that should survive, every time. Where that list lives is
+    the publisher's to decide — `--tags-file` exists so it can be a committed
+    file rather than a shell variable:
+
+    ```bash
+    indexbot announce --package kitware/cmake --tags-file tags.txt --fork …
+    ```
+
+    Yanking is the other direction and is not this: `--yank` marks a tag
+    without removing it, and the marker survives a re-announce that still
+    names the tag (G-05).
 
 ## `validate`
 

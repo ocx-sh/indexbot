@@ -68,6 +68,7 @@ import sys
 from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.cli.classify_pr import classify_pull_request
+from ocx_indexbot.core.diff import ChangeClass
 from ocx_indexbot.core.maintainers import parse_maintainers
 from ocx_indexbot.core.policy import AutoMerge, IndexPolicy
 from ocx_indexbot.core.validate_entry import parse_package_root
@@ -132,7 +133,11 @@ def _author_owns_every_touched_package(
 
 
 def _disposition(
-    change_class: str, *, author_is_owner: bool, approver: str | None, auto_merge: AutoMerge
+    change_class: ChangeClass,
+    *,
+    author_is_owner: bool,
+    approver: str | None,
+    auto_merge: AutoMerge,
 ) -> tuple[CommitStatusState, str]:
     """`(state, description)`. Never `failure`: a PR that needs a human has
     not gone wrong, so the gate stays `pending` until one arrives.
@@ -251,7 +256,7 @@ def _assign_reviewers_and_comment(github: ForgePort, info: PullRequestInfo, *, r
 
 
 def gate_pull_request(
-    info: PullRequestInfo, change_class: str, github: ForgePort, *, policy: IndexPolicy
+    info: PullRequestInfo, change_class: ChangeClass, github: ForgePort, *, policy: IndexPolicy
 ) -> CommitStatusState:
     """Decide, publish the commit status, and assign review if one is needed.
 
