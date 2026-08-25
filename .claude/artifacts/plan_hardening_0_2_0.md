@@ -2,9 +2,11 @@
 
 ## Status
 
-- **State:** executing
-- **Round:** 1 (hex-review high-tier panel + live e2e, 2026-08-25)
-- **Next:** `/hex-execute` this file
+- **State:** done
+- **Round:** 5 (hex-review security panel on `v0.2.0..v0.3.0`, 2026-08-25)
+- **Shipped:** `v0.2.0` → `v0.2.1` → `v0.2.2` → `v0.3.0`, each release a defect
+  the live deployments found rather than a plan item
+- **Next:** none — see "What the live run found" below
 
 ## Where this came from
 
@@ -267,3 +269,38 @@ order, `task verify` after every merge.
 
 WP1–WP4 are file-disjoint and launch together. WP5 rewrites the command surface
 WP6 documents, so the docs wave follows it rather than racing it.
+
+
+## What the live run found (2026-08-25)
+
+Four releases in one day, because running the thing is a different test from
+reading it. Every one of these was found by a real deployment, not by review:
+
+| Release | Defect | Found by |
+|---|---|---|
+| `0.2.1` | The GitLab governance poll ended on a 400 re-posting a commit status it had already posted — the listing endpoint it consulted is not scoped by the ref the POST carried | The scheduled poll on `michael-herwig/e2e-indexbot-index`, MR !6 |
+| `0.2.1` | `validate-pr` refused any pull request whose `.github/index-policy.json` differed from the base ref's, inverting the control that keeps the file committed rather than a settings-page value | `ocx-sh/index#735` — the switchover PR failed its own gate |
+| `0.2.2` | The base-ref policy read refused a base ref carrying no *readable* policy, so the v1→v2 migration PR refused itself and left direct-push-to-default as the only route | `ocx-sh/index#735` again, one fix later |
+| `0.3.0` | A pull request reclassified between sweeps kept its previous lane label; MR !6 merged as `refresh` still carrying `human-review-required` | The live GitLab lane |
+| `0.3.0` | `workflows-check` audited GitHub only, on a release whose thesis is forge parity | Noticed while auditing the e2e index by hand |
+| — | `oven/bun:1-alpine` unpinned in the e2e index's own root pipeline | GL-01, the first time it ran |
+
+### Scenarios proven live
+
+Against `michael-herwig/e2e-indexbot-{app,index,fork}` on gitlab.com:
+
+- Announce from a tag pipeline → fork commit over the API → merge request
+  against the parent, on a **spent** fork branch whose previous merge request
+  had already merged. Handled: the branch was rebuilt from the index's current
+  main, not stacked on the stale tip.
+- Registry `registry.gitlab.com`, prefix `e2e.ocx.sh` — neither one anything an
+  OCX deployment allowlists or serves.
+- The fork merge request's pipeline, then the parent's **scheduled** poll
+  classifying it `refresh`, posting the external commit status, arming
+  auto-merge, and the merge landing.
+- Pages serving a valid wire tree: `/config.json`, `/c/index.json`,
+  `/p/e2e/app.json` with all three announced tags.
+- **Q3, deferred from WP-0 and measured here** — with a stronger result than
+  the claim: see `research_gitlab_gate.md`. A protected parent variable is
+  absent from a merge-request pipeline *even when GitLab runs that pipeline in
+  the parent project*, because protection is a property of the ref.
