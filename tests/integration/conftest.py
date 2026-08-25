@@ -42,5 +42,5 @@ def index_tree(tmp_path: Path) -> Path:
     # the shipped policy end to end.
     policy = root / INDEX_POLICY_PATH
     policy.parent.mkdir(parents=True, exist_ok=True)
-    policy.write_bytes(b'{"registry_hosts": ["ghcr.io"]}\n')
+    policy.write_bytes(b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["ghcr.io"]}\n')
     return root

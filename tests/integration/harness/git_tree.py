@@ -107,7 +107,7 @@ def build_git_tree(root: Path, spec: Mapping[str, PackageSpec]) -> None:
     registry serves for each announced tag.
     """
     for package_id_str, package in spec.items():
-        package_id = parse_package_id(package_id_str)
+        package_id = parse_package_id(package_id_str, name_segments=2)
         oracle = _ManifestOracle(
             manifests={
                 (package.repository, tag): manifest for tag, manifest in package.tags.items()
@@ -118,9 +118,7 @@ def build_git_tree(root: Path, spec: Mapping[str, PackageSpec]) -> None:
             observation = observe_one_tag(package.repository, tag, oracle)
             if observation is None:
                 raise ValueError(f"manifest for {package_id_str}@{tag} did not resolve")
-            relpath = cas_relpath(
-                package_id.namespace, package_id.package, observation.content_digest, "json"
-            )
+            relpath = cas_relpath(package_id, observation.content_digest, "json")
             # Verbatim: the registry's own bytes, never a re-encoding of them.
             _write(root / relpath, observation.raw)
             tag_entries[tag] = TagEntry(
@@ -128,7 +126,7 @@ def build_git_tree(root: Path, spec: Mapping[str, PackageSpec]) -> None:
             )
 
         package_root = PackageRoot(
-            name=f"ocx.sh/{package_id.namespace}/{package_id.package}",
+            name=f"ocx.sh/{package_id}",
             repository=package.repository,
             owners=package.owners,
             status=package.status,
@@ -138,6 +136,6 @@ def build_git_tree(root: Path, spec: Mapping[str, PackageSpec]) -> None:
             tags=tag_entries,
         )
         _write(
-            root / f"p/{package_id.namespace}/{package_id.package}.json",
+            root / f"p/{package_id}.json",
             serialize_package_root(package_root),
         )

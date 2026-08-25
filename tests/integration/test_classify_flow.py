@@ -71,6 +71,8 @@ def _pr_payload() -> dict[str, object]:
         "base": {"sha": _BASE_SHA},
         "head": {"sha": _HEAD_SHA},
         "user": {"login": _OWNER.github, "id": _OWNER.github_id},
+        "updated_at": "2026-07-17T00:00:00Z",
+        "labels": [],
     }
 
 
@@ -86,6 +88,30 @@ def _setup_env(monkeypatch: pytest.MonkeyPatch, forge: FakeForgeServer, output_f
     )
 
 
+_POLICY_SEGMENTS = ("contents", ".github", "index-policy.json")
+_POLICY_BYTES = (
+    b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["ghcr.io"], '
+    b'"reserved_namespaces": ["ocx", "ocx-sh", "ocx-contrib", "ocx-rs"]}\n'
+)
+
+
+def _stub_policy(forge: FakeForgeServer) -> None:
+    """Serve `.github/index-policy.json` at `main`.
+
+    The privileged subcommands read the deployment's identity there, over the
+    API and from the BASE ref — they never check the repository out, and must
+    not take the PR head's copy: a fork that could declare its own
+    `name_segments` would be choosing how its own diff is classified.
+    """
+    encoded = base64.b64encode(_POLICY_BYTES).decode("ascii")
+    forge.stub_json(
+        "GET",
+        forge.repo_path(*_POLICY_SEGMENTS),
+        {"content": encoded, "encoding": "base64"},
+        params={"ref": "main"},
+    )
+
+
 def _stub_pr(
     forge: FakeForgeServer,
     *,
@@ -93,6 +119,7 @@ def _stub_pr(
     head_root: PackageRoot,
     changed_paths: tuple[str, ...],
 ) -> None:
+    _stub_policy(forge)
     forge.stub_json("GET", forge.repo_path("pulls", str(_PR_NUMBER)), _pr_payload())
     forge.stub_json(
         "GET",

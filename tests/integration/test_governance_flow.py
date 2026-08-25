@@ -70,12 +70,49 @@ def _contents(raw: bytes) -> dict[str, str]:
     return {"content": base64.b64encode(raw).decode("ascii"), "encoding": "base64"}
 
 
+_POLICY_SEGMENTS = ("contents", ".github", "index-policy.json")
+_POLICY_BYTES = (
+    b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["ghcr.io"], '
+    b'"reserved_namespaces": ["ocx", "ocx-sh", "ocx-contrib", "ocx-rs"]}\n'
+)
+
+
+def _stub_policy(forge: FakeForgeServer) -> None:
+    """Serve `.github/index-policy.json` at `main`.
+
+    The privileged subcommands read the deployment's identity there, over the
+    API and from the BASE ref — they never check the repository out, and must
+    not take the PR head's copy: a fork that could declare its own
+    `name_segments` would be choosing how its own diff is classified.
+    """
+    encoded = base64.b64encode(_POLICY_BYTES).decode("ascii")
+    forge.stub_json(
+        "GET",
+        forge.repo_path(*_POLICY_SEGMENTS),
+        {"content": encoded, "encoding": "base64"},
+        params={"ref": "main"},
+    )
+
+
+def _approval(login: str, uid: int, commit_id: str) -> dict[str, object]:
+    """One GitHub review payload. Both identity fields are present because the
+    adapter must take the numeric one — see
+    `test_a_recycled_maintainer_login_does_not_release_the_human_lane`."""
+    return {"user": {"login": login, "id": uid}, "state": "APPROVED", "commit_id": commit_id}
+
+
 def _pr_payload(*, login: str, uid: int) -> dict[str, object]:
     return {
         "base": {"sha": _BASE_SHA},
         "head": {"sha": _HEAD_SHA},
         "user": {"login": login, "id": uid},
+        "updated_at": "2026-07-17T00:00:00Z",
+        "labels": [],
     }
+
+
+_SELF_ID = 1001
+_USER_PATH = "/user"
 
 
 def _setup_forge(
@@ -85,7 +122,13 @@ def _setup_forge(
     uid: int,
     base_root: PackageRoot | None,
     head_root: PackageRoot,
+    approvals: list[dict[str, object]] | None = None,
 ) -> None:
+    _stub_policy(forge)
+    # `GET /user` — the token identity `create_comment` matches a marked
+    # comment against. A PAT answers it; the installation token a workflow's
+    # `GITHUB_TOKEN` is answers 403, which the adapter's own suite covers.
+    forge.stub_json("GET", _USER_PATH, {"id": _SELF_ID, "login": "indexbot"})
     forge.stub_json(
         "GET", forge.repo_path("pulls", str(_PR_NUMBER)), _pr_payload(login=login, uid=uid)
     )
@@ -105,6 +148,7 @@ def _setup_forge(
         _contents(serialize_package_root(head_root)),
         params={"ref": _HEAD_SHA},
     )
+    forge.stub_json("GET", forge.repo_path("pulls", str(_PR_NUMBER), "reviews"), approvals or [])
     forge.stub_json("POST", forge.repo_path("statuses", _HEAD_SHA), {}, status=200)
     forge.stub_json(
         "GET",
@@ -134,9 +178,17 @@ def _setup_env(monkeypatch: pytest.MonkeyPatch, forge: FakeForgeServer, output_f
 
 
 def _assert_only_repo_paths(forge: FakeForgeServer) -> None:
+    """Every request stays on this repository's own API surface.
+
+    `/user` is the one deliberate exception: it is the token asking who it
+    is, carries no repository scope, and is what keeps `create_comment` from
+    adopting a comment somebody else wrote (`adapters/github_api.
+    _is_repo_side_author`). Named explicitly rather than prefix-matched, so a
+    new off-repo path still has to be argued for here.
+    """
     expected_prefix = forge.repo_path()
     for _method, path in forge.requests:
-        assert path.startswith(expected_prefix), path
+        assert path == _USER_PATH or path.startswith(expected_prefix), path
 
 
 def _run(
@@ -148,10 +200,18 @@ def _run(
     uid: int,
     base_root: PackageRoot | None,
     head_root: PackageRoot,
+    approvals: list[dict[str, object]] | None = None,
 ) -> str:
     output_file = tmp_path / "github_output.txt"
     _setup_env(monkeypatch, forge, output_file)
-    _setup_forge(forge, login=login, uid=uid, base_root=base_root, head_root=head_root)
+    _setup_forge(
+        forge,
+        login=login,
+        uid=uid,
+        base_root=base_root,
+        head_root=head_root,
+        approvals=approvals,
+    )
 
     exit_code = main(["governance-check", "--pr-number", str(_PR_NUMBER)])
 
@@ -229,3 +289,95 @@ def test_new_package_is_pending_human_lane(
     assert "pending" in output
     assert _reviewers_requested(fake_forge)
     assert _comment_posted(fake_forge)
+
+
+def test_a_maintainers_approval_releases_the_human_lane(
+    fake_forge: FakeForgeServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The human lane's only exit, and the reason it has to exist: on a forge
+    where the commit status IS the merge gate, a `pending` nobody can turn
+    green is not a stalled merge request but a permanently unmergeable one.
+
+    `carol` is the committed maintainer; `alice` opened the PR. The approval
+    is recorded against this PR's current head, which is what makes it an
+    approval of *this* revision rather than of something that used to be here.
+    """
+    output = _run(
+        monkeypatch,
+        fake_forge,
+        tmp_path,
+        login=_OWNER.github,
+        uid=_OWNER.github_id,
+        base_root=None,
+        head_root=_root(tags={}),
+        approvals=[_approval("carol", 99, _HEAD_SHA)],
+    )
+
+    assert "success" in output
+
+
+def test_a_stale_approval_does_not_release_the_human_lane(
+    fake_forge: FakeForgeServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """GitHub records the commit a review was left on, so an approval of an
+    earlier push is not an approval of what would merge now. The whole point
+    of the release is that a person looked at *these* bytes."""
+    output = _run(
+        monkeypatch,
+        fake_forge,
+        tmp_path,
+        login=_OWNER.github,
+        uid=_OWNER.github_id,
+        base_root=None,
+        head_root=_root(tags={}),
+        approvals=[_approval("carol", 99, "older-push")],
+    )
+
+    assert "pending" in output
+
+
+def test_a_recycled_maintainer_login_does_not_release_the_human_lane(
+    fake_forge: FakeForgeServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The committed maintainer is `carol`, `github_id: 99`. The approval below
+    is left by an account that *calls itself* `carol` and is somebody else —
+    which is what a GitHub login rename plus a re-registration of the freed
+    name produces, with no action by anyone on this repository.
+
+    Matching the approval by login would release the human lane for a
+    stranger, and an approval outranks every disposition including
+    `governance.auto_merge = never`. Matching by `github_id` — the same field
+    `owners[]` binds on for G-19 — leaves the lane exactly where it was.
+    """
+    output = _run(
+        monkeypatch,
+        fake_forge,
+        tmp_path,
+        login=_OWNER.github,
+        uid=_OWNER.github_id,
+        base_root=None,
+        head_root=_root(tags={}),
+        approvals=[_approval("carol", 4242, _HEAD_SHA)],
+    )
+
+    assert "pending" in output
+
+
+def test_an_approval_from_outside_the_maintainer_list_is_not_a_review(
+    fake_forge: FakeForgeServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`carol` is the only committed maintainer. Anyone else approving —
+    the author included, which is the case that would make the human lane a
+    formality — leaves the lane exactly where it was."""
+    output = _run(
+        monkeypatch,
+        fake_forge,
+        tmp_path,
+        login=_OWNER.github,
+        uid=_OWNER.github_id,
+        base_root=None,
+        head_root=_root(tags={}),
+        approvals=[_approval(_OWNER.github, _OWNER.github_id, _HEAD_SHA)],
+    )
+
+    assert "pending" in output

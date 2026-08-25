@@ -2,7 +2,7 @@
 (CONTRACTS.md §12; ADR-4 BD-5, G-04/G-05).
 
 Reads the PR's changed-file list and diff *via the GitHub API only*
-(`GitHubPort.get_pull_request_info`) — this module never checks out the PR
+(`ForgePort.get_pull_request_info`) — this module never checks out the PR
 head, matching `governance-gate`'s `pull_request_target` trust boundary
 (`.github/workflows/governance.yml`'s own top-of-file commentary; ADR-4 BD-5).
 
@@ -11,7 +11,7 @@ because `cli/governance_check.py` needs the exact same worst-classification-
 wins aggregate to decide its own commit-status disposition, and
 `governance.yml` invokes `indexbot governance-check` as a *separate* process
 from `indexbot classify-pr` (no shared in-memory state, and no
-`GitHubPort.get_labels`-shaped method exists on `ports.GitHubPort` to read
+`ForgePort.get_labels`-shaped method exists on `ports.ForgePort` to read
 `classify-pr`'s label back) — re-deriving via the same pure aggregation
 function is the boring, single-source-of-truth option (CONTRACTS.md §13 item
 6's open question), not a second hand-rolled copy of G-04/G-05's diff logic.
@@ -23,16 +23,18 @@ import re
 from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.core.diff import ChangeClass, classify_change
+from ocx_indexbot.core.grammar import package_id_max_length
+from ocx_indexbot.core.policy import IndexPolicy
 from ocx_indexbot.core.validate_entry import parse_package_root
 from ocx_indexbot.exit_codes import ExitCode
 
-from ._common import write_github_output
+from ._common import write_ci_output
 
 if TYPE_CHECKING:
     import argparse
 
     from ocx_indexbot.model import PullRequestInfo
-    from ocx_indexbot.ports import GitHubPort
+    from ocx_indexbot.ports import ForgePort
 
 _SEVERITY: Final[dict[ChangeClass, int]] = {
     "refresh": 0,
@@ -43,11 +45,19 @@ _SEVERITY: Final[dict[ChangeClass, int]] = {
 one refresh-class and one new-package-class, classifies as `new-package`
 overall — the most conservative disposition among every changed root wins."""
 
-_CAS_PATH_MAX_LENGTH: Final[int] = 256
-"""Length cap applied before the hex `fullmatch` below (BD-4's untrusted-input
-order: cap first, then regex). The longest legitimate CAS path is 221 chars —
-`p/` + a 39-char namespace + `/` + a 100-char package + `/o/sha256/` + 64 hex
-+ `.` + a 4-char extension (ADR-2 ND-3's segment caps)."""
+
+def _cas_path_max_length(name_segments: int) -> int:
+    """`p/` + the package id + `/o/sha256/` + 64 hex + `.` + a 4-char
+    extension. Derived from the declared depth rather than fixed at the
+    two-segment 256, so BD-4's cap-before-regex order still has something to
+    cap against on an index that nests deeper."""
+    return len("p/") + package_id_max_length(name_segments) + len("/o/sha256/") + 64 + 1 + 4
+
+
+_LEGACY_CAS_PATH_MAX_LENGTH: Final[int] = 256
+"""The two-segment value this module used before 0.2.0 made depth
+configuration: 221 legitimate characters, rounded up. Kept only as the
+documented reference point for `_cas_path_max_length` above."""
 
 _CAS_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[a-f0-9]{64}")
 
@@ -70,8 +80,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _is_package_root_path(path: str) -> bool:
-    """True iff `path` is a `p/<namespace>/<package>.json` root path —
+def _is_package_root_path(path: str, *, name_segments: int) -> bool:
+    """True iff `path` is a `p/<segments>.json` root path —
     excludes CAS objects (`p/<ns>/<pkg>/o/sha256/<hex>.json`, one level
     deeper) and anything outside `p/` entirely. Mirrors the shape check
     `cli/validate.py`'s `_package_id_from_root_path` and
@@ -79,12 +89,12 @@ def _is_package_root_path(path: str) -> bool:
     their own call site (CONTRACTS.md's established per-module convention,
     not extracted into a shared helper here either)."""
     parts = path.split("/")
-    return len(parts) == 3 and parts[0] == "p" and parts[2].endswith(".json")
+    return len(parts) == name_segments + 1 and parts[0] == "p" and parts[-1].endswith(".json")
 
 
-def _cas_owner_root_path(path: str) -> str | None:
-    """The `p/<ns>/<pkg>.json` root that owns `path`, if `path` is a
-    `p/<ns>/<pkg>/o/sha256/<64-hex>.<ext>` package-local CAS object — else
+def _cas_owner_root_path(path: str, *, name_segments: int) -> str | None:
+    """The `p/<segments>.json` root that owns `path`, if `path` is a
+    `p/<segments>/o/sha256/<64-hex>.<ext>` package-local CAS object — else
     `None`.
 
     Hand-rolled shape check, same per-module convention as
@@ -93,19 +103,24 @@ def _cas_owner_root_path(path: str) -> str | None:
     diff entry lands on the caller's conservative branch instead of crashing
     the classifier.
     """
-    if len(path) > _CAS_PATH_MAX_LENGTH:
+    if len(path) > _cas_path_max_length(name_segments):
         return None
     parts = path.split("/")
-    if len(parts) != 6 or parts[0] != "p" or parts[3] != "o" or parts[4] != "sha256":
+    if (
+        len(parts) != name_segments + 4
+        or parts[0] != "p"
+        or parts[name_segments + 1] != "o"
+        or parts[name_segments + 2] != "sha256"
+    ):
         return None
-    hex_digest, _, extension = parts[5].partition(".")
+    hex_digest, _, extension = parts[-1].partition(".")
     if extension not in _CAS_EXTENSIONS or _CAS_HEX_RE.fullmatch(hex_digest) is None:
         return None
-    return f"p/{parts[1]}/{parts[2]}.json"
+    return "p/" + "/".join(parts[1 : name_segments + 1]) + ".json"
 
 
 def _every_path_in_refresh_scope(
-    changed_paths: tuple[str, ...], root_paths: frozenset[str]
+    changed_paths: tuple[str, ...], root_paths: frozenset[str], *, name_segments: int
 ) -> bool:
     """True iff every changed path is one of `root_paths` itself or a CAS
     object belonging to one of those exact packages — i.e. the diff contains
@@ -117,11 +132,12 @@ def _every_path_in_refresh_scope(
     scope — package-local CAS is only in scope alongside its own root.
     """
     return all(
-        path in root_paths or _cas_owner_root_path(path) in root_paths for path in changed_paths
+        path in root_paths or _cas_owner_root_path(path, name_segments=name_segments) in root_paths
+        for path in changed_paths
     )
 
 
-def _classify_one_root(github: GitHubPort, path: str, info: PullRequestInfo) -> ChangeClass:
+def _classify_one_root(github: ForgePort, path: str, info: PullRequestInfo) -> ChangeClass:
     base_raw = github.get_file_contents(path, info.base_sha)
     head_raw = github.get_file_contents(path, info.head_sha)
     if head_raw is None:
@@ -135,7 +151,9 @@ def _classify_one_root(github: GitHubPort, path: str, info: PullRequestInfo) -> 
     return classify_change(before, after)
 
 
-def classify_pull_request(info: PullRequestInfo, github: GitHubPort) -> ChangeClass:
+def classify_pull_request(
+    info: PullRequestInfo, github: ForgePort, *, policy: IndexPolicy
+) -> ChangeClass:
     """Worst-classification-wins aggregate across every
     `p/<namespace>/<package>.json` root in `info.changed_paths`
     (CONTRACTS.md §12).
@@ -154,10 +172,16 @@ def classify_pull_request(info: PullRequestInfo, github: GitHubPort) -> ChangeCl
     owner of one package attach arbitrary repository content to a
     refresh-classified PR and ride `governance.yml`'s `gh pr merge --auto`.
     """
-    root_paths = [path for path in info.changed_paths if _is_package_root_path(path)]
+    root_paths = [
+        path
+        for path in info.changed_paths
+        if _is_package_root_path(path, name_segments=policy.name_segments)
+    ]
     if not root_paths:
         return "human-review-required"
-    if not _every_path_in_refresh_scope(info.changed_paths, frozenset(root_paths)):
+    if not _every_path_in_refresh_scope(
+        info.changed_paths, frozenset(root_paths), name_segments=policy.name_segments
+    ):
         return "human-review-required"
     worst: ChangeClass = "refresh"
     for path in root_paths:
@@ -167,14 +191,14 @@ def classify_pull_request(info: PullRequestInfo, github: GitHubPort) -> ChangeCl
     return worst
 
 
-def run(args: argparse.Namespace, *, github: GitHubPort) -> ExitCode:
+def run(args: argparse.Namespace, *, github: ForgePort, policy: IndexPolicy) -> ExitCode:
     """`indexbot classify-pr --pr-number <n>` entry point. See module
     docstring for the pipeline; `classify_pull_request` is this module's
     reusable core, `cli/governance_check.py`'s only import from here."""
     pr_number = cast(int, args.pr_number)
     info = github.get_pull_request_info(pr_number)
-    classification = classify_pull_request(info, github)
+    classification = classify_pull_request(info, github, policy=policy)
 
     github.add_labels(pr_number, [classification])
-    write_github_output("classification", classification)
+    write_ci_output("classification", classification)
     return ExitCode.OK

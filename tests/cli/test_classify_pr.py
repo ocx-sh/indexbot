@@ -8,7 +8,7 @@ import pytest
 from ocx_indexbot.cli import classify_pr
 from ocx_indexbot.core.validate_entry import serialize_package_root
 from ocx_indexbot.model import Owner, PackageRoot, PullRequestInfo, TagEntry, Yank
-from tests.fakes import FakeGitHub
+from tests.fakes import FakeGitHub, make_policy
 
 _OWNER = Owner(github="alice", github_id=1)
 _OTHER_OWNER = Owner(github="bob", github_id=2)
@@ -83,7 +83,7 @@ def test_new_package_root_added_with_no_base_file() -> None:
         head_files={_ROOT_PATH: _root()},
     )
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "new-package"
+    assert classify_pr.classify_pull_request(info, github, policy=make_policy()) == "new-package"
 
 
 def test_refresh_when_only_tags_change() -> None:
@@ -93,7 +93,7 @@ def test_refresh_when_only_tags_change() -> None:
         changed_paths=(_ROOT_PATH,), base_files={_ROOT_PATH: before}, head_files={_ROOT_PATH: after}
     )
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "refresh"
+    assert classify_pr.classify_pull_request(info, github, policy=make_policy()) == "refresh"
 
 
 def test_human_review_required_when_owners_change() -> None:
@@ -103,7 +103,10 @@ def test_human_review_required_when_owners_change() -> None:
         changed_paths=(_ROOT_PATH,), base_files={_ROOT_PATH: before}, head_files={_ROOT_PATH: after}
     )
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "human-review-required"
+    assert (
+        classify_pr.classify_pull_request(info, github, policy=make_policy())
+        == "human-review-required"
+    )
 
 
 def test_human_review_required_when_a_tag_is_yanked() -> None:
@@ -121,7 +124,10 @@ def test_human_review_required_when_a_tag_is_yanked() -> None:
         changed_paths=(_ROOT_PATH,), base_files={_ROOT_PATH: before}, head_files={_ROOT_PATH: after}
     )
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "human-review-required"
+    assert (
+        classify_pr.classify_pull_request(info, github, policy=make_policy())
+        == "human-review-required"
+    )
 
 
 def test_deleted_root_is_human_review_required() -> None:
@@ -130,7 +136,10 @@ def test_deleted_root_is_human_review_required() -> None:
         changed_paths=(_ROOT_PATH,), base_files={_ROOT_PATH: before}, head_files={_ROOT_PATH: None}
     )
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "human-review-required"
+    assert (
+        classify_pr.classify_pull_request(info, github, policy=make_policy())
+        == "human-review-required"
+    )
 
 
 def test_no_changed_package_roots_is_human_review_required() -> None:
@@ -138,7 +147,10 @@ def test_no_changed_package_roots_is_human_review_required() -> None:
         changed_paths=(".github/workflows/validate.yml",), base_files={}, head_files={}
     )
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "human-review-required"
+    assert (
+        classify_pr.classify_pull_request(info, github, policy=make_policy())
+        == "human-review-required"
+    )
 
 
 def test_cas_object_path_is_excluded_from_root_shape() -> None:
@@ -147,7 +159,10 @@ def test_cas_object_path_is_excluded_from_root_shape() -> None:
     info = github.get_pull_request_info(1)
     # No genuine root path in the diff -> conservative default, not a crash
     # trying to parse the CAS object as a root.
-    assert classify_pr.classify_pull_request(info, github) == "human-review-required"
+    assert (
+        classify_pr.classify_pull_request(info, github, policy=make_policy())
+        == "human-review-required"
+    )
 
 
 # --- refresh-scope path allowlist (ADR-6 FP-5) ------------------------------
@@ -177,7 +192,7 @@ _OWN_CAS_PATHS = (
 def test_refresh_survives_its_own_packages_cas_objects() -> None:
     github = _refresh_pr((_ROOT_PATH, *_OWN_CAS_PATHS))
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "refresh"
+    assert classify_pr.classify_pull_request(info, github, policy=make_policy()) == "refresh"
 
 
 _OUT_OF_SCOPE_EXTRAS = [
@@ -199,7 +214,10 @@ _OUT_OF_SCOPE_EXTRAS = [
 def test_out_of_scope_path_forces_human_review(extra_path: str) -> None:
     github = _refresh_pr((_ROOT_PATH, extra_path))
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "human-review-required"
+    assert (
+        classify_pr.classify_pull_request(info, github, policy=make_policy())
+        == "human-review-required"
+    )
 
 
 # --- worst-classification-wins aggregation ----------------------------------
@@ -217,7 +235,7 @@ def test_worst_wins_refresh_and_new_package_yields_new_package() -> None:
         },
     )
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "new-package"
+    assert classify_pr.classify_pull_request(info, github, policy=make_policy()) == "new-package"
 
 
 def test_worst_wins_new_package_and_human_review_yields_human_review() -> None:
@@ -232,7 +250,10 @@ def test_worst_wins_new_package_and_human_review_yields_human_review() -> None:
         },
     )
     info = github.get_pull_request_info(1)
-    assert classify_pr.classify_pull_request(info, github) == "human-review-required"
+    assert (
+        classify_pr.classify_pull_request(info, github, policy=make_policy())
+        == "human-review-required"
+    )
 
 
 # --- run() -------------------------------------------------------------------
@@ -249,7 +270,7 @@ def test_run_applies_label_and_writes_output(
         changed_paths=(_ROOT_PATH,), base_files={_ROOT_PATH: before}, head_files={_ROOT_PATH: after}
     )
 
-    result = classify_pr.run(_args(pr_number=1), github=github)
+    result = classify_pr.run(_args(pr_number=1), github=github, policy=make_policy())
 
     assert result == classify_pr.ExitCode.OK
     assert github.labels[1] == ["refresh"]
@@ -261,4 +282,4 @@ def test_run_applies_label_and_writes_output(
 def test_run_missing_pull_request_propagates_key_error() -> None:
     github = FakeGitHub()
     with pytest.raises(KeyError):
-        classify_pr.run(_args(pr_number=99), github=github)
+        classify_pr.run(_args(pr_number=99), github=github, policy=make_policy())
