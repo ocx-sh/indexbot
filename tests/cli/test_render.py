@@ -14,7 +14,7 @@ from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import Owner, PackageRoot, TagEntry
 from ocx_indexbot.ports import FilePort
-from tests.fakes import InMemoryFiles
+from tests.fakes import InMemoryFiles, make_policy
 
 _DIGEST = f"sha256:{'a' * 64}"
 
@@ -24,6 +24,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "index_dir": "",
         "out": "dist",
         "check": False,
+        "allow_empty": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -85,7 +86,7 @@ def test_writes_dist_files() -> None:
     before = set(files.files)
     hex_digest = _DIGEST.removeprefix("sha256:")
 
-    result = run(_args(out="dist"), files=files)
+    result = run(_args(out="dist"), files=files, policy=make_policy())
 
     assert result == ExitCode.OK
     assert set(files.files) - before == {
@@ -101,7 +102,7 @@ def test_tolerates_trailing_slash_on_out() -> None:
     files = InMemoryFiles()
     _seed_source(files)
 
-    result = run(_args(out="dist/"), files=files)
+    result = run(_args(out="dist/"), files=files, policy=make_policy())
 
     assert result == ExitCode.OK
     assert files.exists("dist/config.json")
@@ -110,10 +111,10 @@ def test_tolerates_trailing_slash_on_out() -> None:
 def test_check_mode_clean_when_tree_already_matches_and_writes_nothing() -> None:
     files = InMemoryFiles()
     _seed_source(files)
-    run(_args(), files=files)
+    run(_args(), files=files, policy=make_policy())
     snapshot = dict(files.files)
 
-    result = run(_args(check=True), files=files)
+    result = run(_args(check=True), files=files, policy=make_policy())
 
     assert result == ExitCode.OK
     assert files.files == snapshot
@@ -123,7 +124,7 @@ def test_check_mode_drifted_when_out_tree_missing() -> None:
     files = InMemoryFiles()
     _seed_source(files)  # source present, dist never written
 
-    result = run(_args(check=True), files=files)
+    result = run(_args(check=True), files=files, policy=make_policy())
 
     assert result == ExitCode.VALIDATION_FAILURE
 
@@ -131,10 +132,10 @@ def test_check_mode_drifted_when_out_tree_missing() -> None:
 def test_check_mode_drifted_when_dist_content_mismatched() -> None:
     files = InMemoryFiles()
     _seed_source(files)
-    run(_args(), files=files)
+    run(_args(), files=files, policy=make_policy())
     files.write_text("dist/config.json", "{}")  # stale content vs. the current plan
 
-    result = run(_args(check=True), files=files)
+    result = run(_args(check=True), files=files, policy=make_policy())
 
     assert result == ExitCode.VALIDATION_FAILURE
 
@@ -142,12 +143,12 @@ def test_check_mode_drifted_when_dist_content_mismatched() -> None:
 def test_check_mode_drifted_when_orphan_file_present() -> None:
     files = InMemoryFiles()
     _seed_source(files)
-    run(_args(), files=files)
+    run(_args(), files=files, policy=make_policy())
     # A CAS blob the current plan no longer produces (e.g. left over from a
     # previous render before its tag was repointed) -- extra, not missing.
     files.write_text("dist/p/kitware/cmake/o/sha256/" + "b" * 64 + ".json", "{}")
 
-    result = run(_args(check=True), files=files)
+    result = run(_args(check=True), files=files, policy=make_policy())
 
     assert result == ExitCode.VALIDATION_FAILURE
 
@@ -156,7 +157,7 @@ def test_index_dir_prefix_is_respected() -> None:
     files = InMemoryFiles()
     _seed_source(files, index_dir="public/")  # trailing slash tolerated
 
-    result = run(_args(index_dir="public", out="dist"), files=files)
+    result = run(_args(index_dir="public", out="dist"), files=files, policy=make_policy())
 
     assert result == ExitCode.OK
     assert files.exists("dist/p/kitware/cmake.json")
@@ -165,7 +166,7 @@ def test_index_dir_prefix_is_respected() -> None:
 def test_cas_subtree_file_without_a_root_is_ignored() -> None:
     files = InMemoryFiles(files={"p/kitware/cmake/o/sha256/" + "a" * 64 + ".json": _index_bytes()})
 
-    result = run(_args(), files=files)
+    result = run(_args(allow_empty=True), files=files, policy=make_policy())
 
     assert result == ExitCode.OK
     index = json.loads(files.read_bytes("dist/c/index.json") or b"{}")
@@ -177,14 +178,14 @@ def test_root_vanishing_between_list_and_read_raises() -> None:
     _seed_source(files)
 
     with pytest.raises(ValidationError, match="expected file vanished during render"):
-        run(_args(), files=files)
+        run(_args(), files=files, policy=make_policy())
 
 
 def test_golden_plan_execution_against_real_filesystem(tmp_path: Path) -> None:
     files = LocalFiles(root=tmp_path)
     _seed_source(files)
 
-    result = run(_args(index_dir="", out="site/.vitepress/dist"), files=files)
+    result = run(_args(index_dir="", out="site/.vitepress/dist"), files=files, policy=make_policy())
 
     assert result == ExitCode.OK
 
@@ -202,3 +203,40 @@ def test_golden_plan_execution_against_real_filesystem(tmp_path: Path) -> None:
 
     index = json.loads((tmp_path / "site/.vitepress/dist/c/index.json").read_text(encoding="utf-8"))
     assert list(index["packages"]) == ["kitware/cmake"]
+
+
+# ---- --index-dir: the shapes a hand-written pipeline actually types ----------
+
+
+@pytest.mark.parametrize("index_dir", ["", ".", "./", "."])
+def test_the_current_directory_spellings_all_find_the_roots(index_dir: str) -> None:
+    """`--index-dir .` is what a hand-written pipeline types, and a `FilePort`
+    key never carries that prefix — so the un-normalized `./p/` matched
+    nothing and rendered a complete, valid, EMPTY index over a populated one.
+    Exit 0, no warning. Measured live before this test existed."""
+    files = InMemoryFiles()
+    _seed_source(files)
+
+    assert run(_args(index_dir=index_dir), files=files, policy=make_policy()) == ExitCode.OK
+
+    index = json.loads(files.read_bytes("dist/c/index.json") or b"{}")
+    assert index["packages"], "the seeded root must be in the rendered index"
+
+
+def test_a_render_that_discovers_no_roots_is_refused() -> None:
+    """The silent-empty path is the dangerous half of the same bug: whatever
+    the reason a prefix matches nothing, the result is a deployable index that
+    unpublishes every package."""
+    files = InMemoryFiles()
+    _seed_source(files)
+
+    with pytest.raises(ValidationError, match="no package roots"):
+        run(_args(index_dir="typo"), files=files, policy=make_policy())
+
+
+def test_allow_empty_is_how_a_brand_new_index_renders() -> None:
+    """An index before its first announce legitimately has no roots. That is
+    the only case, and it has to be stated rather than inferred."""
+    files = InMemoryFiles()
+
+    assert run(_args(allow_empty=True), files=files, policy=make_policy()) == ExitCode.OK

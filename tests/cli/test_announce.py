@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -19,8 +20,8 @@ from ocx_indexbot.model import (
     TagEntry,
     Yank,
 )
-from ocx_indexbot.ports import ClockPort, FilePort, GitHubPort, RegistryPort
-from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles
+from ocx_indexbot.ports import ClockPort, FilePort, ForgePort, RegistryPort
+from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles, make_policy
 
 _NS = "kitware"
 _PKG = "cmake"
@@ -35,8 +36,8 @@ def _run(
     args: argparse.Namespace,
     *,
     registry: RegistryPort,
-    index_github: GitHubPort,
-    fork_github: GitHubPort | None,
+    index_github: ForgePort,
+    fork_github: ForgePort | None,
     files: FilePort,
     clock: ClockPort,
 ) -> ExitCode:
@@ -51,7 +52,7 @@ def _run(
         fork_github=fork_github,
         files=files,
         clock=clock,
-        allowed_hosts=_ALLOWED_HOSTS,
+        policy=make_policy(),
     )
 
 
@@ -82,12 +83,18 @@ class _NoWriteGitHub(FakeGitHub):
     (`get_file_contents`, `get_ref_sha`) still work via the parent."""
 
     def commit_files(
-        self, *, branch: str, base_sha: str, message: str, files: Mapping[str, bytes | None]
+        self,
+        *,
+        branch: str,
+        base_sha: str,
+        message: str,
+        files: Mapping[str, bytes | None],
+        base_repo: str | None = None,
     ) -> str:
         raise AssertionError("short-circuit must skip commit_files")
 
     def open_or_update_pull_request(
-        self, *, branch: str, base: str, title: str, body: str, head_owner: str | None = None
+        self, *, branch: str, base: str, title: str, body: str, head_repo: str | None = None
     ) -> int:
         raise AssertionError("short-circuit must skip PR open")
 
@@ -108,12 +115,26 @@ class _RecordingCommitGitHub(FakeGitHub):
     exactly which ref a fresh announce branch was cut from."""
 
     committed_base_sha: str | None = field(default=None, init=False)
+    committed_base_repo: str | None = field(default=None, init=False)
 
     def commit_files(
-        self, *, branch: str, base_sha: str, message: str, files: Mapping[str, bytes | None]
+        self,
+        *,
+        branch: str,
+        base_sha: str,
+        message: str,
+        files: Mapping[str, bytes | None],
+        base_repo: str | None = None,
     ) -> str:
         self.committed_base_sha = base_sha
-        return super().commit_files(branch=branch, base_sha=base_sha, message=message, files=files)
+        self.committed_base_repo = base_repo
+        return super().commit_files(
+            branch=branch,
+            base_sha=base_sha,
+            message=message,
+            files=files,
+            base_repo=base_repo,
+        )
 
 
 def _args(
@@ -124,6 +145,7 @@ def _args(
     out: str | None = "out",
     fork: str | None = None,
     index_repo: str = "ocx-sh/index",
+    base_ref: str = "main",
     yank: list[str] | None = None,
     unyank: list[str] | None = None,
     yank_reason: str = "yanked via announce",
@@ -135,10 +157,17 @@ def _args(
         out=out,
         fork=fork,
         index_repo=index_repo,
+        base_ref=base_ref,
         yank=yank or [],
         unyank=unyank or [],
         yank_reason=yank_reason,
     )
+
+
+def _cas(content: bytes) -> str:
+    """A `__ocx.desc` layer descriptor must name the digest of the bytes the
+    registry serves for it — `core/desc.py` refuses the pair otherwise."""
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
 def _root(tags: dict[str, TagEntry], *, repository: str = _REPO) -> PackageRoot:
@@ -200,11 +229,71 @@ def test_add_arguments_out_and_fork_are_mutually_exclusive() -> None:
         )
 
 
-def test_add_arguments_index_repo_defaults() -> None:
+def test_add_arguments_requires_an_index_repo() -> None:
+    """0.2.0 removed the `ocx-sh/index` default. A publisher whose index is
+    somewhere else would otherwise have announced into the public one by
+    forgetting a flag — the same argument that removed the `ocx.sh` prefix
+    default from the policy grammar."""
     parser = argparse.ArgumentParser()
     announce.add_arguments(parser)
-    parsed = parser.parse_args(["--package", "ns/pkg", "--tags", "1.0.0", "--out", "dist"])
-    assert parsed.index_repo == "ocx-sh/index"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--package", "ns/pkg", "--tags", "1.0.0", "--out", "dist"])
+
+
+def test_add_arguments_forge_defaults_to_the_runners_signal() -> None:
+    """`None`, not `"github"` — the fallback lives in `cli/_wiring._forge_kind`,
+    which can see the CI environment this parser cannot."""
+    parser = argparse.ArgumentParser()
+    announce.add_arguments(parser)
+    parsed = parser.parse_args(
+        ["--index-repo", "acme/index", "--package", "ns/pkg", "--tags", "1.0.0", "--out", "dist"]
+    )
+    assert parsed.index_repo == "acme/index"
+    assert parsed.forge is None
+    assert (
+        parser.parse_args(
+            [
+                "--index-repo",
+                "acme/index",
+                "--forge",
+                "gitlab",
+                "--package",
+                "ns/pkg",
+                "--tags",
+                "1.0.0",
+                "--out",
+                "dist",
+            ]
+        ).forge
+        == "gitlab"
+    )
+
+
+def test_add_arguments_base_ref_defaults_to_main_but_is_overridable() -> None:
+    """`--base-ref` replaced a hardcoded module constant — the default must
+    still be `"main"` (every existing deployment's branch), but an index
+    whose default branch is named something else must be able to say so."""
+    parser = argparse.ArgumentParser()
+    announce.add_arguments(parser)
+    default_parsed = parser.parse_args(
+        ["--index-repo", "acme/index", "--package", "ns/pkg", "--tags", "1.0.0", "--out", "dist"]
+    )
+    assert default_parsed.base_ref == "main"
+    overridden = parser.parse_args(
+        [
+            "--index-repo",
+            "acme/index",
+            "--package",
+            "ns/pkg",
+            "--tags",
+            "1.0.0",
+            "--out",
+            "dist",
+            "--base-ref",
+            "trunk",
+        ]
+    )
+    assert overridden.base_ref == "trunk"
 
 
 def test_add_arguments_parses_yank_and_unyank_lists() -> None:
@@ -212,6 +301,8 @@ def test_add_arguments_parses_yank_and_unyank_lists() -> None:
     announce.add_arguments(parser)
     parsed = parser.parse_args(
         [
+            "--index-repo",
+            "acme/index",
             "--package",
             "ns/pkg",
             "--tags",
@@ -274,6 +365,27 @@ def test_curated_tag_typo_raises_validation_error() -> None:
         )
 
 
+def test_a_tag_shaped_to_retarget_the_registry_call_is_rejected_before_it_is_used() -> None:
+    """`observe_one_tag` hands a curated tag straight to `RegistryPort` — this
+    path never passes through `parse_package_root`'s A-5 grammar check, since
+    there is no committed root yet for an uncommitted tag to be a key of.
+    Percent-encoding in the adapter and `validate`'s pre-merge check both
+    still hold (this is loud-later, not a hole), but the grammar belongs at
+    the boundary where untrusted CLI input becomes a registry call."""
+    current = _root({})
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+
+    with pytest.raises(ValidationError, match="tag name"):
+        _run(
+            _args(tags="../blobs/sha256:deadbeef"),
+            registry=_RaisingRegistry(),
+            index_github=index_github,
+            fork_github=None,
+            files=InMemoryFiles(),
+            clock=FixedClock(),
+        )
+
+
 def test_empty_tags_raises_validation_error() -> None:
     current = _root({})
     index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
@@ -328,6 +440,48 @@ def test_tags_file_comma_separated() -> None:
     assert result == ExitCode.OK
     committed = parse_package_root(files.read_bytes(f"dist/{_ROOT_PATH}"))  # type: ignore[arg-type]
     assert "1.0.0" in committed.tags
+
+
+def test_tags_file_comments_and_blank_lines_are_not_tags() -> None:
+    """A tags file is a file a human maintains, so it grows `#` comments.
+    Every one of them used to parse as a tag and fail with "does not resolve
+    … check for a typo", which points at the wrong thing entirely."""
+    manifest_digest = "sha256:" + "1" * 64
+    current = _root({})
+    index_github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(current)})
+    registry = FakeRegistry(
+        tags={_REPO: ["1.0.0"]}, manifests={(_REPO, "1.0.0"): _index(manifest_digest)}
+    )
+    files = InMemoryFiles(
+        files={"tags.txt": b"# The curated tag set\n\n1.0.0   # the only one so far\n"}
+    )
+
+    result = _run(
+        _args(tags=None, tags_file="tags.txt", out="dist"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=None,
+        files=files,
+        clock=FixedClock(),
+    )
+
+    assert result == ExitCode.OK
+    committed = parse_package_root(files.read_bytes(f"dist/{_ROOT_PATH}"))  # type: ignore[arg-type]
+    assert set(committed.tags) == {"1.0.0"}
+
+
+def test_a_tags_file_of_only_comments_is_empty_not_a_typo() -> None:
+    files = InMemoryFiles(files={"tags.txt": b"# nothing announced yet\n"})
+
+    with pytest.raises(ValidationError, match="no tags given"):
+        _run(
+            _args(tags=None, tags_file="tags.txt", out="dist"),
+            registry=FakeRegistry(tags={}, manifests={}),
+            index_github=FakeGitHub(files={}),
+            fork_github=None,
+            files=files,
+            clock=FixedClock(),
+        )
 
 
 def test_tags_file_newline_separated() -> None:
@@ -497,11 +651,11 @@ def test_desc_change_writes_readme_only_when_no_logo_layer() -> None:
                     "org.opencontainers.image.title": "CMake",
                     "org.opencontainers.image.description": "Build tool",
                 },
-                "layers": [{"mediaType": "application/markdown", "digest": "sha256:" + "e" * 64}],
+                "layers": [{"mediaType": "application/markdown", "digest": _cas(readme_bytes)}],
             },
         },
         desc_digests={_REPO: "sha256:" + "d" * 64},
-        blobs={(_REPO, "sha256:" + "e" * 64): readme_bytes},
+        blobs={(_REPO, _cas(readme_bytes)): readme_bytes},
     )
     files = InMemoryFiles()
 
@@ -537,15 +691,15 @@ def test_desc_change_writes_png_logo_with_sniffed_extension() -> None:
                     "org.opencontainers.image.description": "GitLab CLI",
                 },
                 "layers": [
-                    {"mediaType": "application/markdown", "digest": "sha256:" + "1" * 64},
-                    {"mediaType": "image/png", "digest": "sha256:" + "2" * 64},
+                    {"mediaType": "application/markdown", "digest": _cas(readme_bytes)},
+                    {"mediaType": "image/png", "digest": _cas(logo_bytes)},
                 ],
             },
         },
         desc_digests={_REPO: "sha256:" + "f" * 64},
         blobs={
-            (_REPO, "sha256:" + "1" * 64): readme_bytes,
-            (_REPO, "sha256:" + "2" * 64): logo_bytes,
+            (_REPO, _cas(readme_bytes)): readme_bytes,
+            (_REPO, _cas(logo_bytes)): logo_bytes,
         },
     )
     files = InMemoryFiles()
@@ -581,15 +735,15 @@ def test_desc_change_writes_svg_logo_with_sniffed_extension() -> None:
                     "org.opencontainers.image.description": "Build tool",
                 },
                 "layers": [
-                    {"mediaType": "application/markdown", "digest": "sha256:" + "3" * 64},
-                    {"mediaType": "image/svg+xml", "digest": "sha256:" + "4" * 64},
+                    {"mediaType": "application/markdown", "digest": _cas(readme_bytes)},
+                    {"mediaType": "image/svg+xml", "digest": _cas(logo_bytes)},
                 ],
             },
         },
         desc_digests={_REPO: "sha256:" + "9" * 64},
         blobs={
-            (_REPO, "sha256:" + "3" * 64): readme_bytes,
-            (_REPO, "sha256:" + "4" * 64): logo_bytes,
+            (_REPO, _cas(readme_bytes)): readme_bytes,
+            (_REPO, _cas(logo_bytes)): logo_bytes,
         },
     )
     files = InMemoryFiles()
@@ -749,9 +903,39 @@ def test_fork_mode_commits_to_fork_and_opens_pr_against_index_repo() -> None:
 
     assert result == ExitCode.OK
     assert (_ROOT_PATH, _BRANCH) in fork_github.files
-    assert index_github.pull_requests == {f"alice:{_BRANCH}": 1}
+    assert index_github.pull_requests == {f"alice/index:{_BRANCH}": 1}
     committed_root = parse_package_root(fork_github.files[(_ROOT_PATH, _BRANCH)])
     assert "3.28.1" in committed_root.tags
+
+
+def test_base_ref_flag_reads_and_branches_from_a_non_main_default_branch() -> None:
+    """`--base-ref` used to be a hardcoded `"main"` — a portability bug for
+    any index (a GitLab project, a corporate GitHub org) whose default
+    branch is named something else. Data seeded only under a custom ref name
+    is reachable only when `--base-ref` actually threads through to every
+    read that used to say `BASE_REF`."""
+    manifest_digest = "sha256:" + "1" * 64
+    current = _root({})
+    index_github = FakeGitHub(
+        files={(_ROOT_PATH, "trunk"): serialize_package_root(current)},
+        refs={"trunk": "index-trunk-sha"},
+    )
+    fork_github = FakeGitHub(refs={"trunk": "fork-trunk-sha"})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
+    )
+
+    result = _run(
+        _args(tags="3.28.1", out=None, fork="alice/index", base_ref="trunk"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=fork_github,
+        files=InMemoryFiles(),
+        clock=FixedClock(),
+    )
+
+    assert result == ExitCode.OK
+    assert index_github.pull_requests == {f"alice/index:{_BRANCH}": 1}
 
 
 def test_fork_mode_reuses_existing_announce_branch_as_commit_base() -> None:
@@ -806,6 +990,64 @@ def test_fork_mode_fresh_branch_bases_on_upstream_main_not_fork_main() -> None:
 
     assert result == ExitCode.OK
     assert fork_github.committed_base_sha == "upstream-main-sha"
+
+
+def test_fork_mode_tells_the_fork_which_repository_upstream_is() -> None:
+    """A fork does not always share object storage with its upstream — a
+    GitLab one answers 404 for the upstream tip. A fresh announce branch
+    therefore has to name the repository its base SHA lives in, or it cannot
+    be cut from upstream main at all."""
+    manifest_digest = "sha256:" + "c" * 64
+    committed = _root({})
+    index_github = FakeGitHub(
+        files={(_ROOT_PATH, "main"): serialize_package_root(committed)},
+        refs={"main": "upstream-main-sha"},
+    )
+    fork_github = _RecordingCommitGitHub(refs={"main": "stale-fork-main-sha"})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
+    )
+
+    result = _run(
+        _args(tags="3.28.1", out=None, fork="alice/index"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=fork_github,
+        files=InMemoryFiles(),
+        clock=FixedClock(),
+    )
+
+    assert result is ExitCode.OK
+    assert fork_github.committed_base_repo == "ocx-sh/index"
+
+
+def test_an_existing_announce_branch_is_not_told_where_upstream_is() -> None:
+    """Its own tip is already in the fork. Naming another repository for a
+    branch that only needs a fast-forward is, on GitLab, a hard error."""
+    manifest_digest = "sha256:" + "d" * 64
+    committed = _root({})
+    index_github = FakeGitHub(
+        files={(_ROOT_PATH, "main"): serialize_package_root(committed)},
+        refs={"main": "upstream-main-sha"},
+    )
+    branch = f"indexbot-announce-{_NS}-{_PKG}"
+    fork_github = _RecordingCommitGitHub(refs={branch: "an-open-announce-branch"})
+    registry = FakeRegistry(
+        tags={_REPO: ["3.28.1"]}, manifests={(_REPO, "3.28.1"): _index(manifest_digest)}
+    )
+
+    result = _run(
+        _args(tags="3.28.1", out=None, fork="alice/index"),
+        registry=registry,
+        index_github=index_github,
+        fork_github=fork_github,
+        files=InMemoryFiles(),
+        clock=FixedClock(),
+    )
+
+    assert result is ExitCode.OK
+    assert fork_github.committed_base_sha == "an-open-announce-branch"
+    assert fork_github.committed_base_repo is None
 
 
 def test_fork_mode_missing_upstream_base_ref_raises_even_if_fork_main_exists() -> None:
@@ -960,7 +1202,7 @@ def test_changed_tag_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None:
 
     assert result == ExitCode.OK
     assert "unchanged, nothing to announce" not in capsys.readouterr().out
-    assert index_github.pull_requests == {f"alice:{_BRANCH}": 1}
+    assert index_github.pull_requests == {f"alice/index:{_BRANCH}": 1}
     committed_root = parse_package_root(fork_github.files[(_ROOT_PATH, _BRANCH)])
     assert committed_root.tags["3.28.1"].content == _observed_content_digest("3.28.1", new_manifest)
     assert committed_root.tags["3.28.1"].observed == "T1"  # content churn re-stamped observed
@@ -989,11 +1231,11 @@ def test_changed_desc_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None
                     "org.opencontainers.image.title": "CMake",
                     "org.opencontainers.image.description": "Build tool",
                 },
-                "layers": [{"mediaType": "application/markdown", "digest": "sha256:" + "e" * 64}],
+                "layers": [{"mediaType": "application/markdown", "digest": _cas(readme_bytes)}],
             },
         },
         desc_digests={_REPO: "sha256:" + "d" * 64},
-        blobs={(_REPO, "sha256:" + "e" * 64): readme_bytes},
+        blobs={(_REPO, _cas(readme_bytes)): readme_bytes},
     )
 
     result = _run(
@@ -1007,7 +1249,7 @@ def test_changed_desc_still_opens_pr(capsys: pytest.CaptureFixture[str]) -> None
 
     assert result == ExitCode.OK
     assert "unchanged, nothing to announce" not in capsys.readouterr().out
-    assert index_github.pull_requests == {f"alice:{_BRANCH}": 1}
+    assert index_github.pull_requests == {f"alice/index:{_BRANCH}": 1}
     committed_root = parse_package_root(fork_github.files[(_ROOT_PATH, _BRANCH)])
     assert committed_root.desc is not None  # desc change wrote through despite unchanged tag set
 

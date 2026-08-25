@@ -21,7 +21,7 @@ from ocx_indexbot.model import (
     Yank,
 )
 from ocx_indexbot.ports import FilePort, RegistryPort
-from tests.fakes import FakeRegistry, InMemoryFiles
+from tests.fakes import FakeRegistry, InMemoryFiles, make_policy
 
 _NAMESPACE = "kitware"
 _PACKAGE = "cmake"
@@ -39,7 +39,7 @@ def _run(args: argparse.Namespace, *, files: FilePort, registry: RegistryPort) -
     (`.github/index-policy.json`) — every test in this file runs under the
     public index's own allowlist. Tests that need a different policy call
     `validate.run` directly with their own `allowed_hosts`."""
-    return validate.run(args, files=files, registry=registry, allowed_hosts=_ALLOWED_HOSTS)
+    return validate.run(args, files=files, registry=registry, policy=make_policy())
 
 
 def _cas_path(digest: str, *, ext: str = "json") -> str:
@@ -678,7 +678,7 @@ def _fork_validate(head: PackageRoot, base: PackageRoot | None) -> ExitCode:
         _args([_RESERVED_PATH], offline=True),
         files=InMemoryFiles(files={_RESERVED_PATH: serialize_package_root(head), **_RESERVED_CAS}),
         registry=_PoisonRegistry(),
-        allowed_hosts=_ALLOWED_HOSTS,
+        policy=make_policy(),
         base_files=InMemoryFiles(
             files={} if base is None else {_RESERVED_PATH: serialize_package_root(base)}
         ),
@@ -765,7 +765,7 @@ def test_the_exemption_never_widens_a_control_path_segment() -> None:
         _args([path], offline=True),
         files=InMemoryFiles(files={path: serialized}),
         registry=_PoisonRegistry(),
-        allowed_hosts=_ALLOWED_HOSTS,
+        policy=make_policy(),
         base_files=InMemoryFiles(files={path: serialized}),
     )
     assert result == ExitCode.VALIDATION_FAILURE

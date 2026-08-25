@@ -250,18 +250,41 @@ def test_fake_github_enable_auto_merge() -> None:
     github = FakeGitHub()
     pr = github.open_or_update_pull_request(branch="b", base="main", title="t", body="b")
     assert pr not in github.auto_merge_enabled
-    github.enable_auto_merge(pr)
+    github.enable_auto_merge(pr, head_sha="d" * 40)
     assert pr in github.auto_merge_enabled
+    assert github.auto_merge_head_sha[pr] == "d" * 40
+
+
+def test_fake_github_withdraw_auto_merge_disarms() -> None:
+    github = FakeGitHub()
+    pr = github.open_or_update_pull_request(branch="b", base="main", title="t", body="b")
+    github.enable_auto_merge(pr, head_sha="d" * 40)
+
+    github.withdraw_auto_merge(pr)
+
+    assert pr not in github.auto_merge_enabled
+    assert pr not in github.auto_merge_head_sha
+
+
+def test_fake_github_withdraw_auto_merge_is_a_noop_when_never_armed() -> None:
+    """The ordinary human-lane case: withdrawing must not raise just because
+    there was nothing to withdraw."""
+    github = FakeGitHub()
+    pr = github.open_or_update_pull_request(branch="b", base="main", title="t", body="b")
+
+    github.withdraw_auto_merge(pr)  # no exception
+
+    assert pr not in github.auto_merge_enabled
 
 
 def test_fake_github_open_pull_request_cross_repo_head_is_a_distinct_key() -> None:
     github = FakeGitHub()
     same_repo = github.open_or_update_pull_request(branch="b", base="main", title="t", body="b")
     fork = github.open_or_update_pull_request(
-        branch="b", base="main", title="t", body="b", head_owner="alice"
+        branch="b", base="main", title="t", body="b", head_repo="alice/fork"
     )
     assert same_repo != fork
-    assert github.pull_requests == {"b": same_repo, "alice:b": fork}
+    assert github.pull_requests == {"b": same_repo, "alice/fork:b": fork}
 
 
 def test_fake_github_request_reviewers_accumulates() -> None:

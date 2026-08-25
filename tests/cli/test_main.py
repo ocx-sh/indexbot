@@ -97,5 +97,38 @@ def test_dispatch_error_surfaces_structured_reason_to_step_summary(
     assert main_module.main(["noop"]) == ExitCode.VALIDATION_FAILURE
 
     summary = summary_file.read_text(encoding="utf-8")
-    assert summary == "## indexbot noop failed\n\nbad package id\n"
+    assert summary == (
+        "## indexbot noop failed\n\nexit 1. Details below.\n\n```\nbad package id\n```\n"
+    )
     assert "bad package id" in capsys.readouterr().err
+
+
+def test_dispatch_error_message_lands_fenced_not_in_the_reason_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An `IndexBotError` message is not always caller-owned text — a
+    `ForgeError` embeds up to 400 bytes of a remote forge's own response body
+    (`adapters/_http.raise_for_status`), and this chokepoint catches every
+    `IndexBotError` subclass alike, so it cannot tell safe messages from
+    unsafe ones. `write_ci_summary`'s `reason` slot renders unfenced into the
+    step summary (ADR-4 BD-4 reserves that position for text this process
+    authored itself), so the exception text must land in the fenced `detail`
+    slot instead — never spliced into `reason`, where markdown or forge
+    response content could render unescaped.
+    """
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+    remote_body = "**Cannot transition status via :enqueue from :pending**"
+
+    def handler(_args: argparse.Namespace) -> ExitCode:
+        raise ValidationError(remote_body)
+
+    _register(monkeypatch, "noop", handler)
+
+    assert main_module.main(["noop"]) == ExitCode.VALIDATION_FAILURE
+
+    summary = summary_file.read_text(encoding="utf-8")
+    reason_line = summary.splitlines()[2]
+    assert remote_body not in reason_line
+    assert f"```\n{remote_body}\n```" in summary

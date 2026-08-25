@@ -14,8 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from ocx_indexbot.adapters.github_api import GitHubApi
+from ocx_indexbot.adapters.gitlab_api import GitLabApi
 from ocx_indexbot.adapters.local_files import LocalFiles
-from ocx_indexbot.adapters.registry_v2 import GHCR_HOST, OCX_SH_HOST, OCX_SH_REALM
+from ocx_indexbot.adapters.local_git import LocalGit
+from ocx_indexbot.adapters.registry_v2 import GHCR_HOST, GITLAB_HOST, OCX_SH_HOST, OCX_SH_REALM
 from ocx_indexbot.cli import _wiring
 from ocx_indexbot.cli import main as main_module
 from ocx_indexbot.core.observe import observe
@@ -23,7 +26,7 @@ from ocx_indexbot.core.policy import INDEX_POLICY_PATH
 from ocx_indexbot.core.validate_entry import serialize_package_root
 from ocx_indexbot.errors import TransientError, ValidationError
 from ocx_indexbot.exit_codes import ExitCode
-from ocx_indexbot.model import Owner, PackageRoot, PullRequestInfo, TagEntry
+from ocx_indexbot.model import Owner, PackageRoot, PullRequestHeadMatch, PullRequestInfo, TagEntry
 from tests.fakes import FakeGitHub, FakeRegistry, FixedClock, InMemoryFiles
 
 _NS = "kitware"
@@ -31,7 +34,14 @@ _PKG = "cmake"
 _REPO = "oci://ghcr.io/kitware/cmake"
 _ROOT_PATH = f"p/{_NS}/{_PKG}.json"
 _OWNER = Owner(github="alice", github_id=1)
-_POLICY_BYTES = b'{"registry_hosts": ["ghcr.io"]}\n'
+_POLICY_BYTES = (
+    b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["ghcr.io"], '
+    b'"reserved_namespaces": ["ocx", "ocx-sh", "ocx-contrib", "ocx-rs"]}\n'
+)
+"""The public index's committed policy, verbatim. `reserved_namespaces` is
+load-bearing here and not decoration: brand segments moved out of the package
+into policy in 0.2.0, so a fixture that omitted them would let
+`p/ocx/cli.json` through and quietly retire the ND-4 wiring assertion below."""
 
 
 # --- `_require_env` -----------------------------------------------------------
@@ -67,45 +77,123 @@ def test_repo_root_reads_github_workspace(monkeypatch: pytest.MonkeyPatch) -> No
     assert _wiring._repo_root() == Path("/checkout")  # pyright: ignore[reportPrivateUsage]
 
 
-# --- `_github_api` ---------------------------------------------------------------
+# --- `_forge_api` / `_forge_kind` -------------------------------------------------
 
 
-def test_github_api_reads_owner_repo_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_forge_api_reads_owner_repo_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITLAB_CI", raising=False)
     monkeypatch.setenv("GITHUB_REPOSITORY", "ocx-sh/index")
     monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
-    api = _wiring._github_api()  # pyright: ignore[reportPrivateUsage]
+    api = _wiring._forge_api()  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(api, GitHubApi)
     assert api.owner == "ocx-sh"
     assert api.repo == "index"
     assert api.token == "secret-token"  # noqa: S105 - test fixture, not a real credential
 
 
-def test_github_api_missing_repository_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_forge_api_missing_repository_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITLAB_CI", raising=False)
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
     with pytest.raises(RuntimeError, match="GITHUB_REPOSITORY"):
-        _wiring._github_api()  # pyright: ignore[reportPrivateUsage]
+        _wiring._forge_api()  # pyright: ignore[reportPrivateUsage]
 
 
-def test_github_api_missing_token_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_forge_api_on_gitlab_ci_builds_the_gitlab_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wiring assertion for `adapters/gitlab_api.py`: without it the whole
+    adapter is unreachable from any shipped entrypoint, and coverage cannot
+    tell the difference between wired and dead."""
+    monkeypatch.setenv("GITLAB_CI", "true")
+    monkeypatch.setenv("CI_PROJECT_ID", "1234")
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat-secret")
+    monkeypatch.setenv("CI_API_V4_URL", "https://gitlab.corp.internal/api/v4")
+
+    api = _wiring._forge_api()  # pyright: ignore[reportPrivateUsage]
+
+    assert isinstance(api, GitLabApi)
+    assert api.project == "1234"
+    assert api.base_url == "https://gitlab.corp.internal/api/v4"
+
+
+def test_forge_api_on_gitlab_defaults_to_gitlab_com(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gitlab.com is the only instance whose API address is knowable without
+    being told; a self-hosted runner always sets `$CI_API_V4_URL` itself."""
+    monkeypatch.setenv("GITLAB_CI", "true")
+    monkeypatch.setenv("CI_PROJECT_ID", "1234")
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat-secret")
+    monkeypatch.delenv("CI_API_V4_URL", raising=False)
+
+    api = _wiring._forge_api()  # pyright: ignore[reportPrivateUsage]
+
+    assert isinstance(api, GitLabApi)
+    assert api.base_url == "https://gitlab.com/api/v4"
+
+
+def test_forge_api_on_gitlab_without_a_write_token_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`$CI_JOB_TOKEN` cannot write labels, notes or MRs, so there is nothing
+    to fall back to — a GitLab deployment must supply its own token."""
+    monkeypatch.setenv("GITLAB_CI", "true")
+    monkeypatch.setenv("CI_PROJECT_ID", "1234")
+    monkeypatch.delenv("GITLAB_TOKEN", raising=False)
+
+    with pytest.raises(RuntimeError, match="GITLAB_TOKEN"):
+        _wiring._forge_api()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_an_explicit_forge_flag_overrides_the_runner_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`announce` is the one subcommand a human runs from their own machine,
+    where neither runner variable is set — and where the fallback would
+    otherwise send a GitLab publisher at github.com."""
+    monkeypatch.setenv("GITLAB_CI", "true")
+    github_args = argparse.Namespace(forge="github")
+    gitlab_args = argparse.Namespace(forge="gitlab")
+
+    assert _wiring._forge_kind(github_args) == "github"  # pyright: ignore[reportPrivateUsage]
+    assert _wiring._forge_kind(gitlab_args) == "gitlab"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_forge_api_falls_through_to_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITLAB_CI", raising=False)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "ocx-sh/index")
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
+
+    assert isinstance(_wiring._forge_api(), GitHubApi)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_forge_api_missing_token_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITLAB_CI", raising=False)
     monkeypatch.setenv("GITHUB_REPOSITORY", "ocx-sh/index")
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="GITHUB_TOKEN"):
-        _wiring._github_api()  # pyright: ignore[reportPrivateUsage]
+        _wiring._forge_api()  # pyright: ignore[reportPrivateUsage]
 
 
 # --- DISPATCH table shape -------------------------------------------------------
 
 
-def test_dispatch_registers_exactly_the_eight_subcommands() -> None:
+def test_dispatch_registers_exactly_the_fifteen_subcommands() -> None:
     assert set(_wiring.DISPATCH) == {
         "announce",
+        "ci",
         "reconcile",
         "validate",
+        "validate-pr",
         "render",
         "seed-import",
         "classify-pr",
         "governance-check",
+        "governance-gate",
+        "governance-poll",
+        "label-failed-run",
+        "stale",
         "workflows-check",
+        "schema",
     }
 
 
@@ -131,46 +219,99 @@ def test_workflows_check_is_wired_to_a_repo_root_file_port(
     assert isinstance(seen["files"], LocalFiles)
 
 
+def test_validate_pr_is_wired_to_local_git_and_an_out_of_tree_base_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The shipped entrypoint really reaches `cli/validate_pr.run`, with a
+    `LocalGit` over the checkout and a base-ref `FilePort` rooted **outside**
+    it.
+
+    That last part is the assertion worth having: `validate` byte-compares the
+    PR-head tree against its own canonical serialization, so a base tree
+    anywhere inside the checkout would fail every changed root — and no amount
+    of coverage on `cli/validate_pr.py` can see which root the wiring handed
+    it.
+    """
+    workspace = tmp_path / "checkout"
+    workspace.mkdir()
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(workspace))
+    (workspace / ".github").mkdir()
+    (workspace / INDEX_POLICY_PATH).write_bytes(_POLICY_BYTES)
+    seen: dict[str, object] = {}
+
+    def _spy(
+        args: argparse.Namespace,
+        *,
+        git: object,
+        files: object,
+        registry: object,
+        policy: object,
+        base_files: object,
+    ) -> ExitCode:
+        seen.update(
+            args=args, git=git, files=files, registry=registry, policy=policy, base_files=base_files
+        )
+        return ExitCode.OK
+
+    monkeypatch.setattr(_wiring.validate_pr, "run", _spy)
+    namespace = argparse.Namespace(base_sha=None, offline=False, same_repo_pr=False, fork_pr=False)
+
+    assert _wiring.DISPATCH["validate-pr"](namespace) == ExitCode.OK
+    assert seen["args"] is namespace
+    git = seen["git"]
+    assert isinstance(git, LocalGit)
+    assert git.repo == workspace
+    files = seen["files"]
+    assert isinstance(files, LocalFiles)
+    assert files.root == workspace.resolve()
+    base_files = seen["base_files"]
+    assert isinstance(base_files, LocalFiles)
+    assert not base_files.root.is_relative_to(workspace.resolve())
+
+
 def test_main_dispatch_is_seeded_from_wiring_dispatch() -> None:
     assert set(main_module._DISPATCH) == set(_wiring.DISPATCH)  # pyright: ignore[reportPrivateUsage]
 
 
-# --- `_registry_hosts` (deployment policy + no-adapter guard) ------------------
+# --- `_index_policy` (deployment policy + no-adapter guard) ------------------
 
 
-def test_registry_hosts_returns_the_committed_policy() -> None:
-    assert _wiring._registry_hosts(_POLICY_BYTES) == frozenset({"ghcr.io"})  # pyright: ignore[reportPrivateUsage]
+def test_index_policy_returns_the_committed_policy() -> None:
+    assert _wiring._index_policy(_POLICY_BYTES).registry_hosts == frozenset({"ghcr.io"})  # pyright: ignore[reportPrivateUsage]
 
 
-def test_registry_hosts_missing_policy_file_fails_closed() -> None:
+def test_index_policy_missing_policy_file_fails_closed() -> None:
     """No policy file is a hard stop, not a silent fall back to the public
     index's `ghcr.io` — an index copy that never stated a policy says so."""
-    with pytest.raises(ValidationError, match="no registry-host policy"):
-        _wiring._registry_hosts(None)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(ValidationError, match="no committed policy"):
+        _wiring._index_policy(None)  # pyright: ignore[reportPrivateUsage]
 
 
-def test_registry_hosts_rejects_a_host_no_adapter_can_serve() -> None:
+def test_index_policy_rejects_a_host_no_adapter_can_serve() -> None:
     """The trap this guard exists to close: allowlisting a host with no
     `RegistryPort` would produce roots that validate and then cannot be
     fetched. Refused at wiring time, naming the missing adapter."""
-    policy = b'{"registry_hosts": ["harbor.corp.internal"]}'
+    policy = b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["harbor.corp.internal"]}'
     with pytest.raises(ValidationError, match="no registry adapter can serve"):
-        _wiring._registry_hosts(policy)  # pyright: ignore[reportPrivateUsage]
+        _wiring._index_policy(policy)  # pyright: ignore[reportPrivateUsage]
 
 
-def test_registry_hosts_rejects_an_unservable_host_alongside_a_servable_one() -> None:
+def test_index_policy_rejects_an_unservable_host_alongside_a_servable_one() -> None:
     """Partial coverage is still a trap — one bad host poisons the whole
     policy, it is not silently filtered down to the servable subset."""
-    policy = b'{"registry_hosts": ["ghcr.io", "harbor.corp.internal"]}'
+    policy = (
+        b'{"name": "ocx.sh", "name_segments": 2, '
+        b'"registry_hosts": ["ghcr.io", "harbor.corp.internal"]}'
+    )
     with pytest.raises(ValidationError, match=r"harbor\.corp\.internal"):
-        _wiring._registry_hosts(policy)  # pyright: ignore[reportPrivateUsage]
+        _wiring._index_policy(policy)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_adapter_hosts_matches_the_registry_adapters_that_exist() -> None:
     """The servable-host set is exactly the hosts `_registry()` wires a client
     for. This asserts the set stays honest: growing it without wiring a client
     re-opens the gap the guard closes."""
-    assert frozenset({GHCR_HOST, OCX_SH_HOST}) == _wiring.REGISTRY_ADAPTER_HOSTS
+    assert frozenset({GHCR_HOST, OCX_SH_HOST, GITLAB_HOST}) == _wiring.REGISTRY_ADAPTER_HOSTS
     assert set(_wiring._registry().by_host) == _wiring.REGISTRY_ADAPTER_HOSTS  # pyright: ignore[reportPrivateUsage]
 
 
@@ -185,9 +326,11 @@ def test_registry_wires_the_ocx_sh_token_endpoint() -> None:
     assert client.realm == OCX_SH_REALM
 
 
-def test_local_policy_hosts_reads_the_checkout_copy() -> None:
+def test_local_policy_reads_the_checkout_copy() -> None:
     files = InMemoryFiles(files={INDEX_POLICY_PATH: _POLICY_BYTES})
-    assert _wiring._local_policy_hosts(files) == frozenset({"ghcr.io"})  # pyright: ignore[reportPrivateUsage]
+    policy = _wiring._local_policy(files)  # pyright: ignore[reportPrivateUsage]
+    assert policy.registry_hosts == frozenset({"ghcr.io"})
+    assert (policy.name, policy.name_segments) == ("ocx.sh", 2)
 
 
 def test_validate_without_a_policy_file_exits_validation_failure(
@@ -261,33 +404,34 @@ def _patch_adapters(
     """Swap real `adapters/*` constructors for `tests/fakes/` doubles at the
     wiring seam — `cli/_wiring.py`'s module-global names, the exact objects
     every `_run_*` function calls at dispatch time (CONTRACTS.md §0's "the
-    ONLY module that constructs adapters" boundary). Both `_github_api`
-    (`reconcile`/`classify-pr`/`governance-check`, which also require
-    `GITHUB_REPOSITORY`/`GITHUB_TOKEN` env presence via `_require_env`) and
-    the bare `GitHubApi` class (`_run_announce`'s `_index_github`/fork-mode
-    construction, which never goes through `_github_api` at all — fork-PR
-    announce revamp) are patched, so no test here needs a real env var."""
+    ONLY module that constructs adapters" boundary). Both `_forge_api`
+    (`reconcile`/`classify-pr`/`governance-check`/`governance-poll`, which
+    also require the runner's env vars via `_require_env`) and `_project_api`
+    (`_run_announce`'s index-side and fork-side clients, which never go
+    through `_forge_api` at all — fork-PR announce revamp) are patched, so no
+    test here needs a real env var, and neither needs to care which forge the
+    sniff would have picked."""
     files_double = files if files is not None else InMemoryFiles()
     github_double = github or FakeGitHub()
     # Every real checkout carries the deployment's registry-host policy, and
     # `announce` reads the index repo's copy over the API — seed both so the
     # `_run_*` functions under test see what production sees (a test asserting
-    # the ABSENT-policy failure seeds neither; see `_registry_hosts` below).
+    # the ABSENT-policy failure seeds neither; see `_index_policy` below).
     files_double.write_bytes(INDEX_POLICY_PATH, _POLICY_BYTES)
     github_double.files[(INDEX_POLICY_PATH, "main")] = _POLICY_BYTES
 
     def _local_files(**_: object) -> InMemoryFiles:
         return files_double
 
-    def _github_api_double(**_: object) -> FakeGitHub:
+    def _project_api_double(*_: object, **__: object) -> FakeGitHub:
         return github_double
 
     # `_registry` (the per-host router factory), not the `RegistryV2` class
     # itself: every `_run_*` reaches the registry through it, and a fake needs
     # no host routing — `tests/adapters/test_registry_v2.py` owns the router.
     monkeypatch.setattr(_wiring, "_registry", lambda: registry or FakeRegistry())
-    monkeypatch.setattr(_wiring, "_github_api", lambda: github_double)
-    monkeypatch.setattr(_wiring, "GitHubApi", _github_api_double)
+    monkeypatch.setattr(_wiring, "_forge_api", lambda: github_double)
+    monkeypatch.setattr(_wiring, "_project_api", _project_api_double)
     monkeypatch.setattr(_wiring, "LocalFiles", _local_files)
     monkeypatch.setattr(_wiring, "SystemClock", lambda: clock or FixedClock())
 
@@ -304,7 +448,17 @@ def test_announce_out_mode_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_adapters(monkeypatch, registry=registry, github=github, files=files)
 
     result = main_module.main(
-        ["announce", "--package", f"{_NS}/{_PKG}", "--tags", tag, "--out", "dist"]
+        [
+            "announce",
+            "--index-repo",
+            "ocx-sh/index",
+            "--package",
+            f"{_NS}/{_PKG}",
+            "--tags",
+            tag,
+            "--out",
+            "dist",
+        ]
     )
 
     assert result == ExitCode.OK
@@ -324,6 +478,8 @@ def test_announce_fork_mode_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     result = main_module.main(
         [
             "announce",
+            "--index-repo",
+            "ocx-sh/index",
             "--package",
             f"{_NS}/{_PKG}",
             "--tags",
@@ -403,7 +559,7 @@ def test_render_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     files = InMemoryFiles()
     _patch_adapters(monkeypatch, files=files)
 
-    result = main_module.main(["render", "--index-dir", "", "--out", "dist"])
+    result = main_module.main(["render", "--index-dir", "", "--out", "dist", "--allow-empty"])
 
     assert result == ExitCode.OK
     written = files.read_text("dist/config.json")
@@ -504,6 +660,170 @@ def test_governance_check_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyP
     ]
 
 
+def test_governance_gate_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring assertion for `governance-gate`: it reaches a real port set
+    through the production dispatch, same as `classify-pr`/`governance-check`
+    above, and — the one thing those two don't do — also arms auto-merge
+    itself on a green disposition."""
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    tag_content = _observed_content_digest("1.0.0")
+    committed = _root({"1.0.0": TagEntry(content=tag_content, observed="T0")})
+    refreshed = _root({"1.0.0": TagEntry(content=tag_content, observed="T1")})
+    info = PullRequestInfo(
+        number=1,
+        base_sha="base-sha",
+        head_sha="head-sha",
+        changed_paths=(_ROOT_PATH,),
+        author_login=_OWNER.github,
+        author_id=_OWNER.github_id,
+    )
+    github = FakeGitHub(
+        files={
+            (_ROOT_PATH, "base-sha"): serialize_package_root(committed),
+            (_ROOT_PATH, "head-sha"): serialize_package_root(refreshed),
+        },
+        pull_request_info={1: info},
+    )
+    _patch_adapters(monkeypatch, github=github)
+
+    result = main_module.main(["governance-gate", "--pr", "1"])
+
+    assert result == ExitCode.OK
+    assert github.auto_merge_enabled == {1}
+    assert github.auto_merge_head_sha[1] == "head-sha"
+
+
+def test_governance_gate_arm_only_never_reads_the_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring assertion for `governance.yml`'s `arm-auto-merge` job: the
+    shipped entrypoint really reaches `sync_auto_merge` WITHOUT a base-ref
+    policy fetch.
+
+    That is not a performance note. The job runs on `if: ${{ !cancelled() }}`
+    precisely so a gate that errored still withdraws, so every avoidable
+    failure between the runner and the withdraw defeats the point — a policy
+    read the gate already choked on would be exactly that failure. The fake
+    below serves no policy file at all: an implementation that fetched one
+    would raise here instead of withdrawing.
+    """
+    github = FakeGitHub(pull_request_info={})
+    _patch_adapters(monkeypatch, github=github)
+    del github.files[(INDEX_POLICY_PATH, "main")]
+
+    result = main_module.main(
+        [
+            "governance-gate",
+            "--pr",
+            "1",
+            "--arm-only",
+            "--disposition",
+            "success",
+            "--head-sha",
+            "head-sha",
+        ]
+    )
+
+    assert result == ExitCode.OK
+    assert github.auto_merge_enabled == {1}
+    assert github.auto_merge_head_sha[1] == "head-sha"
+
+
+def test_governance_gate_arm_only_withdraws_when_the_gate_published_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half, end to end through the CLI: an empty `--disposition` —
+    what a failed `governance-gate` job publishes — reaches `withdraw_auto_merge`
+    rather than arming or erroring."""
+    github = FakeGitHub(pull_request_info={})
+    _patch_adapters(monkeypatch, github=github)
+    github.enable_auto_merge(1, head_sha="head-sha")
+
+    assert main_module.main(["governance-gate", "--pr", "1", "--arm-only"]) == ExitCode.OK
+    assert github.auto_merge_enabled == set(), "an armed PR must be disarmed, not left standing"
+
+
+def test_governance_poll_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring assertion for the GitLab governance lane: `governance-poll`
+    reaches a real port set through the production dispatch, sweeps the open
+    MRs it finds and arms the green one."""
+    del tmp_path  # the poll lane writes no job output — there is no single disposition
+    tag_content = _observed_content_digest("1.0.0")
+    committed = _root({"1.0.0": TagEntry(content=tag_content, observed="T0")})
+    refreshed = _root({"1.0.0": TagEntry(content=tag_content, observed="T1")})
+    info = PullRequestInfo(
+        number=4,
+        base_sha="base-sha",
+        head_sha="head-sha",
+        changed_paths=(_ROOT_PATH,),
+        author_login=_OWNER.github,
+        author_id=_OWNER.github_id,
+    )
+    github = FakeGitHub(
+        files={
+            (_ROOT_PATH, "base-sha"): serialize_package_root(committed),
+            (_ROOT_PATH, "head-sha"): serialize_package_root(refreshed),
+        },
+        pull_request_info={4: info},
+    )
+    _patch_adapters(monkeypatch, github=github)
+
+    assert main_module.main(["governance-poll"]) == ExitCode.OK
+    assert github.auto_merge_enabled == {4}
+
+
+def test_label_failed_run_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring assertion for `label-failed-run`: it reaches a real
+    `ForgePort` through the production dispatch and applies the label FP-8
+    scopes to fork PRs — coverage of the module alone cannot tell a wired
+    subcommand from a dead one."""
+    github = FakeGitHub(head_sha_lookup={"deadbeef": PullRequestHeadMatch(number=9, is_fork=True)})
+    _patch_adapters(monkeypatch, github=github)
+
+    result = main_module.main(["label-failed-run", "--head-sha", "deadbeef"])
+
+    assert result == ExitCode.OK
+    assert github.labels[9] == ["checks-failed"]
+
+
+def test_stale_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring assertion for `stale`: it reaches a real `ForgePort` and
+    `ClockPort` through the production dispatch and marks a long-idle
+    checks-failed PR stale."""
+    info = PullRequestInfo(
+        number=5,
+        base_sha="base-sha",
+        head_sha="head-sha",
+        changed_paths=(),
+        updated_at="2026-06-01T00:00:00Z",
+        labels=("checks-failed",),
+    )
+    github = FakeGitHub(pull_request_info={5: info})
+    _patch_adapters(monkeypatch, github=github)
+
+    assert main_module.main(["stale"]) == ExitCode.OK
+    assert "checks-failed-stale" in github.labels[5]
+
+
+def test_ci_is_wired_to_a_repo_root_file_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`indexbot ci --check` reaches `cli/ci_cmd.run` with a `LocalFiles` at
+    the checkout root and this repo's committed policy — the wiring assertion
+    for the generator."""
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "index-policy.json").write_bytes(
+        _POLICY_BYTES.replace(
+            b"]}", b'], "ci": {"owner": "ocx-sh", "run": "uv run --frozen -- indexbot"}}'
+        )
+    )
+
+    # Nothing rendered yet, so every generated file is missing: drift.
+    assert main_module.main(["ci", "--check"]) == ExitCode.VALIDATION_FAILURE
+    assert main_module.main(["ci"]) == ExitCode.OK
+    assert (tmp_path / ".github" / "workflows" / "governance.yml").exists()
+    assert main_module.main(["ci", "--check"]) == ExitCode.OK
+
+
 # --- exit-code coverage across the real production dispatch --------------------
 
 
@@ -522,7 +842,17 @@ def test_announce_typo_tag_exits_validation_failure(monkeypatch: pytest.MonkeyPa
     _patch_adapters(monkeypatch, registry=registry, github=github)
 
     result = main_module.main(
-        ["announce", "--package", f"{_NS}/{_PKG}", "--tags", "9.9.9-typo", "--out", "dist"]
+        [
+            "announce",
+            "--index-repo",
+            "ocx-sh/index",
+            "--package",
+            f"{_NS}/{_PKG}",
+            "--tags",
+            "9.9.9-typo",
+            "--out",
+            "dist",
+        ]
     )
 
     assert result == ExitCode.VALIDATION_FAILURE

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -21,8 +22,8 @@ from ocx_indexbot.model import (
     TagEntry,
     Yank,
 )
-from ocx_indexbot.ports import FilePort, GitHubPort, RegistryPort
-from tests.fakes import FakeGitHub, FakeRegistry, InMemoryFiles
+from ocx_indexbot.ports import FilePort, ForgePort, RegistryPort
+from tests.fakes import FakeGitHub, FakeRegistry, InMemoryFiles, make_policy
 
 _OWNER = Owner(github="alice", github_id=1)
 _CMAKE_REPO = "oci://ghcr.io/ocx-contrib/cmake"
@@ -36,19 +37,17 @@ def _run(
     *,
     files: FilePort,
     registry: RegistryPort,
-    github: GitHubPort,
+    github: ForgePort,
 ) -> ExitCode:
     """`reconcile.run` bound to the shipped `{"ghcr.io"}` registry-host policy
     (`.github/index-policy.json`) — every test in this file runs under the
     public index's own allowlist. Tests needing a different policy call
     `reconcile.run` directly with their own `allowed_hosts`."""
-    return reconcile.run(
-        args, files=files, registry=registry, github=github, allowed_hosts=_ALLOWED_HOSTS
-    )
+    return reconcile.run(args, files=files, registry=registry, github=github, policy=make_policy())
 
 
-def _args(*, package: str | None = None) -> argparse.Namespace:
-    return argparse.Namespace(command="reconcile", package=package)
+def _args(*, package: str | None = None, anomaly_ok: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(command="reconcile", package=package, anomaly_ok=anomaly_ok)
 
 
 def _root(
@@ -194,6 +193,20 @@ def test_add_arguments_package_defaults_to_none() -> None:
     assert parsed.package is None
 
 
+def test_add_arguments_anomaly_ok_defaults_to_false() -> None:
+    parser = argparse.ArgumentParser()
+    reconcile.add_arguments(parser)
+    parsed = parser.parse_args([])
+    assert parsed.anomaly_ok is False
+
+
+def test_add_arguments_anomaly_ok_flag() -> None:
+    parser = argparse.ArgumentParser()
+    reconcile.add_arguments(parser)
+    parsed = parser.parse_args(["--anomaly-ok"])
+    assert parsed.anomaly_ok is True
+
+
 # --- basic sweep behavior -------------------------------------------------
 
 
@@ -287,6 +300,50 @@ def test_pinned_tag_mutation_escalates_to_anomaly() -> None:
         _run(_args(), files=files, registry=registry, github=github)
 
     assert "pinned-tag-mutation" in github.issues[_ISSUE_TITLE][1]
+
+
+# --- --anomaly-ok: the CI-side exit-code translation, folded in -----------
+
+
+def test_anomaly_ok_stays_green_and_files_the_same_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--anomaly-ok` is the "stays green" translation
+    `.github/workflows/reconcile.yml` and the GitLab lane used to do in
+    shell: the tracking issue is still filed exactly as without the flag,
+    but the run itself exits 0 instead of raising, and a step-summary notice
+    replaces the shell's hand-rolled `::warning`."""
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    committed_digest = "sha256:" + "a" * 64
+    _put_root(
+        files,
+        "kitware",
+        "cmake",
+        _root(tags={"3.28.1_20260216120000": TagEntry(content=committed_digest, observed="T0")}),
+    )
+    _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
+    _committed_tag(registry, _CMAKE_REPO, "3.28.1_20260216120000")
+    github = FakeGitHub()
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+
+    result = _run(_args(anomaly_ok=True), files=files, registry=registry, github=github)
+
+    assert result == ExitCode.OK
+    assert "pinned-tag-mutation" in github.issues[_ISSUE_TITLE][1]
+    summary = summary_file.read_text(encoding="utf-8")
+    assert "indexbot reconcile: anomaly detected" in summary
+    assert "pinned-tag-mutation" in summary
+    # Findings are fenced, never bare in the summary body (BD-4).
+    assert "```" in summary
+
+
+def test_anomaly_ok_does_not_change_the_clean_no_op_case() -> None:
+    result = _run(
+        _args(anomaly_ok=True), files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub()
+    )
+    assert result == ExitCode.OK
 
 
 # --- verify_claims findings: subset semantics + escalation disposition ----

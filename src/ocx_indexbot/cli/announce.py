@@ -16,7 +16,7 @@ never here.
 
 Pipeline: resolve the curated tag set (`--tags`/`--tags-file`) -> read the
 current committed root from the index repo at `main`
-(`GitHubPort.get_file_contents`, always via `index_github` — read-only,
+(`ForgePort.get_file_contents`, always via `index_github` — read-only,
 unauthenticated for `--out`) -> missing root -> `ValidationError`,
 "unclaimed namespace — new packages go through the human lane" ->
 `check_repository_allowlisted` (SSRF ordering, before any `RegistryPort`
@@ -30,7 +30,7 @@ add/remove authority the decision set calls for, no core change needed) ->
 write via `FilePort` under the wire paths; `--fork`: commit to a branch on
 the fork repo (`fork_github`, scoped to `--fork`) and open/update a PR
 against the index repo (`index_github`, scoped to `--index-repo`) with
-`head_owner` set to the fork's owner.
+`head_repo` set to the fork.
 """
 
 from __future__ import annotations
@@ -40,8 +40,10 @@ from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.core.desc import check_desc_change
 from ocx_indexbot.core.observe import observe_one_tag
+from ocx_indexbot.core.policy import FORGE_VALUES, IndexPolicy
 from ocx_indexbot.core.regenerate import regenerate
 from ocx_indexbot.core.validate_entry import (
+    TAG_NAME_RE,
     check_repository_allowlisted,
     parse_package_id,
     parse_package_root,
@@ -53,13 +55,22 @@ from ocx_indexbot.model import Yank
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Iterator
 
     from ocx_indexbot.core.observe import Observation
     from ocx_indexbot.model import PackageId, PackageRoot
-    from ocx_indexbot.ports import ClockPort, FilePort, GitHubPort, RegistryPort
+    from ocx_indexbot.ports import ClockPort, FilePort, ForgePort, RegistryPort
 
 BASE_REF: Final[str] = "main"
-_DEFAULT_INDEX_REPO: Final[str] = "ocx-sh/index"
+"""`--base-ref`'s default, and what `cli/_wiring.py` reads this deployment's
+own policy file at before `announce.run`'s `args.base_ref` is even parsed
+(the bootstrap has no policy yet to name a branch, let alone `args`).
+`.github/index-policy.json` names an owner and a forge but never a
+default-branch name — GitLab and a corporate GitHub org alike are free to
+call it something other than `main` — so the per-run override is a CLI flag
+a publisher passes, not a policy field: `announce` is a local tool invoked
+per run, the same reason `--index-repo` and `--forge` are flags here rather
+than config. This constant is only the fallback both places share."""
 _DEFAULT_YANK_REASON: Final[str] = "yanked via announce"
 _PNG_MAGIC: Final[bytes] = b"\x89PNG\r\n\x1a\n"
 
@@ -83,7 +94,23 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--fork", default=None, help="<owner>/<repo> fork to commit to and open a PR from"
     )
     parser.add_argument(
-        "--index-repo", default=_DEFAULT_INDEX_REPO, help="<owner>/<repo> of the index repository"
+        "--index-repo",
+        required=True,
+        help="the index repository to announce into — <owner>/<repo> on GitHub, a "
+        "namespace path or numeric project id on GitLab",
+    )
+    parser.add_argument(
+        "--forge",
+        choices=sorted(FORGE_VALUES),
+        default=None,
+        help="which forge hosts --index-repo and --fork; defaults to the CI runner's "
+        "own signal, then to github",
+    )
+    parser.add_argument(
+        "--base-ref",
+        default=BASE_REF,
+        help=f"the index repository's default branch (default: {BASE_REF!r}) — the base "
+        "every announce PR opens against",
     )
     parser.add_argument(
         "--yank", action="append", default=[], metavar="TAG", help="mark TAG yanked"
@@ -99,16 +126,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _root_path(package_id: PackageId) -> str:
-    return f"p/{package_id.namespace}/{package_id.package}.json"
+    return f"p/{package_id}.json"
 
 
 def _cas_path(package_id: PackageId, digest: str, extension: str) -> str:
     hex_digest = digest.removeprefix("sha256:")
-    return f"p/{package_id.namespace}/{package_id.package}/o/sha256/{hex_digest}.{extension}"
+    return f"p/{package_id}/o/sha256/{hex_digest}.{extension}"
 
 
 def _branch_name(package_id: PackageId) -> str:
-    return f"indexbot-announce-{package_id.namespace}-{package_id.package}"
+    return "indexbot-announce-" + "-".join(package_id.segments)
 
 
 def _logo_extension(data: bytes) -> str:
@@ -132,10 +159,43 @@ def _resolve_curated_tags(args: argparse.Namespace, *, files: FilePort) -> tuple
         if content is None:
             raise ValidationError(f"{tags_file!r} does not exist")
         raw = content
-    tags = tuple(part.strip() for part in raw.replace("\n", ",").split(",") if part.strip())
+    tags = tuple(_tag_tokens(raw))
     if not tags:
         raise ValidationError("no tags given (--tags/--tags-file was empty)")
+    # `observe_one_tag` below hands `tag` straight to `RegistryPort.get_manifest`,
+    # which builds a registry URL from it — `parse_package_root`'s A-5 grammar
+    # check guards the *committed* side of that call (a tag already in a root),
+    # but this is the earlier, uncommitted side: a curated tag never passes
+    # through `parse_package_root` before reaching the registry. Percent-encoding
+    # in the adapter and `validate`'s pre-merge check both still hold, so a bad
+    # tag here is loud-later rather than a hole — but the grammar belongs at the
+    # boundary where untrusted input becomes a registry call, not two steps past
+    # it. Same constant as the committed-side check (`core/validate_entry`).
+    bad = sorted(tag for tag in tags if TAG_NAME_RE.fullmatch(tag) is None)
+    if bad:
+        raise ValidationError(
+            "tag name(s) do not match the OCI distribution tag grammar "
+            "(schema/root.schema.json's tags.propertyNames.pattern): "
+            + ", ".join(repr(tag) for tag in bad)
+        )
     return tags
+
+
+def _tag_tokens(raw: str) -> Iterator[str]:
+    """The tags in a `--tags` string or a `--tags-file`, comments dropped.
+
+    A tags file is a file a human maintains, so it grows `#` comments —
+    "# the curated set" — and without this every one of them was parsed as a
+    tag and failed with "does not resolve … check for a typo", which points
+    at the wrong thing entirely. Comments are line-scoped: `#` after a comma
+    on a shared line ends that line, and a tag may not contain `#` anyway.
+    """
+    for line in raw.splitlines():
+        body = line.split("#", 1)[0]
+        for part in body.split(","):
+            token = part.strip()
+            if token:
+                yield token
 
 
 def _apply_yank_markers(
@@ -173,32 +233,33 @@ def run(
     args: argparse.Namespace,
     *,
     registry: RegistryPort,
-    index_github: GitHubPort,
-    fork_github: GitHubPort | None,
+    index_github: ForgePort,
+    fork_github: ForgePort | None,
     files: FilePort,
     clock: ClockPort,
-    allowed_hosts: frozenset[str],
+    policy: IndexPolicy,
 ) -> ExitCode:
     """`indexbot announce` entry point. See module docstring for the
     pipeline. `fork_github` is `None` for `--out` mode (never touched on that
     path) and required (non-`None`) for `--fork` mode."""
-    package_id = parse_package_id(cast(str, args.package))
+    package_id = parse_package_id(cast(str, args.package), name_segments=policy.name_segments)
     curated_tags = _resolve_curated_tags(args, files=files)
     yank = tuple(cast("list[str]", args.yank))
     unyank = tuple(cast("list[str]", args.unyank))
     yank_reason = cast(str, args.yank_reason)
+    base_ref = cast(str, args.base_ref)
 
     root_path = _root_path(package_id)
-    current_raw = index_github.get_file_contents(root_path, BASE_REF)
+    current_raw = index_github.get_file_contents(root_path, base_ref)
     if current_raw is None:
         raise ValidationError(
-            f"unclaimed namespace: no committed root at {root_path!r} on {BASE_REF!r} for "
+            f"unclaimed namespace: no committed root at {root_path!r} on {base_ref!r} for "
             f"{package_id} — new packages go through the human lane"
         )
     current = parse_package_root(current_raw)
 
     # BD-1 SSRF ordering: must run before any RegistryPort call below.
-    check_repository_allowlisted(current.repository, allowed_hosts)
+    check_repository_allowlisted(current.repository, policy.registry_hosts)
 
     observations: list[Observation] = []
     for tag in curated_tags:
@@ -255,11 +316,10 @@ def run(
 
     fork = cast(str, args.fork)
     index_repo = cast(str, args.index_repo)
-    fork_owner, _, _fork_repo = fork.partition("/")
     branch = _branch_name(package_id)
-    github = cast("GitHubPort", fork_github)
+    github = cast("ForgePort", fork_github)
     # Root content above is generated from UPSTREAM index main
-    # (`index_github.get_file_contents(root_path, BASE_REF)`) + live registry
+    # (`index_github.get_file_contents(root_path, base_ref)`) + live registry
     # truth, so a fresh announce branch must be cut from upstream's main tip,
     # not the fork's — a stale fork main would produce a stale merge-base and
     # risk a spurious CONFLICTING PR against any concurrent upstream change to
@@ -267,9 +327,16 @@ def run(
     # ref at an upstream SHA works. An already-open announce branch (on the
     # fork) is reused as-is — its own tip is the right base for a second
     # commit on the same PR.
-    base_sha = github.get_ref_sha(branch) or index_github.get_ref_sha(BASE_REF)
+    #
+    # `base_repo` is what makes that true on a forge where it is not free.
+    # A GitLab fork shares no object storage with its upstream — it answers
+    # 404 for the upstream tip — so the fork has to be told which project the
+    # base SHA lives in. It is passed only for a FRESH branch: an existing
+    # announce branch's own tip is already in the fork.
+    existing_tip = github.get_ref_sha(branch)
+    base_sha = existing_tip or index_github.get_ref_sha(base_ref)
     if base_sha is None:
-        raise ValidationError(f"base ref {BASE_REF!r} does not exist on {index_repo!r}")
+        raise ValidationError(f"base ref {base_ref!r} does not exist on {index_repo!r}")
 
     commit_files: dict[str, bytes | None] = dict(files_by_path)
     github.commit_files(
@@ -277,12 +344,13 @@ def run(
         base_sha=base_sha,
         message=f"announce: curate {package_id}",
         files=commit_files,
+        base_repo=None if existing_tip else index_repo,
     )
     index_github.open_or_update_pull_request(
         branch=branch,
-        base=BASE_REF,
+        base=base_ref,
         title=f"announce: curate {package_id}",
         body=f"Publisher-curated tag update for `{package_id}`.",
-        head_owner=fork_owner,
+        head_repo=fork,
     )
     return ExitCode.OK

@@ -49,8 +49,26 @@ bytes this index *stores* and is answerable for whatever the tag's
 disposition, so no yank excuses them.
 
 A non-empty escalating-finding set opens/updates one anomaly issue
-(`GitHubPort.create_or_update_issue`, promoted onto the port this stage) and
-then raises `AnomalyError` (exit 65) once the full sweep completes.
+(`ForgePort.create_or_update_issue`, promoted onto the port this stage) and
+then raises `AnomalyError` (exit 65) once the full sweep completes — unless
+`--anomaly-ok` is given.
+
+## `--anomaly-ok`: folding the CI-side exit-code translation in
+
+Both forges used to wrap this command in 3-4 shell steps that translated its
+raw exit code into what the *job* should do: 0 -> nothing; 65 -> print a
+notice pointing at the tracking issue this command already filed, and stay
+green (the filed issue is the human signal; failing the nightly build on top
+of an already-actioned condition is just alarm fatigue); 75 -> print an
+error and fail (backoff exhausted, the next scheduled run is the retry);
+anything else -> print an error and fail. `--anomaly-ok` is that middle
+translation, folded into the command itself: a caller that passes it gets
+`ExitCode.OK` instead of `AnomalyError` on a found-and-filed anomaly, plus
+the same notice written via `_common.write_ci_summary` instead of a
+hand-rolled `::warning`. It changes nothing else — a genuine `TransientError`
+(75) still propagates unchanged either way, because a transient failure is
+never "ok", and a caller that wants the raw ANOMALY (65) exit to detect the
+condition itself simply omits the flag.
 """
 
 from __future__ import annotations
@@ -60,6 +78,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.core.anomaly import check_tag_mutations
 from ocx_indexbot.core.observe import observe_one_tag
+from ocx_indexbot.core.policy import IndexPolicy
 from ocx_indexbot.core.validate_entry import (
     check_repository_allowlisted,
     check_repository_shape,
@@ -71,13 +90,15 @@ from ocx_indexbot.errors import AnomalyError, ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import PackageId
 
+from ._common import write_ci_summary
+
 if TYPE_CHECKING:
     import argparse
 
     from ocx_indexbot.core.anomaly import AnomalyFinding
     from ocx_indexbot.core.observe import Observation
     from ocx_indexbot.core.verify_claims import ClaimFinding
-    from ocx_indexbot.ports import FilePort, GitHubPort, RegistryPort
+    from ocx_indexbot.ports import FilePort, ForgePort, RegistryPort
 
 _ROOT_PREFIX: Final[str] = "p/"
 _ISSUE_TITLE: Final[str] = "indexbot reconcile: anomalies detected"
@@ -97,6 +118,17 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     for a dry run to skip."""
     parser.add_argument(
         "--package", default=None, help="scope the sweep to one <namespace>/<package>"
+    )
+    parser.add_argument(
+        "--anomaly-ok",
+        action="store_true",
+        help=(
+            "exit 0 (not 65) when an anomaly is found — it is already filed/updated as a "
+            "tracking issue by this run, so a scheduled job that wants to stay green on an "
+            "already-actioned condition and fail only on a genuine transient error (exit 75) "
+            "sets this. Without it, reconcile keeps the raw ANOMALY exit-65 contract (ADR-4 "
+            "BD-2) for a caller that wants to detect the anomaly itself."
+        ),
     )
 
 
@@ -122,34 +154,39 @@ class _PackageReport:
 
 
 def _root_path(package_id: PackageId) -> str:
-    return f"{_ROOT_PREFIX}{package_id.namespace}/{package_id.package}.json"
+    return f"{_ROOT_PREFIX}{package_id}.json"
 
 
-def _discover_package_ids(files: FilePort, *, scope: PackageId | None) -> tuple[PackageId, ...]:
+def _discover_package_ids(
+    files: FilePort, *, scope: PackageId | None, name_segments: int
+) -> tuple[PackageId, ...]:
     """Every `p/<namespace>/<package>.json` root, excluding CAS subtrees.
 
-    A root is exactly two path segments under `p/` whose second segment ends
-    in `.json`; a CAS object lives three-plus segments deep
+    A root is exactly `name_segments` path segments under `p/` whose last
+    segment ends in `.json`; a CAS object lives deeper
     (`p/<ns>/<pkg>/o/sha256/<hex>.<ext>`) and is filtered out by the
     segment-count check alone.
     """
     ids: list[PackageId] = []
     for path in files.list_files(_ROOT_PREFIX):
         segments = path.removeprefix(_ROOT_PREFIX).split("/")
-        if len(segments) != 2 or not segments[1].endswith(".json"):
+        # A root document sits at exactly the declared depth. Anything deeper
+        # is that package's own CAS subtree (`.../o/sha256/<hex>.json`), which
+        # this listing must not mistake for a root of its own.
+        if len(segments) != name_segments or not segments[-1].endswith(".json"):
             continue
-        namespace, filename = segments
-        ids.append(PackageId(namespace=namespace, package=filename.removesuffix(".json")))
+        segments[-1] = segments[-1].removesuffix(".json")
+        ids.append(PackageId(segments=tuple(segments)))
     if scope is not None:
         ids = [package_id for package_id in ids if package_id == scope]
     return tuple(sorted(ids, key=str))
 
 
-def _resolve_scope(args: argparse.Namespace) -> PackageId | None:
+def _resolve_scope(args: argparse.Namespace, *, name_segments: int) -> PackageId | None:
     raw = getattr(args, "package", None)
     if not raw:
         return None
-    return parse_package_id(raw)
+    return parse_package_id(raw, name_segments=name_segments)
 
 
 def _cas_bytes_by_digest(
@@ -159,7 +196,7 @@ def _cas_bytes_by_digest(
     named by `root` with no matching CAS file at all is simply absent from
     the returned map — `verify_claims` reports that as
     `cas-object-missing`/`desc-blob-missing`, never a `KeyError` here."""
-    prefix = f"{_ROOT_PREFIX}{package_id.namespace}/{package_id.package}/o/sha256/"
+    prefix = f"{_ROOT_PREFIX}{package_id}/o/sha256/"
     paths_by_digest = {
         f"sha256:{path.rsplit('/', 1)[-1].split('.', 1)[0]}": path
         for path in files.list_files(prefix)
@@ -176,7 +213,7 @@ def _verify_one(
     *,
     files: FilePort,
     registry: RegistryPort,
-    allowed_hosts: frozenset[str],
+    policy: IndexPolicy,
 ) -> _PackageReport | None:
     """One package's verify-only sweep step. `None` if the root vanished
     between `list_files` and this read (the same race the previous
@@ -188,7 +225,7 @@ def _verify_one(
 
     # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
     # call below.
-    check_repository_allowlisted(root.repository, allowed_hosts)
+    check_repository_allowlisted(root.repository, policy.registry_hosts)
     check_repository_shape(root.repository)
 
     yanked_tags = frozenset(tag for tag, entry in root.tags.items() if entry.yanked is not None)
@@ -257,8 +294,8 @@ def run(
     *,
     files: FilePort,
     registry: RegistryPort,
-    github: GitHubPort,
-    allowed_hosts: frozenset[str],
+    github: ForgePort,
+    policy: IndexPolicy,
 ) -> ExitCode:
     """Full-index verify-only sweep. `args.package` (optional
     `<namespace>/<package>` scope string) is read if present, defaulting to
@@ -268,15 +305,13 @@ def run(
     module (functional core / imperative shell) — `cli/_wiring.py` supplies
     the real adapters; tests supply `tests/fakes`.
     """
-    scope = _resolve_scope(args)
-    package_ids = _discover_package_ids(files, scope=scope)
+    scope = _resolve_scope(args, name_segments=policy.name_segments)
+    package_ids = _discover_package_ids(files, scope=scope, name_segments=policy.name_segments)
 
     findings: list[str] = []
     checked = 0
     for package_id in package_ids:
-        report = _verify_one(
-            package_id, files=files, registry=registry, allowed_hosts=allowed_hosts
-        )
+        report = _verify_one(package_id, files=files, registry=registry, policy=policy)
         if report is None:
             continue
         checked += 1
@@ -287,6 +322,20 @@ def run(
         summary = f"verified {checked} package(s); {len(findings)} anomaly(ies): {detail}"
         github.create_or_update_issue(title=_ISSUE_TITLE, body=summary, labels=["anomaly"])
         print(summary)
+        if cast(bool, getattr(args, "anomaly_ok", False)):
+            # The CI-side translation `.github/workflows/reconcile.yml` and the
+            # GitLab lane used to do in shell: the tracking issue above is
+            # already the human signal (ADR-6 FP-3, never auto-healed), so
+            # this stays green rather than failing the run on top of an
+            # already-actioned condition. Findings go inside a fenced block —
+            # never an annotation title — because they can carry
+            # registry-observed tag names and digests (BD-4).
+            write_ci_summary(
+                "indexbot reconcile: anomaly detected",
+                "An integrity anomaly was detected; the tracking issue is already "
+                f"filed/updated (never auto-healed, ADR-6 FP-3). Findings:\n\n```\n{detail}\n```",
+            )
+            return ExitCode.OK
         raise AnomalyError(summary)
 
     summary = f"verified {checked} package(s); 0 anomalies"

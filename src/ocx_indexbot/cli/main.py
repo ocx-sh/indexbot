@@ -31,12 +31,19 @@ from typing import cast
 
 from ocx_indexbot import __version__
 from ocx_indexbot.cli import announce as _announce_cli
+from ocx_indexbot.cli import ci_cmd as _ci_cli
 from ocx_indexbot.cli import classify_pr as _classify_pr_cli
 from ocx_indexbot.cli import governance_check as _governance_check_cli
+from ocx_indexbot.cli import governance_gate as _governance_gate_cli
+from ocx_indexbot.cli import governance_poll as _governance_poll_cli
+from ocx_indexbot.cli import label_failed_run as _label_failed_run_cli
 from ocx_indexbot.cli import reconcile as _reconcile_cli
+from ocx_indexbot.cli import schema_cmd as _schema_cli
+from ocx_indexbot.cli import stale as _stale_cli
 from ocx_indexbot.cli import validate as _validate_cli
+from ocx_indexbot.cli import validate_pr as _validate_pr_cli
 from ocx_indexbot.cli import workflows_check as _workflows_check_cli
-from ocx_indexbot.cli._common import write_github_step_summary
+from ocx_indexbot.cli._common import write_ci_summary
 from ocx_indexbot.cli._wiring import DISPATCH as _PRODUCTION_DISPATCH
 from ocx_indexbot.errors import IndexBotError
 from ocx_indexbot.exit_codes import ExitCode
@@ -55,6 +62,11 @@ def _add_render_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--check", action="store_true", help="report drift against the --out tree, write nothing"
+    )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="render an index with no package roots (a new index before its first announce)",
     )
 
 
@@ -101,11 +113,18 @@ _ARG_POPULATORS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "announce": _announce_cli.add_arguments,
     "reconcile": _reconcile_cli.add_arguments,
     "validate": _validate_cli.add_arguments,
+    "validate-pr": _validate_pr_cli.add_arguments,
     "render": _add_render_arguments,
     "seed-import": _add_seed_import_arguments,
     "classify-pr": _classify_pr_cli.add_arguments,
     "governance-check": _governance_check_cli.add_arguments,
+    "governance-gate": _governance_gate_cli.add_arguments,
+    "governance-poll": _governance_poll_cli.add_arguments,
+    "label-failed-run": _label_failed_run_cli.add_arguments,
+    "stale": _stale_cli.add_arguments,
+    "ci": _ci_cli.add_arguments,
     "workflows-check": _workflows_check_cli.add_arguments,
+    "schema": _schema_cli.add_arguments,
 }
 """Subcommand name -> its subparser's CLI-surface populator. A name present
 in `_DISPATCH` but absent here (e.g. a test's `monkeypatch`-injected handler)
@@ -145,8 +164,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         # summary in addition to its stderr line — the single chokepoint, so
         # no subcommand can regress to a bare error exit. The BD-2 exit-code
         # mapping (`exc.exit_code`) is unchanged — this only ADDS the emit.
+        #
+        # `str(exc)` is NOT caller-owned text: a `ForgeError`'s message
+        # embeds up to 400 bytes of the remote forge's own response body
+        # (`adapters/_http.raise_for_status`), and this chokepoint catches
+        # every `IndexBotError` subclass alike, so it cannot tell which
+        # messages are safe. `write_ci_summary`'s `reason` position renders
+        # unfenced — exactly the ADR-4 BD-4 spot reserved for text this
+        # process authored itself (`cli/validate_pr.py` follows the same
+        # split) — so the exception text goes in `detail`, fenced, and
+        # `reason` stays a fixed string this code wrote.
         print(str(exc), file=sys.stderr)
-        write_github_step_summary(f"indexbot {command} failed", str(exc))
+        write_ci_summary(
+            f"indexbot {command} failed",
+            f"exit {int(exc.exit_code)}. Details below.",
+            str(exc),
+        )
         return int(exc.exit_code)
 
 

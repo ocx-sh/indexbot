@@ -45,6 +45,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from ocx_indexbot.core.policy import IndexPolicy
 from ocx_indexbot.core.render import FileWrite, SourcePackage, build_render_plan
 from ocx_indexbot.core.validate_entry import parse_package_root
 from ocx_indexbot.errors import ValidationError
@@ -59,13 +60,22 @@ if TYPE_CHECKING:
 
 def _p_prefix(index_dir: str) -> str:
     """`index_dir` (a `--index-dir` value, no trailing slash required)
-    normalized to the `p/` listing prefix within `files`."""
-    stripped = index_dir.rstrip("/")
-    return f"{stripped}/p/" if stripped else "p/"
+    normalized to the `p/` listing prefix within `files`.
+
+    `.` and `./` mean "the index is the current directory" to every shell on
+    earth, and `--index-dir .` is what a hand-written pipeline types. A
+    `FilePort` key never carries that prefix, so the un-normalized `./p/`
+    matched nothing and rendered a complete, valid, **empty** index — exit 0,
+    `{"packages":{}}`, deployed over a populated one. Measured live.
+    """
+    stripped = index_dir.strip().rstrip("/")
+    if stripped in {"", "."}:
+        return "p/"
+    return f"{stripped.removeprefix('./')}/p/"
 
 
 def _package_dir(index_dir: str, package_id: PackageId) -> str:
-    return f"{_p_prefix(index_dir)}{package_id.namespace}/{package_id.package}"
+    return f"{_p_prefix(index_dir)}{package_id}"
 
 
 def _output_prefix(output_root: str) -> str:
@@ -86,9 +96,12 @@ def _read_required_bytes(files: FilePort, path: str) -> bytes:
     return content
 
 
-def _package_roots(files: FilePort, index_dir: str) -> list[tuple[PackageId, str]]:
+def _package_roots(
+    files: FilePort, index_dir: str, *, name_segments: int
+) -> list[tuple[PackageId, str]]:
     """`(PackageId, root_path)` for every `p/<namespace>/<package>.json` --
-    exactly two path segments under the `p/` prefix ending in `.json`, which
+    exactly `name_segments` path segments under the `p/` prefix ending in
+    `.json`, which
     excludes every CAS subtree file (`p/<ns>/<pkg>/o/sha256/**`, always
     3+ segments). Mirrors `cli/reconcile.py`'s `_discover_package_ids`
     predicate verbatim -- see `open_questions` re: extracting a shared
@@ -97,10 +110,11 @@ def _package_roots(files: FilePort, index_dir: str) -> list[tuple[PackageId, str
     roots: list[tuple[PackageId, str]] = []
     for path in files.list_files(prefix):
         segments = path.removeprefix(prefix).split("/")
-        if len(segments) == 2 and segments[1].endswith(".json"):
-            namespace, filename = segments
-            package_id = PackageId(namespace=namespace, package=filename.removesuffix(".json"))
-            roots.append((package_id, path))
+        # A root document sits at exactly the declared depth; anything deeper
+        # is that package's own CAS subtree, not a root of its own.
+        if len(segments) == name_segments and segments[-1].endswith(".json"):
+            segments[-1] = segments[-1].removesuffix(".json")
+            roots.append((PackageId(segments=tuple(segments)), path))
     return roots
 
 
@@ -119,10 +133,12 @@ def _load_source_package(
     )
 
 
-def _load_source_packages(files: FilePort, index_dir: str) -> list[SourcePackage]:
+def _load_source_packages(
+    files: FilePort, index_dir: str, *, name_segments: int
+) -> list[SourcePackage]:
     return [
         _load_source_package(files, index_dir, package_id, root_path)
-        for package_id, root_path in _package_roots(files, index_dir)
+        for package_id, root_path in _package_roots(files, index_dir, name_segments=name_segments)
     ]
 
 
@@ -149,9 +165,10 @@ def _tree_drifted(files: FilePort, output_root: str, file_writes: tuple[FileWrit
     return False
 
 
-def run(args: argparse.Namespace, *, files: FilePort) -> ExitCode:
+def run(args: argparse.Namespace, *, files: FilePort, policy: IndexPolicy) -> ExitCode:
     """`indexbot render` entry point. Expected `args` attributes:
-    `index_dir` (str, required), `out` (str, required), `check` (bool) --
+    `index_dir` (str, required), `out` (str, required), `check` (bool),
+    `allow_empty` (bool) --
     argparse's default dest derivation already maps `--index-dir`/`--out`/
     `--check` to those names, so WP2-M's `subparsers.add_parser` wiring
     needs no extra `dest=` overrides.
@@ -160,7 +177,15 @@ def run(args: argparse.Namespace, *, files: FilePort) -> ExitCode:
     out = cast(str, args.out)
     check = bool(getattr(args, "check", False))
 
-    plan = build_render_plan(_load_source_packages(files, index_dir))
+    sources = _load_source_packages(files, index_dir, name_segments=policy.name_segments)
+    if not sources and not bool(getattr(args, "allow_empty", False)):
+        raise ValidationError(
+            f"render found no package roots under {_p_prefix(index_dir)!r} — "
+            "a typo in --index-dir renders a valid but EMPTY index, which then "
+            "deploys over a populated one. Pass --allow-empty if that is really "
+            "what you mean (a brand-new index before its first announce)."
+        )
+    plan = build_render_plan(sources, name_segments=policy.name_segments)
 
     if check:
         return ExitCode.VALIDATION_FAILURE if _tree_drifted(files, out, plan) else ExitCode.OK

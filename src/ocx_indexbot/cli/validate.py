@@ -2,7 +2,7 @@
 (CONTRACTS.md §12).
 
 Takes changed `p/<namespace>/<package>.json` root paths as CLI positional
-args (the workflow's `git diff` step passes them — no `GitHubPort`, no
+args (the workflow's `git diff` step passes them — no `ForgePort`, no
 write-scoped token, this runs in a job with anonymous GHCR reads only).
 Per changed root: every `core/validate_entry.py` structural check, then
 (unless `--offline`) `core/registry_checks.py`'s two G-15 network checks
@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from ocx_indexbot.core.diff import classify_change
+from ocx_indexbot.core.policy import IndexPolicy
 from ocx_indexbot.core.registry_checks import check_digest_in_scope, check_ownership
 from ocx_indexbot.core.validate_entry import (
     check_digest_self_consistent,
@@ -56,6 +57,7 @@ from ocx_indexbot.exit_codes import ExitCode
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Sequence
 
     from ocx_indexbot.model import PackageId, PackageRoot
     from ocx_indexbot.ports import FilePort, RegistryPort
@@ -106,8 +108,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _package_id_from_root_path(path: str) -> PackageId:
-    """`p/<namespace>/<package>.json` -> a validated `PackageId`.
+def _package_id_from_root_path(path: str, *, name_segments: int) -> PackageId:
+    """`p/<segments>.json` -> a validated `PackageId`.
 
     Reuses `validate_entry.parse_package_id` for the namespace/package
     shape check (length caps + `PACKAGE_ID_RE`) rather than hand-rolling a
@@ -117,11 +119,11 @@ def _package_id_from_root_path(path: str) -> PackageId:
     that is meant to carry the same shape.
     """
     parts = path.split("/")
-    if len(parts) != 3 or parts[0] != "p" or not parts[2].endswith(".json"):
-        raise ValidationError(f"{path!r} is not a p/<namespace>/<package>.json root path")
-    namespace, filename = parts[1], parts[2]
-    package = filename.removesuffix(".json")
-    return parse_package_id(f"{namespace}/{package}")
+    if len(parts) != name_segments + 1 or parts[0] != "p" or not parts[-1].endswith(".json"):
+        raise ValidationError(
+            f"{path!r} is not a root path for an index declaring name_segments = {name_segments}"
+        )
+    return parse_package_id("/".join(parts[1:]).removesuffix(".json"), name_segments=name_segments)
 
 
 def _is_announce_shaped_update(path: str, root: PackageRoot, base_files: FilePort | None) -> bool:
@@ -151,7 +153,7 @@ def _is_announce_shaped_update(path: str, root: PackageRoot, base_files: FilePor
     Fail-closed by construction: no `--base-dir`, or no such root at the base
     ref, means "new claim", which is what ND-4 is for. This predicate answers
     "is this an update?" only — the caller still narrows the admitted set to
-    `RESERVED_BRAND_SEGMENTS`, so no base-ref state ever unlocks a
+    the deployment's own `reserved_namespaces`, so no base-ref state ever unlocks a
     control-path or generic segment.
     """
     if base_files is None:
@@ -162,18 +164,18 @@ def _is_announce_shaped_update(path: str, root: PackageRoot, base_files: FilePor
     return classify_change(parse_package_root(base_raw), root) == "refresh"
 
 
-def _cas_prefix(namespace: str, package: str) -> str:
-    return f"p/{namespace}/{package}/o/sha256/"
+def _cas_prefix(package_id: PackageId) -> str:
+    return f"p/{package_id}/o/sha256/"
 
 
-def _cas_paths_by_digest(files: FilePort, namespace: str, package: str) -> dict[str, str]:
+def _cas_paths_by_digest(files: FilePort, package_id: PackageId) -> dict[str, str]:
     """digest string -> its CAS file path, for every file actually present
     under this package's `o/sha256/` tree. Built once per validated root so
     `desc.readme`/`desc.logo` byte lookups (extension unknown ahead of time,
     unlike a tag's always-`.json` object) don't re-list the same prefix per
     field, and so the byte-exact-discipline blanket hash-check below can walk
     every present file exactly once."""
-    prefix = _cas_prefix(namespace, package)
+    prefix = _cas_prefix(package_id)
     return {
         f"sha256:{file_path.rsplit('/', 1)[-1].split('.', 1)[0]}": file_path
         for file_path in files.list_files(prefix)
@@ -185,7 +187,7 @@ def _validate_one(
     *,
     files: FilePort,
     registry: RegistryPort,
-    allowed_hosts: frozenset[str],
+    policy: IndexPolicy,
     offline: bool,
     allow_reserved: bool,
     base_files: FilePort | None,
@@ -212,10 +214,10 @@ def _validate_one(
                 f"{path!r}: committed bytes are not the canonical root serialization "
                 "(byte-exact discipline)"
             )
-        package_id = _package_id_from_root_path(path)
+        package_id = _package_id_from_root_path(path, name_segments=policy.name_segments)
 
-        check_name_matches_path(package_id, root)
-        check_superseded_by(root)
+        check_name_matches_path(package_id, root, index_name=policy.name)
+        check_superseded_by(root, index_name=policy.name, name_segments=policy.name_segments)
         check_upstream_repository_url_scheme(root)
         check_tag_timestamps_z_anchored(root)
         check_no_reserved_tags(root)
@@ -227,7 +229,11 @@ def _validate_one(
                 file=sys.stderr,
             )
         try:
-            check_namespace_not_reserved(package_id, allow_reserved=allow_reserved)
+            check_namespace_not_reserved(
+                package_id,
+                operator_reserved=policy.reserved_namespaces,
+                allow_reserved=allow_reserved,
+            )
         except ValidationError:
             # ND-4 gates CLAIMING a reserved segment, not UPDATING a root
             # already committed under one. Re-raise unless this is an
@@ -241,7 +247,11 @@ def _validate_one(
             # (`admin`, `root`, ...) segments stay blocked no matter what the
             # base ref holds — the collision they guard is with the URL layout
             # itself, not with a brand, so "already committed" is no argument.
-            check_namespace_not_reserved(package_id, allow_reserved=True)
+            check_namespace_not_reserved(
+                package_id,
+                operator_reserved=policy.reserved_namespaces,
+                allow_reserved=True,
+            )
             print(
                 f"{path}: reserved segment admitted — announce-shaped update to a root "
                 "already committed on the base ref (ADR-2 ND-4 gates claiming, not updating)",
@@ -249,7 +259,7 @@ def _validate_one(
             )
         # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
         # call reachable below.
-        check_repository_allowlisted(root.repository, allowed_hosts)
+        check_repository_allowlisted(root.repository, policy.registry_hosts)
         check_repository_shape(root.repository)
 
         for entry in root.tags.values():
@@ -261,7 +271,7 @@ def _validate_one(
             if root.desc.logo is not None:
                 parse_digest(root.desc.logo)
 
-        paths_by_digest = _cas_paths_by_digest(files, package_id.namespace, package_id.package)
+        paths_by_digest = _cas_paths_by_digest(files, package_id)
         cas_digests = frozenset(paths_by_digest)
         check_no_dangling_references(root, cas_digests)
 
@@ -349,7 +359,13 @@ def _validate_one(
     return FileReport(path=path, exit_code=ExitCode.OK, warnings=tuple(warnings))
 
 
-def _print_report(report: FileReport) -> None:
+def print_report(report: FileReport) -> None:
+    """One structured stderr line per file, plus one per warning.
+
+    Public because `cli/validate_pr.py` runs the same validation over a file
+    set it computes itself and must present it identically — the PR gate is
+    the same check whether the workflow or the bot resolved the diff.
+    """
     if report.exit_code == ExitCode.OK:
         print(f"{report.path}: OK", file=sys.stderr)
     else:
@@ -358,12 +374,51 @@ def _print_report(report: FileReport) -> None:
         print(f"{report.path}: WARN - {warning}", file=sys.stderr)
 
 
+def validate_paths(
+    paths: Sequence[str],
+    *,
+    files: FilePort,
+    registry: RegistryPort,
+    policy: IndexPolicy,
+    offline: bool,
+    allow_reserved: bool,
+    base_files: FilePort | None,
+) -> list[FileReport]:
+    """Every path's `FileReport`, in the order given — the whole of what this
+    subcommand does, with argparse and stderr peeled off.
+
+    `run` below is the `indexbot validate` binding; `cli/validate_pr.py` is
+    the `indexbot validate-pr` one, which resolves `paths`, `base_files` and
+    `allow_reserved` from the pull request itself instead of taking them from
+    a workflow's shell step. Both call THIS, so a rule can never hold on one
+    lane and not the other.
+    """
+    return [
+        _validate_one(
+            path,
+            files=files,
+            registry=registry,
+            policy=policy,
+            offline=offline,
+            allow_reserved=allow_reserved,
+            base_files=base_files,
+        )
+        for path in paths
+    ]
+
+
+def worst_exit_code(reports: Sequence[FileReport]) -> ExitCode:
+    """The worst outcome across `reports` (`OK` < `VALIDATION_FAILURE` <
+    `ANOMALY`), or `OK` for an empty set."""
+    return max((report.exit_code for report in reports), default=ExitCode.OK)
+
+
 def run(
     args: argparse.Namespace,
     *,
     files: FilePort,
     registry: RegistryPort,
-    allowed_hosts: frozenset[str],
+    policy: IndexPolicy,
     base_files: FilePort | None = None,
 ) -> ExitCode:
     """`indexbot validate <path> [<path> ...] [--offline] [--allow-reserved-namespace]`
@@ -385,19 +440,16 @@ def run(
     offline = cast(bool, args.offline)
     allow_reserved = cast(bool, args.allow_reserved_namespace)
 
-    reports = [
-        _validate_one(
-            path,
-            files=files,
-            registry=registry,
-            allowed_hosts=allowed_hosts,
-            offline=offline,
-            allow_reserved=allow_reserved,
-            base_files=base_files,
-        )
-        for path in paths
-    ]
+    reports = validate_paths(
+        paths,
+        files=files,
+        registry=registry,
+        policy=policy,
+        offline=offline,
+        allow_reserved=allow_reserved,
+        base_files=base_files,
+    )
     for report in reports:
-        _print_report(report)
+        print_report(report)
 
-    return max((report.exit_code for report in reports), default=ExitCode.OK)
+    return worst_exit_code(reports)
