@@ -494,6 +494,19 @@ def test_add_labels_merges_instead_of_replacing() -> None:
 
 
 @respx.mock
+def test_remove_label_is_a_delta_not_an_assignment() -> None:
+    """`remove_labels` mirrors `add_labels`: naming one label leaves every
+    other label on the merge request alone, including a human's own."""
+    update = respx.put(f"{_PROJECT}/merge_requests/7").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    _client().remove_label(7, "human-review-required")
+
+    assert _body(update) == {"remove_labels": "human-review-required"}
+
+
+@respx.mock
 def test_enable_auto_merge_sets_merge_when_pipeline_succeeds() -> None:
     merge = respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
         return_value=httpx.Response(200, json={})

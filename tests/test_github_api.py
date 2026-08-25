@@ -377,6 +377,44 @@ def test_add_labels_success() -> None:
     assert route.called
 
 
+# ---- remove_label -------------------------------------------------------------
+
+
+@respx.mock
+def test_remove_label_success() -> None:
+    route = respx.delete(
+        "https://api.github.com/repos/ocx-sh/index/issues/7/labels/human-review-required"
+    ).mock(return_value=httpx.Response(200, json=[{"name": "refresh"}]))
+
+    _client().remove_label(7, "human-review-required")
+
+    assert route.called
+
+
+@respx.mock
+def test_remove_label_tolerates_a_label_that_is_not_there() -> None:
+    """404 answers both "not on this pull request" and "not in this
+    repository", and the caller wanted neither of them to be there. Raising
+    would end a governance sweep over a label that is already absent."""
+    respx.delete(
+        "https://api.github.com/repos/ocx-sh/index/issues/7/labels/human-review-required"
+    ).mock(return_value=httpx.Response(404, json={"message": "Label does not exist"}))
+
+    _client().remove_label(7, "human-review-required")
+
+
+@respx.mock
+def test_remove_label_raises_on_a_real_failure() -> None:
+    """Only 404 is swallowed. A 422 means the request was wrong, and a sweep
+    that hid it would leave the stale label in place with nothing said."""
+    respx.delete(
+        "https://api.github.com/repos/ocx-sh/index/issues/7/labels/human-review-required"
+    ).mock(return_value=httpx.Response(422, json={"message": "Validation Failed"}))
+
+    with pytest.raises(ForgeError):
+        _client().remove_label(7, "human-review-required")
+
+
 # ---- enable_auto_merge --------------------------------------------------------
 
 

@@ -70,7 +70,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from ocx_indexbot.cli.classify_pr import classify_pull_request
+from ocx_indexbot.cli.classify_pr import apply_change_class, classify_pull_request
 from ocx_indexbot.cli.governance_check import gate_pull_request
 from ocx_indexbot.exit_codes import ExitCode
 
@@ -156,7 +156,7 @@ def gate_pull_request_and_sync_auto_merge(
     """
     info = github.get_pull_request_info(number)
     change_class = classify_pull_request(info, github, policy=policy)
-    github.add_labels(number, [change_class])
+    apply_change_class(info, change_class, github)
     state = gate_pull_request(info, change_class, github, policy=policy)
     if arm:
         sync_auto_merge(number, github, disposition=state, head_sha=info.head_sha)

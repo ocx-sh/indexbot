@@ -250,6 +250,17 @@ class GitHubApi:
         self._check_transient(response)
         self._raise(response)
 
+    def remove_label(self, pr_number: int, label: str) -> None:
+        """404 is the answer for both "no such label on this PR" and "no such
+        label in this repository", and neither is a failure of the caller's
+        intent — the label is not on the PR either way."""
+        with self._client() as client:
+            response = client.delete(self._repo_url("issues", str(pr_number), "labels", label))
+        self._check_transient(response)
+        if response.status_code == 404:
+            return
+        self._raise(response)
+
     def enable_auto_merge(self, pr_number: int, *, head_sha: str) -> None:
         with self._client() as client:
             pr_response = client.get(self._repo_url("pulls", str(pr_number)))

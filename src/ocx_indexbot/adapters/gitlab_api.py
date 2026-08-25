@@ -265,6 +265,15 @@ class GitLabApi:
             {"add_labels": ",".join(labels)},
         )
 
+    def remove_label(self, pr_number: int, label: str) -> None:
+        """`remove_labels` is the mirror of `add_labels`: a delta, not an
+        assignment, so a label that is not there is simply not removed and
+        GitLab answers 200 either way."""
+        self._put(
+            self._project_url("merge_requests", str(pr_number)),
+            {"remove_labels": label},
+        )
+
     def enable_auto_merge(self, pr_number: int, *, head_sha: str) -> None:
         """GitLab's auto-merge is a flag on the merge call itself — no GraphQL
         counterpart to GitHub's `enablePullRequestAutoMerge`.

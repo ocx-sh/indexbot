@@ -20,7 +20,7 @@ function is the boring, single-source-of-truth option (CONTRACTS.md §13 item
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, cast, get_args
 
 from ocx_indexbot.core.diff import ChangeClass, classify_change
 from ocx_indexbot.core.grammar import package_id_max_length
@@ -199,6 +199,33 @@ def run(args: argparse.Namespace, *, github: ForgePort, policy: IndexPolicy) -> 
     info = github.get_pull_request_info(pr_number)
     classification = classify_pull_request(info, github, policy=policy)
 
-    github.add_labels(pr_number, [classification])
+    apply_change_class(info, classification, github)
     write_ci_output("classification", classification)
     return ExitCode.OK
+
+
+def apply_change_class(info: PullRequestInfo, change_class: ChangeClass, github: ForgePort) -> None:
+    """Make the PR's lane labels say exactly one thing: `change_class`.
+
+    `add_labels` merges, so a pull request reclassified between sweeps used to
+    keep the label its *previous* head earned. A merge request that arrived as
+    `human-review-required`, was corrected, and then merged as `refresh` ended
+    up carrying both — reading, to anyone auditing the repository later, as
+    automation that merged something a human was required to look at.
+
+    Nothing in the automation is misled by that: no `ForgePort.get_labels`
+    exists and every consumer re-derives the classification from the diff (see
+    this module's docstring). The labels are the *human's* record, and that is
+    exactly why a stale one is worth removing — a record only a human reads is
+    a record only a human can be misled by.
+
+    The removals come from `info.labels`, which
+    `ForgePort.get_pull_request_info` already carries for `indexbot stale`, so
+    this costs no extra round-trip on the common path where the class did not
+    change. Removing only what is actually there also keeps a deployment that
+    never had these labels from making three no-op writes per sweep.
+    """
+    github.add_labels(info.number, [change_class])
+    for stale in get_args(ChangeClass):
+        if stale != change_class and stale in info.labels:
+            github.remove_label(info.number, stale)

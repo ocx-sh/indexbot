@@ -49,6 +49,7 @@ def _github(
     changed_paths: tuple[str, ...],
     base_files: dict[str, PackageRoot | None],
     head_files: dict[str, PackageRoot | None],
+    labels: tuple[str, ...] = (),
 ) -> FakeGitHub:
     files: dict[tuple[str, str], bytes] = {}
     for path, root in base_files.items():
@@ -58,9 +59,16 @@ def _github(
         if root is not None:
             files[(path, _HEAD)] = serialize_package_root(root)
     info = PullRequestInfo(
-        number=pr_number, base_sha=_BASE, head_sha=_HEAD, changed_paths=changed_paths
+        number=pr_number,
+        base_sha=_BASE,
+        head_sha=_HEAD,
+        changed_paths=changed_paths,
+        labels=labels,
     )
-    return FakeGitHub(files=files, pull_request_info={pr_number: info})
+    github = FakeGitHub(files=files, pull_request_info={pr_number: info})
+    if labels:
+        github.labels[pr_number] = list(labels)
+    return github
 
 
 # --- add_arguments ---------------------------------------------------------
@@ -283,3 +291,73 @@ def test_run_missing_pull_request_propagates_key_error() -> None:
     github = FakeGitHub()
     with pytest.raises(KeyError):
         classify_pr.run(_args(pr_number=99), github=github, policy=make_policy())
+
+
+def test_a_reclassified_pull_request_stops_carrying_its_old_lane_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A merge request that arrived `human-review-required`, was corrected and
+    then merged as `refresh` used to carry both labels for good. `add_labels`
+    merges, and nothing ever took the old one off — so the repository's own
+    record said automation merged something a human was required to look at.
+
+    No part of the gate is misled by it (every consumer re-derives the class
+    from the diff), which is exactly the point: labels are the human's record,
+    so a stale one can only mislead a human."""
+    output_file = tmp_path / "output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    before = _root(tags={"1.0.0": TagEntry(content="sha256:" + "a" * 64, observed="T0")})
+    after = _root(tags={"1.0.0": TagEntry(content="sha256:" + "b" * 64, observed="T1")})
+    github = _github(
+        changed_paths=(_ROOT_PATH,),
+        base_files={_ROOT_PATH: before},
+        head_files={_ROOT_PATH: after},
+        labels=("human-review-required",),
+    )
+
+    assert classify_pr.run(_args(pr_number=1), github=github, policy=make_policy()) == (
+        classify_pr.ExitCode.OK
+    )
+
+    assert github.labels[1] == ["refresh"]
+
+
+def test_a_label_a_human_put_there_is_not_swept_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the three lane labels are the classifier's to own. Clearing the
+    label set wholesale would delete whatever a maintainer had added, which is
+    why this removes named labels rather than assigning the set."""
+    output_file = tmp_path / "output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    before = _root(tags={"1.0.0": TagEntry(content="sha256:" + "a" * 64, observed="T0")})
+    after = _root(tags={"1.0.0": TagEntry(content="sha256:" + "b" * 64, observed="T1")})
+    github = _github(
+        changed_paths=(_ROOT_PATH,),
+        base_files={_ROOT_PATH: before},
+        head_files={_ROOT_PATH: after},
+        labels=("needs-registry-access", "human-review-required"),
+    )
+
+    classify_pr.run(_args(pr_number=1), github=github, policy=make_policy())
+
+    assert github.labels[1] == ["needs-registry-access", "refresh"]
+
+
+def test_an_unchanged_classification_writes_no_removal() -> None:
+    """The common case is a sweep re-confirming the same class every half
+    hour. Removing the two it did not pick would be two API writes per open
+    merge request per tick, forever, to delete labels that were never there."""
+    before = _root(tags={"1.0.0": TagEntry(content="sha256:" + "a" * 64, observed="T0")})
+    after = _root(tags={"1.0.0": TagEntry(content="sha256:" + "b" * 64, observed="T1")})
+    github = _github(
+        changed_paths=(_ROOT_PATH,),
+        base_files={_ROOT_PATH: before},
+        head_files={_ROOT_PATH: after},
+        labels=("refresh",),
+    )
+    info = github.pull_request_info[1]
+
+    classify_pr.apply_change_class(info, "refresh", github)
+
+    assert "remove_label" not in github.calls

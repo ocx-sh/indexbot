@@ -199,7 +199,20 @@ class ForgePort(Protocol):
         ...
 
     def add_labels(self, pr_number: int, labels: list[str]) -> None:
-        """Add `labels` to the PR (classification labels, ADR-4 BD-5)."""
+        """Add `labels` to the PR (classification labels, ADR-4 BD-5).
+
+        Merges into whatever is already there. A human's own labels survive.
+        """
+        ...
+
+    def remove_label(self, pr_number: int, label: str) -> None:
+        """Remove `label` from the PR, or do nothing if it is not there.
+
+        Idempotent by contract: the caller clears the lane labels a *previous*
+        classification wrote without first reading which of them exist, and
+        both forges answer a removal of an absent label with a status this
+        method must swallow rather than raise on.
+        """
         ...
 
     def enable_auto_merge(self, pr_number: int, *, head_sha: str) -> None:

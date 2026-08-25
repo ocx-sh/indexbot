@@ -240,6 +240,20 @@ class FakeGitHub:
     def add_labels(self, pr_number: int, labels: list[str]) -> None:
         self.labels.setdefault(pr_number, []).extend(labels)
 
+    def remove_label(self, pr_number: int, label: str) -> None:
+        """Idempotent, like both real adapters: removing a label that is not
+        there is not an error on either forge, so a fake that raised would let
+        a test pass that production would not.
+
+        Recorded in `calls` because "was a removal issued at all" is a
+        property in its own right — a sweep that re-confirms the same class
+        every half hour must not spend two writes per open request deleting
+        labels that were never on it."""
+        self.calls.append("remove_label")
+        labels = self.labels.get(pr_number)
+        if labels is not None and label in labels:
+            labels.remove(label)
+
     def enable_auto_merge(self, pr_number: int, *, head_sha: str) -> None:
         self.auto_merge_enabled.add(pr_number)
         self.auto_merge_head_sha[pr_number] = head_sha
