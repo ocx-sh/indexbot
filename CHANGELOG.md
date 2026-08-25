@@ -7,93 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-08-25
 
-Any index, any forge. 0.1.0 was the extraction of the bot that runs *the*
-OCX public index on GitHub; 0.2.0 is the release in which a stranger can
-stand up their own index, with their own name, their own registry and their
-own merge policy, on GitHub or GitLab — proven end to end against four
-public gitlab.com projects and the real `ocx` client.
-
 ### Added
 
-- **`.github/index-policy.json` v2** — an index declares its own `name` and
-  `name_segments`, both required with no default. `reserved_namespaces`,
-  `governance.auto_merge` and a `ci` block join the registry-host allowlist.
-  `indexbot schema` prints the shipped JSON Schema, and a shared fixture
-  corpus keeps parser and schema agreeing.
-- **GitLab as a first-class forge** — `ForgePort` (was `GitHubPort`) with a
-  GitLab REST adapter beside the GitHub one, `announce --forge gitlab`, and
-  `registry.gitlab.com` support.
-- **`indexbot governance-poll`** — the whole governance lane as a scheduled
-  sweep, for a forge with no privileged pull-request trigger. One merge
-  request's failure never ends it.
-- **`indexbot ci`** — generates this index's pipeline files from its
-  committed policy, for either forge, with `--check` as the drift gate.
-- **One job, one command.** `validate-pr`, `governance-gate`,
-  `label-failed-run` and `stale` fold what were multi-step shell jobs — a
-  `git` pathspec, base-ref materialization, `jq` filters, exit-code
-  translation, a third-party stale action — into single commands, tested in
-  Python and identical on both forges. `reconcile --anomaly-ok` completes
-  the set. See [Build your own pipeline](docs/guide/ci.md).
-- N-segment package names throughout: `PackageId` carries segments, not a
-  namespace and a package.
+- The deployment declares its own identity *(policy)* **BREAKING**
+- A second registry host, and proof of what it served *(registry)*
+- A second forge — GitLab REST v4 *(forge)*
+- A poll lane for GitLab, and an auto-merge dial *(governance)*
+- One job, one command *(cli)*
+- Generate an index's pipeline, on either forge *(ci)*
 
-### Fixed
+### Documentation
 
-- **`ci.run` no longer defaults to `uvx ocx-indexbot`.** That default rendered
-  into `arm-auto-merge`, a job holding `contents: write` under
-  `pull_request_target`, and `uvx` resolves the latest release when the step
-  starts — so an operator who committed the minimal documented policy got a
-  privileged job running whatever PyPI held that morning, with every gate in
-  this package reporting the pipeline clean. `ci.run` is now required for
-  `indexbot ci` and refused when it resolves at job start; the new **WF-08**
-  audits the same property over a rendered or hand-written tree.
-  `uv run --project <dir> -- indexbot` is refused with it: without `--frozen`
-  or `--locked`, `uv run` re-locks a stale lockfile and a git source moves.
-  WF-06's docs claimed WF-02 covered this — WF-02 inspects `uses:` refs and
-  never saw a `run:` command's package resolution.
-- **A digest reference is a demand.** `get_manifest` cross-checked only the
-  optional `Docker-Content-Digest` header; with it absent nothing compared
-  what was asked for against what came back.
-- **Blob redirects.** ghcr.io answers a blob GET with a 307 to a CDN. httpx
-  does not follow redirects and a 3xx is not an error status, so `get_blob`
-  returned the redirect body as the blob — every desc blob read from ghcr.io
-  was wrong bytes. Redirects are followed now, with the registry token
-  dropped on any hop that leaves the origin.
-- **Desc layers are verified** against the digest their manifest declared,
-  rather than stored addressed by their own hash — which is self-consistent
-  whatever came back.
-- **Auto-merge is bound to the revision that was gated** (`expectedHeadOid`
-  on GitHub, `sha` on GitLab). A head that moved is a race, not a failure.
-- **A GitLab approval counts only for the revision it was granted to.** The
-  documented remedy is Premium, so freshness comes from two server-generated
-  timestamps instead — the newest diff version's and the `approved` event's.
-- **The governance marker is public**, so a pull request's author could plant
-  it. GitLab matches only its own *resolvable* thread — a plain note carrying
-  the marker disarmed the discussion gate outright — and GitHub only a
-  comment from the repository side.
-- **The blocking artifact goes up before the status and comes down after
-  it.** A GitLab status has no transition out of `success`, so the failed
-  write used to abort the run before the thread was re-opened.
-- **One merge request's failure cannot end a governance sweep.** A raw
-  `httpx.HTTPStatusError` did exactly that in production; adapters wrap their
-  own failures now and the sweep guards against anything else.
-- **A GitLab commit status is a state machine** — re-posting the state it
-  already holds is a 400, and `pending` is the human lane's steady state.
-- Registry URLs percent-encode every interpolated component, and tag keys are
-  checked against the wire grammar at the boundary — a tag named
-  `../blobs/sha256:<hex>` retargeted a manifest fetch at a blob.
-- Pagination refuses a `Link: rel="next"` that leaves the API host.
-- The rendered-workflow drift gate no longer normalizes away a *mutable*
-  action ref, which let a pinned SHA be hand-edited to `@main` and stay green.
-- The GitLab reserved-namespace carve-out compared a fork against itself
-  (`CI_PROJECT_PATH` is the fork's own path in a fork pipeline), granting
-  `--allow-reserved-namespace` to every merge request.
-- `render --index-dir .` rendered a valid, empty index over a populated one;
-  `.`/`./` normalize, and a render that finds no roots is refused unless
-  `--allow-empty` says a new index is meant.
-- `--tags-file` skips `#` comments instead of failing with "check for a typo".
-- The GitLab dotenv sink allowlists its values rather than denylisting two
-  characters.
+- The 0.2.0 surface, and how to build a pipeline on it
 
 ## [0.1.0] - 2026-08-24
 
@@ -148,6 +73,6 @@ public gitlab.com projects and the real `ocx` client.
 - Bump locked pip to 26.2.1 for PYSEC-2026-3721 (#718)
 - Apply index-side review findings (round 1) (#720)
 - Wheel:check failed because its search succeeded *(ci)*
-[0.2.0]: https://github.com/ocx-sh/indexbot/tree/v0.2.0
-[0.1.0]: https://github.com/ocx-sh/indexbot/tree/v0.1.0
+[0.2.0]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.1.0..v0.2.0
+[0.1.0]: https://github.com/ocx-sh/ocx-sdk-python/tree/v0.1.0
 
