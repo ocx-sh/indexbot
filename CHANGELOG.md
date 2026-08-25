@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-25
+
+### Fixed
+
+- Read the refusal, not a second endpoint, to recognise a no-op status write *(gitlab)*
+- Read the deployment policy from the base ref, do not refuse the pull request *(validate-pr)*
+
 ## [0.2.0] - 2026-08-25
 
 ### Added
@@ -73,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump locked pip to 26.2.1 for PYSEC-2026-3721 (#718)
 - Apply index-side review findings (round 1) (#720)
 - Wheel:check failed because its search succeeded *(ci)*
+[0.2.1]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.2.0..v0.2.1
 [0.2.0]: https://github.com/ocx-sh/ocx-sdk-python/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/ocx-sh/ocx-sdk-python/tree/v0.1.0
 
