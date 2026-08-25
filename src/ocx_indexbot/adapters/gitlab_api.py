@@ -44,6 +44,7 @@ returned `iid` belongs to the target project either way, so every later call
 from __future__ import annotations
 
 import base64
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -92,6 +93,14 @@ branch head. 409 is the documented conflict; 406 is what the endpoint returns
 in practice for a not-mergeable state, and a moved head is one. Both mean the
 same thing to the caller: the decision was about a revision that is no longer
 current."""
+
+_TRANSITION_FROM_RE: Final[re.Pattern[str]] = re.compile(r"\bfrom :([a-z_]+)\b")
+"""The current state named inside GitLab's illegal-transition refusal.
+
+`Cannot transition status via :enqueue from :pending` — the verb is GitLab's
+internal event name and varies by target state, but the `from :<state>` half
+is always the state vocabulary the status API itself reports.
+"""
 
 _STATUS_STATE: Final[dict[CommitStatusState, str]] = {
     "success": "success",
@@ -407,11 +416,57 @@ class GitLabApi:
         with self._client() as client:
             response = client.post(self._project_url("statuses", sha), json=payload)
         self._check(response)
-        if response.status_code == _BAD_REQUEST and self._already_reports(
-            sha, context=context, state=state
+        if response.status_code == _BAD_REQUEST and self._is_same_state_repost(
+            response, sha, context=context, state=state
         ):
             return
         self._raise(response)
+
+    def _is_same_state_repost(
+        self,
+        response: httpx.Response,
+        sha: str,
+        *,
+        context: str,
+        state: CommitStatusState,
+    ) -> bool:
+        """Whether this 400 means "the context already reports exactly that".
+
+        Two independent readings, because the first one is free and the second
+        one has already been observed to disagree with reality in production.
+
+        **The refusal itself.** GitLab names the current state in the body:
+
+            {"message": "Cannot transition status via :enqueue from :pending
+                         (Reason(s): Status cannot transition via
+                         \"enqueue\")"}
+
+        `from :<state>` is GitLab's own answer to "what does this context hold
+        right now", from the same request that refused, about the same
+        (project, sha, ref) tuple the POST addressed. Nothing can scope it
+        differently and no second call can race it. When it equals the state
+        being posted, the write was a no-op and the caller wanted a no-op.
+
+        **The listing**, `_already_reports`, stays as the fallback for a
+        message this does not parse — a GitLab release rewording it, or a
+        self-hosted instance translating it. It is second rather than first
+        because it reads a *different* endpoint: `/repository/commits/<sha>/
+        statuses` is not scoped by the `ref` the POST carried, and for a fork
+        merge request whose head reaches this project only through
+        `refs/merge-requests/<iid>/head` the two do not always answer the same
+        question. That mismatch is what ended a real governance sweep
+        (`indexbot-governance-poll`, 2026-08-25): the POST was refused with
+        `from :pending` while the listing did not report `pending`, so the
+        adapter re-raised a 400 that meant "already correct".
+
+        Fails closed either way: an unparsed message and a listing that does
+        not match still reach `_raise`.
+        """
+        wanted = _STATUS_STATE[state]
+        match = _TRANSITION_FROM_RE.search(response.text)
+        if match is not None:
+            return match.group(1) == wanted
+        return self._already_reports(sha, context=context, state=state)
 
     def _already_reports(self, sha: str, *, context: str, state: CommitStatusState) -> bool:
         """Whether `sha` already carries `context` in `state`.

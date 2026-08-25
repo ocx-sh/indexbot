@@ -1464,3 +1464,64 @@ def test_pagination_follows_the_link_header() -> None:
     )
 
     assert _client().create_or_update_issue(title="Anomaly: ns/pkg", body="same") == 2
+
+
+@respx.mock
+def test_the_refusal_itself_names_the_state_and_that_is_enough() -> None:
+    """GitLab writes the current state into the refusal it just sent, about
+    the same (project, sha, ref) the POST addressed. That answer cannot be
+    scoped differently and cannot race a second call, so it is read first and
+    the status listing is never fetched.
+
+    The listing is deliberately mocked to DISAGREE here: a `sideeffect` that
+    fails the test if called would prove only that it was skipped, whereas an
+    empty listing proves the message alone carried the decision. Watched red
+    against the listing-first implementation, which re-raised.
+    """
+    respx.post(f"{_PROJECT}/statuses/{'a' * 40}").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "message": (
+                    "Cannot transition status via :enqueue from :pending "
+                    '(Reason(s): Status cannot transition via "enqueue")'
+                )
+            },
+        )
+    )
+    listing = respx.get(f"{_PROJECT}/repository/commits/{'a' * 40}/statuses").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    _client().set_commit_status(
+        "a" * 40,
+        context="governance/review-required",
+        state="pending",
+        description="awaiting review",
+    )
+
+    assert not listing.called
+
+
+@respx.mock
+def test_a_refusal_naming_a_different_state_still_raises() -> None:
+    """The message is a decision, not a blanket amnesty for 400s. A context
+    holding `running` when the gate wants `pending` is a real disagreement
+    about whether this merge request is blocked, and swallowing it would leave
+    the gate reporting something nobody chose."""
+    respx.post(f"{_PROJECT}/statuses/{'a' * 40}").mock(
+        return_value=httpx.Response(
+            400, json={"message": "Cannot transition status via :enqueue from :running"}
+        )
+    )
+    respx.get(f"{_PROJECT}/repository/commits/{'a' * 40}/statuses").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    with pytest.raises(ForgeError, match="Cannot transition"):
+        _client().set_commit_status(
+            "a" * 40,
+            context="governance/review-required",
+            state="pending",
+            description="awaiting review",
+        )
