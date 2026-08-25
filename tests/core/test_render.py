@@ -137,7 +137,7 @@ def _package(
         tags=tags,
     )
     return SourcePackage(
-        package_id=PackageId(namespace=namespace, package=package),
+        package_id=PackageId(segments=(namespace, package)),
         root=root,
         root_raw=_root_raw(root),
         content_by_digest=content_by_digest,
@@ -396,36 +396,46 @@ def _assert_matches_golden(case: str, plan: tuple[FileWrite, ...]) -> None:
 
 
 def test_render_normal() -> None:
-    _assert_matches_golden("normal", build_render_plan(_case_normal()))
+    _assert_matches_golden("normal", build_render_plan(_case_normal(), name_segments=2))
 
 
 def test_render_orphan_pruned() -> None:
-    _assert_matches_golden("orphan_pruned", build_render_plan(_case_orphan_pruned()))
+    _assert_matches_golden(
+        "orphan_pruned", build_render_plan(_case_orphan_pruned(), name_segments=2)
+    )
 
 
 def test_render_yanked_excluded() -> None:
-    _assert_matches_golden("yanked_excluded", build_render_plan(_case_yanked_excluded()))
+    _assert_matches_golden(
+        "yanked_excluded", build_render_plan(_case_yanked_excluded(), name_segments=2)
+    )
 
 
 def test_render_shared_digest_dedup() -> None:
-    _assert_matches_golden("shared_digest_dedup", build_render_plan(_case_shared_digest_dedup()))
+    _assert_matches_golden(
+        "shared_digest_dedup", build_render_plan(_case_shared_digest_dedup(), name_segments=2)
+    )
 
 
 def test_render_no_desc() -> None:
-    _assert_matches_golden("no_desc", build_render_plan(_case_no_desc()))
+    _assert_matches_golden("no_desc", build_render_plan(_case_no_desc(), name_segments=2))
 
 
 def test_render_png_only_logo() -> None:
-    _assert_matches_golden("png_only_logo", build_render_plan(_case_png_only_logo()))
+    _assert_matches_golden(
+        "png_only_logo", build_render_plan(_case_png_only_logo(), name_segments=2)
+    )
 
 
 def test_render_nested_namespace() -> None:
-    _assert_matches_golden("nested_namespace", build_render_plan(_case_nested_namespace()))
+    _assert_matches_golden(
+        "nested_namespace", build_render_plan(_case_nested_namespace(), name_segments=2)
+    )
 
 
 def test_render_attestation_descriptor_skips_platformless_and_unknown() -> None:
     _assert_matches_golden(
-        "attestation_descriptor", build_render_plan(_case_attestation_descriptor())
+        "attestation_descriptor", build_render_plan(_case_attestation_descriptor(), name_segments=2)
     )
 
 
@@ -435,7 +445,7 @@ def test_build_render_plan_sorts_packages_by_package_id() -> None:
     # in its own serialized key order (json.dumps preserves dict insertion
     # order).
     packages = _case_no_desc() + _case_normal()
-    plan = build_render_plan(packages)
+    plan = build_render_plan(packages, name_segments=2)
     index_file = next(fw for fw in plan if fw.path == "c/index.json")
     assert isinstance(index_file.content, str)
     index = json.loads(index_file.content)
@@ -443,7 +453,7 @@ def test_build_render_plan_sorts_packages_by_package_id() -> None:
 
 
 def test_build_render_plan_respects_format_version_param() -> None:
-    plan = build_render_plan(_case_no_desc(), format_version=7)
+    plan = build_render_plan(_case_no_desc(), format_version=7, name_segments=2)
     config = next(fw for fw in plan if fw.path == "config.json")
     assert isinstance(config.content, str)
     assert json.loads(config.content) == {"format_version": 7, "name_segments": 2}
@@ -451,7 +461,7 @@ def test_build_render_plan_respects_format_version_param() -> None:
 
 def test_build_render_plan_package_index_digest_matches_root_raw_sha256() -> None:
     packages = _case_no_desc()
-    plan = build_render_plan(packages)
+    plan = build_render_plan(packages, name_segments=2)
     index_file = next(fw for fw in plan if fw.path == "c/index.json")
     assert isinstance(index_file.content, str)
     index = json.loads(index_file.content)
@@ -461,7 +471,7 @@ def test_build_render_plan_package_index_digest_matches_root_raw_sha256() -> Non
 
 
 def test_build_render_plan_package_index_empty_for_no_packages() -> None:
-    plan = build_render_plan([])
+    plan = build_render_plan([], name_segments=2)
     index_file = next(fw for fw in plan if fw.path == "c/index.json")
     assert isinstance(index_file.content, str)
     assert json.loads(index_file.content) == {"format_version": 1, "packages": {}}
@@ -492,6 +502,6 @@ def test_build_render_plan_reachability_readme_without_logo() -> None:
         desc=desc,
         content_by_digest=content_by_digest,
     )
-    plan = build_render_plan([package])
+    plan = build_render_plan([package], name_segments=2)
     dist_paths = {fw.path for fw in plan}
     assert f"p/mvdan/shfmt2/o/sha256/{'h' * 64}.md" in dist_paths

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ocx-sh.github.io/indexbot/schema/index-policy-v1.schema.json",
+  "title": "OCX index deployment policy",
+  "description": "`.github/index-policy.json` — one index deployment's committed configuration. Not wire contract: the served URL shapes are frozen for every index alike, and this decides only what THIS index puts in them. `core/policy.py`'s parse_index_policy is the runtime authority; this file exists so an operator's editor can autocomplete and pre-flight the config. The two are held together by the shared fixture corpus in tests/fixtures/policy/.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "name_segments",
+    "registry_hosts"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Points at this file. Accepted and ignored by the parser."
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[a-z0-9]+(?:-+[a-z0-9]+)*(?:\\.[a-z0-9]+(?:-+[a-z0-9]+)*)*$",
+      "description": "Logical prefix every published root carries — `ocx.sh` for the public index, `acme.corp` for a corporate one. Also the registry key an ocx client configures as [registries.\"<name>\"] index = \"…\", which is why it has exactly the registry-host grammar: no scheme, no port, no path, no trailing dot, lowercase. Required, with no default — an index that does not declare its own name would publish under another deployment's.",
+      "examples": [
+        "ocx.sh",
+        "acme.corp",
+        "registry.internal"
+      ]
+    },
+    "name_segments": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8,
+      "description": "How many `/`-separated segments follow `name` in a package id, and so how deep `p/**` nests. `2` gives `acme.corp/<namespace>/<package>`. Published in the rendered config.json because no client can derive it from a tree. The upper bound is not an opinion about hierarchy depth — it exists so every derived path length stays bounded. Required, with no default.",
+      "examples": [
+        2
+      ]
+    },
+    "registry_hosts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "G-03's allowlist: hosts whose `oci://` repositories this index will admit. Widening it is a supply-chain trust decision, which is why it lives in a reviewed file and never in a settings-page variable. Bare lowercase hosts only — a scheme, a port or a path would allowlist nothing, because the check compares against a URL's parsed hostname. A registry on a non-default port is still allowlisted by its bare host.",
+      "items": {
+        "type": "string",
+        "maxLength": 253,
+        "pattern": "^[a-z0-9]+(?:-+[a-z0-9]+)*(?:\\.[a-z0-9]+(?:-+[a-z0-9]+)*)*$"
+      },
+      "examples": [
+        [
+          "ghcr.io"
+        ],
+        [
+          "registry.gitlab.com"
+        ],
+        [
+          "harbor.corp"
+        ]
+      ]
+    },
+    "reserved_namespaces": {
+      "type": "array",
+      "description": "First path segments this operator reserves — a brand, an internal prefix. The STRUCTURAL reservations (`p`, `o`, `c`, `config`, `schema`, …) are deliberately not expressible here: they follow from the served URL shapes and hold for every index, so the bot applies them unconditionally. Defaults to none.",
+      "items": {
+        "type": "string",
+        "maxLength": 39,
+        "pattern": "^[a-z0-9](?:-?[a-z0-9])*$"
+      },
+      "examples": [
+        [
+          "acme",
+          "admin"
+        ]
+      ]
+    },
+    "governance": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How the governance lane decides a merge. Defaults apply when the block is absent or empty.",
+      "properties": {
+        "auto_merge": {
+          "enum": [
+            "owners",
+            "never",
+            "always"
+          ],
+          "default": "owners",
+          "description": "`owners` — a machine-lane PR auto-merges when its author owns every touched root (the public index's policy). `never` — every PR waits for a human. `always` — any machine-lane PR auto-merges."
+        }
+      }
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What `indexbot ci` renders, and for which forge. Not how the bot picks a forge API at run time — that comes from the runner's own variables. Defaults apply when the block is absent or empty.",
+      "properties": {
+        "forge": {
+          "enum": [
+            "github",
+            "gitlab"
+          ],
+          "default": "github",
+          "description": "`github` covers github.com and GitHub Enterprise; `gitlab` covers gitlab.com and any self-hosted GitLab, including CE."
+        },
+        "owner": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9](?:-?[a-z0-9])*(?:/[a-z0-9](?:-?[a-z0-9])*)*$",
+          "default": "",
+          "description": "The repository owner / GitLab namespace, for the cron-upstream-only guard every scheduled job carries. `indexbot ci` refuses to render without it rather than guess: a fork inherits every schedule in a workflow file and would run it against its own stale copy. It renders inside a quoted expression scalar (`github.repository_owner == '<owner>'`, `$CI_PROJECT_NAMESPACE == \"<owner>\"`), so — unlike `run` and `setup` below — it takes the package-namespace grammar (letters, digits, single hyphens), composed with `/` for a GitLab subgroup path, rather than just a newline ban: a `'` or `\"` would break out of that scalar."
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[^\\r\\n]*$",
+          "description": "The command a generated job uses to invoke the bot. REQUIRED for `indexbot ci`, with no default, and it must not resolve the version at job start. It is what the privileged governance job runs — on GitHub, a job holding `contents: write` under `pull_request_target`, whose token can move an unprotected base branch and squash-merge a pull request — so `uvx ocx-indexbot`, which fetches the latest release when the step starts, is refused rather than defaulted to. Pin by lockfile (`uv run --project bot-tools --frozen -- indexbot`; without `--frozen` or `--locked`, `uv run` re-locks a stale lockfile and a git source moves), by exact specifier (`uvx --from 'ocx-indexbot==0.2.0' indexbot`), or by naming no resolver at all (`indexbot`, a container entrypoint, a vendored install). The value is otherwise free-form shell — only a newline is banned, since it IS the command a step runs, not a value substituted into one. The pattern here cannot express the pinning rule; `indexbot ci` enforces it at render time and WF-08 audits the rendered tree.",
+          "examples": [
+            "uv run --project bot-tools --frozen -- indexbot",
+            "uvx --from 'ocx-indexbot==0.2.0' indexbot",
+            "indexbot"
+          ]
+        },
+        "setup": {
+          "type": "string",
+          "pattern": "^[^\\r\\n]*$",
+          "default": "",
+          "description": "A step that installs whatever `run` needs — a `uses:` target on GitHub (typically a local composite action), an `image:` on GitLab. Empty renders no setup step at all. No newline — see `run`."
+        },
+        "deploy_workflow": {
+          "type": "string",
+          "pattern": "^$|^[A-Za-z0-9._-]+$",
+          "default": "",
+          "description": "The workflow file a merged machine-lane PR should dispatch, if this deployment has one. Empty renders no such job at all. Renders unquoted into a shell command (`gh workflow run <deploy_workflow> --repo \"$REPO\" --ref main`) in a job holding `actions: write` + `contents: write`, so it takes a bare-filename grammar (letters, digits, `.`, `_`, `-`) rather than just a newline ban — nothing a path component or a shell word boundary could hide in."
+        },
+        "schedules": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Cron expressions for the scheduled lanes. GitHub only: GitLab schedules are project settings rather than pipeline config.",
+          "properties": {
+            "reconcile": {
+              "type": "string",
+              "pattern": "^[0-9*,/-]+( [0-9*,/-]+){4}$",
+              "default": "17 3 * * *",
+              "description": "A 5-field cron expression (minute hour day month weekday). Shape-checked only, to keep it from breaking out of the quoted scalar it is rendered into."
+            },
+            "stale": {
+              "type": "string",
+              "pattern": "^[0-9*,/-]+( [0-9*,/-]+){4}$",
+              "default": "0 5 * * *",
+              "description": "A 5-field cron expression (minute hour day month weekday). Shape-checked only, to keep it from breaking out of the quoted scalar it is rendered into."
+            }
+          }
+        }
+      }
+    }
+  }
+}

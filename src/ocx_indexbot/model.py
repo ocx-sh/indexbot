@@ -26,9 +26,13 @@ silent pass by `core/validate_entry.py` either way (ADR-4 Risk 2).
 """
 
 CommitStatusState = Literal["success", "failure", "pending", "error"]
-"""GitHub Commit Status API state — `GitHubPort.set_commit_status`'s
-mechanism for the `governance/review-required` required status check
-(ADR-4 BD-5)."""
+"""`ForgePort.set_commit_status`'s state — the `governance/review-required`
+gate (ADR-4 BD-5).
+
+GitHub's Commit Status vocabulary, kept verbatim because it is the wider of
+the two: GitLab has no `error`, so `adapters/gitlab_api.py` folds both
+`failure` and `error` onto its `failed`. Narrowing this alias to the
+intersection would instead throw away a distinction GitHub can express."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,24 +117,29 @@ class TagEntry:
 
 @dataclass(frozen=True, slots=True)
 class PackageId:
-    """`<namespace>/<package>` — the logical id parsed from a
-    `p/<ns>/<pkg>.json` path or `cli/announce.py`'s `--package` argument.
+    """The logical id parsed from a `p/**.json` path or `cli/announce.py`'s
+    `--package` argument.
+
+    Holds `name_segments` already-validated segments — two under the default
+    (`kitware/cmake`), but an index declares its own depth, so this type
+    deliberately exposes no `namespace`/`package` pair. A one-segment index
+    has no such split to expose, and every caller that wanted one was really
+    building the joined path that `str(package_id)` already returns.
+
     Distinct from `PackageRoot.name`, which is the full
-    `ocx.sh/<namespace>/<package>` form. Format validated by
-    `core/validate_entry.py`'s `PACKAGE_ID_RE`; this type only carries the
-    two already-validated parts.
+    `<index name>/<segments>` form. Shape validated by
+    `core/validate_entry.py`'s `parse_package_id`.
     """
 
-    namespace: str
-    package: str
+    segments: tuple[str, ...]
 
     def __str__(self) -> str:
-        return f"{self.namespace}/{self.package}"
+        return "/".join(self.segments)
 
 
 @dataclass(frozen=True, slots=True)
 class PullRequestInfo:
-    """Base/head SHAs and changed paths for one PR (`GitHubPort.get_pull_request_info`).
+    """Base/head SHAs and changed paths for one PR (`ForgePort.get_pull_request_info`).
 
     `cli/classify_pr.py`'s only input — read via the GitHub API diff, never
     a checkout (ADR-4 BD-5's `governance-gate` trust boundary: `changed_paths`
@@ -146,6 +155,15 @@ class PullRequestInfo:
     "PR author `github_id` in every touched package's `owners[]`" gate.
     Defaulted (not required) so every existing `classify_pr`-only construction
     site stays unchanged; a caller that needs G-19 always sets both.
+
+    `updated_at`/`labels` (`indexbot stale`, WP5-C): the forge's own
+    last-activity timestamp (RFC 3339, whole-day granularity is all `stale`
+    compares on) and the PR's current label set. Both already ride along in
+    the same API response `get_pull_request_info` was already fetching on
+    both forges — no second round trip. Defaulted empty for the same reason
+    `author_login`/`author_id` are: every pre-existing construction site
+    (`classify_pr`, `governance_check`, every test fixture) stays unchanged;
+    `stale` is the one caller that requires both to be real.
     """
 
     number: int
@@ -154,6 +172,25 @@ class PullRequestInfo:
     changed_paths: tuple[str, ...]
     author_login: str = ""
     author_id: int = 0
+    updated_at: str = ""
+    labels: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestHeadMatch:
+    """Result of `ForgePort.find_pull_request_by_head_sha` — `cli/label_failed_run.py`'s
+    only way to turn a completed run's head commit back into a pull request.
+
+    `number` is the PR/MR number whose CURRENT head is exactly the queried
+    SHA. `is_fork` is ADR-6 FP-8's scoping rule made queryable: `checks-failed`
+    labeling (and the stale-close it later feeds) applies to fork-authored
+    pull requests only — a same-repository PR's failing checks are already
+    visible to every maintainer with push access, so labeling it would just be
+    noise the label was never meant to carry.
+    """
+
+    number: int
+    is_fork: bool
 
 
 def _empty_tags() -> dict[str, TagEntry]:

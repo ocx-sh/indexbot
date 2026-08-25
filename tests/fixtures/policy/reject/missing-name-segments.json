@@ -1,0 +1,6 @@
+{
+  "name": "ocx.sh",
+  "registry_hosts": [
+    "ghcr.io"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "ocx.sh",
+  "name_segments": 2,
+  "registry_hosts": [
+    "ghcr.io"
+  ],
+  "ci": {
+    "forge": "gitlab",
+    "owner": "acme-org/sub-group",
+    "deploy_workflow": "render-deploy.yml"
+  }
+}

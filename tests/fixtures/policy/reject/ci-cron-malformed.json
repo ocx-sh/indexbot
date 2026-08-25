@@ -1,0 +1,12 @@
+{
+  "name": "ocx.sh",
+  "name_segments": 2,
+  "registry_hosts": [
+    "ghcr.io"
+  ],
+  "ci": {
+    "schedules": {
+      "reconcile": "not-a-cron"
+    }
+  }
+}

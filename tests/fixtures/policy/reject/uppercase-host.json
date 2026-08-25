@@ -1,0 +1,7 @@
+{
+  "name": "ocx.sh",
+  "name_segments": 2,
+  "registry_hosts": [
+    "GHCR.IO"
+  ]
+}

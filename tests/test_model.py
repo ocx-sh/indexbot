@@ -10,6 +10,7 @@ from ocx_indexbot.model import (
     Owner,
     PackageId,
     PackageRoot,
+    PullRequestHeadMatch,
     PullRequestInfo,
     TagEntry,
     Upstream,
@@ -83,9 +84,9 @@ def test_tag_entry_yanked() -> None:
 
 
 def test_package_id_str_and_fields() -> None:
-    pkg = PackageId(namespace="kitware", package="cmake")
-    assert pkg.namespace == "kitware"
-    assert pkg.package == "cmake"
+    pkg = PackageId(segments=("kitware", "cmake"))
+    assert pkg.segments[0] == "kitware"
+    assert pkg.segments[1] == "cmake"
     assert str(pkg) == "kitware/cmake"
 
 
@@ -175,6 +176,38 @@ def test_pull_request_info_author_fields_default_and_settable() -> None:
     )
     assert info.author_login == "alice"
     assert info.author_id == 1
+
+
+def test_pull_request_info_updated_at_and_labels_default_and_settable() -> None:
+    """WP5-C: `indexbot stale`'s two fields default empty so every
+    pre-existing construction site (classify-pr, governance-check, every
+    older test fixture) stays unchanged."""
+    defaulted = PullRequestInfo(number=1, base_sha="a", head_sha="b", changed_paths=())
+    assert defaulted.updated_at == ""
+    assert defaulted.labels == ()
+
+    info = PullRequestInfo(
+        number=1,
+        base_sha="a",
+        head_sha="b",
+        changed_paths=(),
+        updated_at="2026-07-17T00:00:00Z",
+        labels=("checks-failed",),
+    )
+    assert info.updated_at == "2026-07-17T00:00:00Z"
+    assert info.labels == ("checks-failed",)
+
+
+def test_pull_request_head_match_fields() -> None:
+    match = PullRequestHeadMatch(number=7, is_fork=True)
+    assert match.number == 7
+    assert match.is_fork is True
+
+
+def test_pull_request_head_match_is_frozen() -> None:
+    match = PullRequestHeadMatch(number=7, is_fork=True)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        match.number = 8  # type: ignore[misc]
 
 
 def test_manifest_fetch_fields() -> None:

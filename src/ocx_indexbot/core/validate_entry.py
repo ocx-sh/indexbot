@@ -40,6 +40,13 @@ import re
 from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
+from ocx_indexbot.core.grammar import (
+    NAMESPACE_MAX_LENGTH,
+    NAMESPACE_RE,
+    PACKAGE_MAX_LENGTH,
+    PACKAGE_RE,
+    package_id_max_length,
+)
 from ocx_indexbot.core.policy import INDEX_POLICY_PATH
 from ocx_indexbot.core.version_order import variant_names
 from ocx_indexbot.errors import AnomalyError, ValidationError
@@ -60,50 +67,58 @@ OCI_REPOSITORY_RE: Final[re.Pattern[str]] = re.compile(rf"^{_COMPONENT}(?:/{_COM
 
 _DIGEST_RE: Final[re.Pattern[str]] = re.compile(r"sha256:[a-f0-9]{64}")
 
+
 # --- fixed-two-segment package-id grammar (BD-4's two-regex rule: never
 # shared with OCI_REPOSITORY_RE above). Re-homed from the deleted
 # core/validate_payload.py. ---------------------------------------------
-PACKAGE_ID_MAX_LENGTH: Final[int] = 140  # ADR-2 ND-3: 39 (namespace) + 1 ("/") + 100 (package)
-_NAMESPACE_MAX_LENGTH: Final[int] = 39
-_PACKAGE_MAX_LENGTH: Final[int] = 100
+def parse_package_id(raw: str, *, name_segments: int) -> PackageId:
+    """Validate and parse `raw` as this index's package id.
 
-_NAMESPACE_SHAPE = r"[a-z0-9](?:-?[a-z0-9])*"
-_PACKAGE_SHAPE = r"[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*"
-PACKAGE_ID_RE: Final[re.Pattern[str]] = re.compile(rf"^{_NAMESPACE_SHAPE}/{_PACKAGE_SHAPE}$")
+    `name_segments` comes from the deployment's committed policy, so the
+    accepted depth is configuration rather than a constant: a two-segment
+    index takes `kitware/cmake`, a three-segment one
+    `platform/tools/mycli`.
 
+    Raises `ValidationError` if `raw` exceeds the derived maximum length
+    (checked first, before any regex evaluation — BD-4), splits into the
+    wrong number of segments, or has a segment that fails its own alphabet
+    or per-segment cap (ADR-2 ND-3).
 
-def parse_package_id(raw: str) -> PackageId:
-    """Validate and parse `raw` as an OCX `<namespace>/<package>` id.
-
-    Raises `ValidationError` if `raw` exceeds `PACKAGE_ID_MAX_LENGTH`
-    (checked first, before any regex evaluation — BD-4), does not
-    `fullmatch` `PACKAGE_ID_RE`, or (having matched the combined shape)
-    splits into a namespace or package segment exceeding its own
-    per-segment cap (ADR-2 ND-3).
+    Validated segment-by-segment rather than against one combined pattern:
+    a pattern built per declared depth would be a regex assembled from
+    configuration on every call, and the per-segment form reports *which*
+    segment is wrong instead of failing the whole id anonymously.
     """
-    if len(raw) > PACKAGE_ID_MAX_LENGTH:
-        raise ValidationError(f"package id exceeds max length {PACKAGE_ID_MAX_LENGTH} characters")
-    if PACKAGE_ID_RE.fullmatch(raw) is None:
-        raise ValidationError(f"package id {raw!r} does not match the expected shape")
+    max_length = package_id_max_length(name_segments)
+    if len(raw) > max_length:
+        raise ValidationError(f"package id exceeds max length {max_length} characters")
 
-    # A `PACKAGE_ID_RE` fullmatch guarantees exactly one "/" in `raw`, which
-    # is what makes this split safe.
-    namespace, package = raw.split("/", 1)
-    if len(namespace) > _NAMESPACE_MAX_LENGTH:
+    segments = raw.split("/")
+    if len(segments) != name_segments:
         raise ValidationError(
-            f"namespace {namespace!r} exceeds max length {_NAMESPACE_MAX_LENGTH} characters"
+            f"package id {raw!r} has {len(segments)} segment(s); this index declares "
+            f"name_segments = {name_segments}"
         )
-    if len(package) > _PACKAGE_MAX_LENGTH:
-        raise ValidationError(
-            f"package {package!r} exceeds max length {_PACKAGE_MAX_LENGTH} characters"
-        )
-    return PackageId(namespace=namespace, package=package)
+
+    for position, segment in enumerate(segments):
+        first = position == 0
+        pattern = NAMESPACE_RE if first else PACKAGE_RE
+        cap = NAMESPACE_MAX_LENGTH if first else PACKAGE_MAX_LENGTH
+        if len(segment) > cap:
+            raise ValidationError(f"segment {segment!r} exceeds max length {cap} characters")
+        if pattern.fullmatch(segment) is None:
+            raise ValidationError(
+                f"segment {segment!r} of package id {raw!r} does not match the expected shape"
+            )
+    return PackageId(segments=tuple(segments))
 
 
-RESERVED_NAMESPACE_SEGMENTS: Final[frozenset[str]] = frozenset(
+ALWAYS_RESERVED_SEGMENTS: Final[frozenset[str]] = frozenset(
     {
         # Control paths — top-level directories in the index git tree and/or
-        # top-level URL paths on the colocated index.ocx.sh deployment.
+        # top-level URL paths on a colocated site deployment. These follow
+        # from the served URL shapes, so they hold for every index alike and
+        # are deliberately not expressible in a deployment's policy.
         "p",
         "o",
         "docs",
@@ -115,14 +130,11 @@ RESERVED_NAMESPACE_SEGMENTS: Final[frozenset[str]] = frozenset(
         "data",
         "index",
         "c",
-        # Brand — OCX's own project/org identities.
-        "ocx",
-        "ocx-sh",
-        "ocx-contrib",
-        "ocx-rs",
         # Generic/ambiguous — words implying a privileged or non-existent-
-        # vendor status the two-level namespace model explicitly refuses to
-        # grant (ADR-2 ND-2).
+        # vendor status the namespace model explicitly refuses to grant
+        # (ADR-2 ND-2). Package-wide opinion, and never lifted by
+        # `allow_reserved`: an index that could hand out `admin` under a flag
+        # would be handing out the ambiguity the reservation exists to stop.
         "admin",
         "root",
         "system",
@@ -135,36 +147,34 @@ RESERVED_NAMESPACE_SEGMENTS: Final[frozenset[str]] = frozenset(
         "internal",
     }
 )
-"""ADR-2 ND-4's reserved segment list — checked against both the namespace
-and package positions of a `PackageId` (the two-segment package-id shape does
-not otherwise distinguish which position collides)."""
+"""ADR-2 ND-4's unconditional reservations — checked against *every* segment
+of a `PackageId`, since the N-segment shape does not privilege one position.
 
-RESERVED_BRAND_SEGMENTS: Final[frozenset[str]] = frozenset(
-    {"ocx", "ocx-sh", "ocx-contrib", "ocx-rs"}
-)
-"""The subset of `RESERVED_NAMESPACE_SEGMENTS` naming OCX's own brand — the
-only segments `check_namespace_not_reserved`'s `allow_reserved=True`
-carve-out ever admits (ADR-2 ND-10's first-party `ocx/cli` example vs. ND-4's
-unconditional reservation; policy call is PR-gated, this is the mechanism
-only). Control-path segments (`p`, `o`, ...) and generic/ambiguous segments
-(`admin`, `root`, ...) stay unconditionally reserved regardless of this flag
-— never widen this set without a reviewed PR."""
+An operator's own reservations (a brand, an internal prefix) live in
+`.github/index-policy.json`'s `reserved_namespaces` instead, because they
+differ per deployment: `ocx-sh` is OCX's to reserve and means nothing on a
+corporate index. Those are the ones `allow_reserved` lifts.
+"""
 
 
-def check_name_matches_path(package_id: PackageId, root: PackageRoot) -> None:
-    """G-02: `root.name` must equal the path-derived logical name."""
-    expected = f"ocx.sh/{package_id.namespace}/{package_id.package}"
+def check_name_matches_path(package_id: PackageId, root: PackageRoot, *, index_name: str) -> None:
+    """G-02: `root.name` must equal the path-derived logical name.
+
+    `index_name` is the deployment's committed prefix (policy `name`), never
+    a constant — a corporate index publishes `acme.corp/team/tool`, and a bot
+    that hardcoded `ocx.sh` here would refuse every root it wrote itself.
+    """
+    expected = f"{index_name}/{package_id}"
     if root.name != expected:
         raise ValidationError(
             f"root name {root.name!r} does not match path-derived name {expected!r} (G-02)"
         )
 
 
-def check_superseded_by(root: PackageRoot) -> None:
-    """`root.superseded_by`, when set, must be a shape-valid
-    `<namespace>/<package>` id (reused via this module's own
-    `parse_package_id` — never a second hand-rolled regex, ADR-4 BD-4) that
-    does not name `root` itself.
+def check_superseded_by(root: PackageRoot, *, index_name: str, name_segments: int) -> None:
+    """`root.superseded_by`, when set, must be a shape-valid package id for
+    *this* index (reused via this module's own `parse_package_id` — never a
+    second hand-rolled regex, ADR-4 BD-4) that does not name `root` itself.
 
     `root.superseded_by is None` is a no-op — a package that has not been
     superseded carries no constraint here.
@@ -178,19 +188,19 @@ def check_superseded_by(root: PackageRoot) -> None:
       deprecated`.
     - **No existence/reserved-namespace check**: the named successor is not
       required to already exist as a committed root, nor is it checked
-      against `RESERVED_NAMESPACE_SEGMENTS` — a dangling or not-yet-claimed
+      against the reserved sets — a dangling or not-yet-claimed
       successor is allowed, the same free-text-pointer treatment
       `deprecated_message` already gets.
     """
     if root.superseded_by is None:
         return
     try:
-        parse_package_id(root.superseded_by)
+        parse_package_id(root.superseded_by, name_segments=name_segments)
     except ValidationError as exc:
         raise ValidationError(
-            f"superseded_by {root.superseded_by!r} is not a valid <namespace>/<package> id: {exc}"
+            f"superseded_by {root.superseded_by!r} is not a valid package id: {exc}"
         ) from exc
-    this_id = root.name.removeprefix("ocx.sh/")
+    this_id = root.name.removeprefix(f"{index_name}/")
     if root.superseded_by == this_id:
         raise ValidationError(
             f"superseded_by {root.superseded_by!r} cannot reference its own package ({root.name!r})"
@@ -293,27 +303,56 @@ def check_tag_timestamps_z_anchored(root: PackageRoot) -> None:
             )
 
 
-def check_namespace_not_reserved(package_id: PackageId, *, allow_reserved: bool = False) -> None:
-    """ADR-2 ND-4: reject a reserved segment in either the namespace or the
-    package position — a routing-collision guard, not a trademark denylist.
+def check_namespace_not_reserved(
+    package_id: PackageId,
+    *,
+    operator_reserved: frozenset[str],
+    allow_reserved: bool = False,
+) -> None:
+    """ADR-2 ND-4: reject a reserved segment anywhere in `package_id` — a
+    routing-collision guard, not a trademark denylist.
 
-    `allow_reserved=True` narrows the blocked set to
-    `RESERVED_NAMESPACE_SEGMENTS - RESERVED_BRAND_SEGMENTS` — an explicit,
-    caller-opted-in carve-out for OCX's own first-party brand segments only
-    (e.g. `ocx/cli`); control-path and generic segments are never admitted by
-    this flag. Default `False` preserves ADR-2 ND-4's unconditional
-    reservation.
+    Every segment is checked, not just the first: the N-segment shape does
+    not privilege one position, and `p/team/docs/tool.json` collides with a
+    served route exactly as `p/docs/tool.json` would.
+
+    `operator_reserved` is this deployment's own list (policy
+    `reserved_namespaces`) — a brand, an internal prefix.
+    `allow_reserved=True` lifts *those* and only those: an explicit,
+    caller-opted-in carve-out for the operator's own first-party packages
+    (`ocx/cli` on the public index). `ALWAYS_RESERVED_SEGMENTS` is never
+    admitted by this flag.
     """
     blocked = (
-        RESERVED_NAMESPACE_SEGMENTS - RESERVED_BRAND_SEGMENTS
-        if allow_reserved
-        else RESERVED_NAMESPACE_SEGMENTS
+        ALWAYS_RESERVED_SEGMENTS if allow_reserved else ALWAYS_RESERVED_SEGMENTS | operator_reserved
     )
-    if package_id.namespace in blocked:
-        raise ValidationError(f"namespace {package_id.namespace!r} is reserved (ADR-2 ND-4)")
-    if package_id.package in blocked:
-        raise ValidationError(f"package {package_id.package!r} is reserved (ADR-2 ND-4)")
+    for segment in package_id.segments:
+        if segment in blocked:
+            raise ValidationError(f"segment {segment!r} is reserved (ADR-2 ND-4)")
 
+
+TAG_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$")
+"""The OCI distribution tag grammar — byte-identical to
+`schema/root.schema.json`'s `tags.propertyNames.pattern`. Kept as a literal
+string, not a shared import, for the same reason `_TIMESTAMP_RE` above is:
+the schema stays `check-jsonschema`-standalone (ADR-4 BD-1). If you change
+one, change both.
+
+Enforced in `parse_package_root` (A-5), not left to the schema alone: the
+schema is the served contract, but no generated pipeline runs it over a PR's
+diff, so a tag key could otherwise reach `adapters/registry_v2.py`'s
+`get_manifest`/`get_blob` URL builders — via `core/observe.py`'s
+`observe_one_tag` — carrying characters the OCI distribution API never
+intended a tag to hold. `parse_package_root` is the one place every
+*committed* tag key first becomes data, so it is the choke point on that
+path. `cli/announce.py` reuses this exact constant at its own, earlier
+boundary — the `--tags`/`--tags-file` CLI input — because that path calls
+`observe_one_tag` directly, before any committed root exists to check. Two
+choke points, one grammar: never restate the pattern, import this. Bounded
+quantifier, no
+alternation — a length cap ahead of the regex (BD-4's untrusted-input order)
+would be redundant here, since the pattern itself rejects anything over 128
+characters without backtracking."""
 
 _RESERVED_TAG_PREFIX: Final[str] = "__ocx"
 """Case-insensitive prefix OCX reserves for its own metadata tags on a
@@ -417,15 +456,15 @@ def parse_digest(raw: str) -> str:
     return raw
 
 
-def cas_relpath(namespace: str, package: str, digest: str, ext: str) -> str:
+def cas_relpath(package_id: PackageId, digest: str, ext: str) -> str:
     """Deployed relative path (no leading `/`) of a CAS object.
 
-    `p/<namespace>/<package>/o/sha256/<hex>.<ext>` per the wire path map
+    `p/<segments>/o/sha256/<hex>.<ext>` per the wire path map
     (`plan_index_v1.md`). `digest` is the full `sha256:<hex>` string; only
     the hex half appears in the path itself.
     """
     hex_digest = digest.removeprefix("sha256:")
-    return f"p/{namespace}/{package}/o/sha256/{hex_digest}.{ext}"
+    return f"p/{package_id}/o/sha256/{hex_digest}.{ext}"
 
 
 def check_digest_self_consistent(digest: str, object_bytes: bytes) -> None:
@@ -591,6 +630,15 @@ def parse_package_root(raw: bytes) -> PackageRoot:
     membership) — only needs to not crash on well-formed-but-unexpected JSON
     and to fail loudly (never partially construct a `PackageRoot`) on
     malformed JSON.
+
+    One deliberate exception to that division of labor: every `tags` key is
+    checked against `TAG_NAME_RE`, the schema's own tag grammar, restated
+    here (A-5). No generated pipeline runs `check-jsonschema` over a PR's
+    diff, so this is the only gate a tag name passes through before it can
+    reach `adapters/registry_v2.py`'s URL builders via `core/observe.py`'s
+    `observe_one_tag` — a tag shaped to retarget that request (`../blobs/…`)
+    is rejected here rather than relying solely on that adapter's own
+    percent-encoding.
     """
     try:
         parsed: Any = json.loads(raw)
@@ -614,6 +662,13 @@ def parse_package_root(raw: bytes) -> PackageRoot:
         # rejects a hand-authored `"variants": []` for.
         variants = tuple(data.get("variants") or ())
         tags = {name: _tag_entry_from_dict(t) for name, t in data["tags"].items()}
+        bad_tag_names = sorted(name for name in tags if TAG_NAME_RE.fullmatch(name) is None)
+        if bad_tag_names:
+            raise ValidationError(
+                "tag name(s) do not match the OCI distribution tag grammar "
+                "(schema/root.schema.json's tags.propertyNames.pattern): "
+                + ", ".join(repr(name) for name in bad_tag_names)
+            )
         return PackageRoot(
             name=data["name"],
             repository=data["repository"],

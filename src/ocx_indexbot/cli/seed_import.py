@@ -53,6 +53,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.core.observe import observe
+from ocx_indexbot.core.policy import IndexPolicy
 from ocx_indexbot.core.validate_entry import (
     check_namespace_not_reserved,
     check_repository_allowlisted,
@@ -276,7 +277,7 @@ def run(
     registry: RegistryPort,
     files: FilePort,
     clock: ClockPort,
-    allowed_hosts: frozenset[str],
+    policy: IndexPolicy,
 ) -> ExitCode:
     """Import one brand-new package from local seed files plus a live registry observe.
 
@@ -286,7 +287,8 @@ def run(
     `upstream_org`/`upstream_repository_url`/`upstream_disclaimer` (str | None),
     `repository` (str | None — `--repository` override, see
     `_resolve_repository`), `allow_reserved_namespace` (bool, default `False`
-    — the ADR-2 ND-10-vs-ND-4 brand carve-out; see `RESERVED_BRAND_SEGMENTS`).
+    — the ADR-2 ND-10-vs-ND-4 brand carve-out; lifts the deployment's own
+    `reserved_namespaces`, never `ALWAYS_RESERVED_SEGMENTS`).
     `argparse.Namespace` wiring (WP2-M) is expected to supply all of these; this
     signature's `registry`/`files`/`clock` keyword-only ports are this module's
     own addition on top of CONTRACTS.md §12's literal `run(args) -> ExitCode`
@@ -312,16 +314,20 @@ def run(
         raise ValidationError("--namespace and --package must be given together, or neither")
     if not namespace or not package:
         namespace, package = _derive_package_id(catalog_md_path)
-    package_id = parse_package_id(f"{namespace}/{package}")
+    package_id = parse_package_id(f"{namespace}/{package}", name_segments=policy.name_segments)
     if allow_reserved:
         print(
             f"seed-import: --allow-reserved-namespace used for {namespace}/{package} "
             "(brand-segment carve-out — control-path and generic segments still blocked)",
             file=sys.stderr,
         )
-    check_namespace_not_reserved(package_id, allow_reserved=allow_reserved)
+    check_namespace_not_reserved(
+        package_id,
+        operator_reserved=policy.reserved_namespaces,
+        allow_reserved=allow_reserved,
+    )
 
-    package_dir = f"{out_dir}/{package_id.namespace}/{package_id.package}"
+    package_dir = f"{out_dir}/{package_id}"
     root_path = f"{package_dir}.json"
     if files.exists(root_path):
         raise ValidationError(
@@ -346,12 +352,12 @@ def run(
     else:
         mirror_fields = _parse_mirror_yml(mirror_raw, source=mirror_yml_path)
         repository = _resolve_repository(
-            mirror_fields, source=mirror_yml_path, allowed_hosts=allowed_hosts
+            mirror_fields, source=mirror_yml_path, allowed_hosts=policy.registry_hosts
         )
 
     # G-03/SSRF ordering: both checks are pure string parsing (no RegistryPort
     # call inside either) and must run before `observe()` below.
-    check_repository_allowlisted(repository, allowed_hosts)
+    check_repository_allowlisted(repository, policy.registry_hosts)
     check_repository_shape(repository)
 
     # (bytes, digest, extension) as one unit — never tracked as three separately
@@ -397,7 +403,7 @@ def run(
     )
 
     root = PackageRoot(
-        name=f"ocx.sh/{package_id.namespace}/{package_id.package}",
+        name=f"{policy.name}/{package_id}",
         repository=repository,
         owners=(Owner(github=owner_github, github_id=owner_github_id),),
         status="active",

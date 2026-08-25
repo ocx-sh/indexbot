@@ -42,19 +42,6 @@ if TYPE_CHECKING:
     from ocx_indexbot.model import PackageId, PackageRoot
 
 
-NAME_SEGMENTS = 2
-"""Segment count a package name has under this index, counted on the part
-*after* `ocx.sh/` — published in `config.json` so a client knows the shape of
-name this deployment can hold without having to ask.
-
-It restates `schema/root.schema.json`'s `^ocx\\.sh/<ns>/<pkg>$` pattern; the
-two must move together. A client that reads it resolves a flat name like
-`ocx.sh/go-task` as plain OCI instead of reading the unavoidable 404 as an
-authoritative refusal. Optional on the wire and purely additive — a client
-that predates the field ignores it and behaves exactly as before, which is
-also why it is not a security control."""
-
-
 @dataclass(frozen=True, slots=True)
 class SourcePackage:
     """One package's fully-loaded source-tree state — `cli/render.py`'s input
@@ -115,15 +102,14 @@ def _split_content_key(key: str) -> tuple[str, str]:
 
 
 def _package_dist_files(source: SourcePackage) -> list[FileWrite]:
-    namespace, package = source.package_id.namespace, source.package_id.package
-    files = [FileWrite(path=f"p/{namespace}/{package}.json", content=source.root_raw)]
+    package_id = source.package_id
+    files = [FileWrite(path=f"p/{package_id}.json", content=source.root_raw)]
 
     reachable = _reachable_digests(source.root)
     for key, content in source.content_by_digest.items():
         digest, ext = _split_content_key(key)
         if digest in reachable:
-            path = cas_relpath(namespace, package, digest, ext)
-            files.append(FileWrite(path=path, content=content))
+            files.append(FileWrite(path=cas_relpath(package_id, digest, ext), content=content))
     return files
 
 
@@ -147,18 +133,25 @@ def _package_index(ordered: Sequence[SourcePackage], *, format_version: int) -> 
 
 
 def build_render_plan(
-    packages: Sequence[SourcePackage], *, format_version: int = 1
+    packages: Sequence[SourcePackage], *, name_segments: int, format_version: int = 1
 ) -> tuple[FileWrite, ...]:
     """Pure (CONTRACTS.md §0) — no I/O. Returns the flat dist-tree file list;
     see module docstring for its shape and write-order contract
-    (`site:build` before this tree lands, `--out`)."""
+    (`site:build` before this tree lands, `--out`).
+
+    `name_segments` is the deployment's own declaration (policy
+    `name_segments`), republished verbatim in `config.json`: no client can
+    read a tree and tell a three-segment index from a two-segment one holding
+    a package whose name contains a slash. It was a module constant until
+    0.2.0, which meant this bot could only ever render a two-segment index.
+    """
     ordered = sorted(packages, key=lambda source: str(source.package_id))
 
     dist_files: list[FileWrite] = [
         FileWrite(
             path="config.json",
             content=json.dumps(
-                {"format_version": format_version, "name_segments": NAME_SEGMENTS},
+                {"format_version": format_version, "name_segments": name_segments},
                 indent=2,
             )
             + "\n",

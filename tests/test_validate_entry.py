@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 
 import pytest
@@ -14,6 +15,11 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from ocx_indexbot.core import validate_entry
+from ocx_indexbot.core.grammar import (
+    NAMESPACE_SHAPE,
+    PACKAGE_SHAPE,
+    package_id_max_length,
+)
 from ocx_indexbot.core.registry_checks import check_digest_in_scope
 from ocx_indexbot.errors import AnomalyError, ValidationError
 from ocx_indexbot.model import (
@@ -27,6 +33,7 @@ from ocx_indexbot.model import (
     Upstream,
     Yank,
 )
+from tests.fakes import make_policy
 
 
 def _minimal_root(**overrides: object) -> PackageRoot:
@@ -50,16 +57,16 @@ def _minimal_root(**overrides: object) -> PackageRoot:
 
 
 def test_check_name_matches_path_ok() -> None:
-    package_id = PackageId(namespace="kitware", package="cmake")
+    package_id = PackageId(segments=("kitware", "cmake"))
     root = _minimal_root(name="ocx.sh/kitware/cmake")
-    validate_entry.check_name_matches_path(package_id, root)  # no raise
+    validate_entry.check_name_matches_path(package_id, root, index_name="ocx.sh")  # no raise
 
 
 def test_check_name_matches_path_mismatch_raises() -> None:
-    package_id = PackageId(namespace="kitware", package="cmake")
+    package_id = PackageId(segments=("kitware", "cmake"))
     root = _minimal_root(name="ocx.sh/astral-sh/uv")
     with pytest.raises(ValidationError, match="G-02"):
-        validate_entry.check_name_matches_path(package_id, root)
+        validate_entry.check_name_matches_path(package_id, root, index_name="ocx.sh")
 
 
 # --- check_superseded_by -----------------------------------------------------
@@ -67,24 +74,24 @@ def test_check_name_matches_path_mismatch_raises() -> None:
 
 def test_check_superseded_by_none_is_a_noop() -> None:
     root = _minimal_root(superseded_by=None)
-    validate_entry.check_superseded_by(root)  # no raise
+    validate_entry.check_superseded_by(root, index_name="ocx.sh", name_segments=2)  # no raise
 
 
 def test_check_superseded_by_valid_successor_ok() -> None:
     root = _minimal_root(name="ocx.sh/kitware/cmake", superseded_by="kitware/cmake-ng")
-    validate_entry.check_superseded_by(root)  # no raise
+    validate_entry.check_superseded_by(root, index_name="ocx.sh", name_segments=2)  # no raise
 
 
 def test_check_superseded_by_bad_shape_raises() -> None:
     root = _minimal_root(superseded_by="not-a-valid-id")
     with pytest.raises(ValidationError, match="not a valid"):
-        validate_entry.check_superseded_by(root)
+        validate_entry.check_superseded_by(root, index_name="ocx.sh", name_segments=2)
 
 
 def test_check_superseded_by_self_reference_raises() -> None:
     root = _minimal_root(name="ocx.sh/kitware/cmake", superseded_by="kitware/cmake")
     with pytest.raises(ValidationError, match="cannot reference its own package"):
-        validate_entry.check_superseded_by(root)
+        validate_entry.check_superseded_by(root, index_name="ocx.sh", name_segments=2)
 
 
 # --- check_upstream_repository_url_scheme (review-round-1 finding #1) -------
@@ -172,62 +179,79 @@ def test_check_tag_timestamps_z_anchored_yanked_at_offset_raises() -> None:
 
 # --- check_namespace_not_reserved -------------------------------------------
 
+_BRAND = make_policy().reserved_namespaces
+"""The public index's own `reserved_namespaces` — brand segments. Package
+constants no longer carry these: `ocx-sh` is OCX's to reserve and means
+nothing on a corporate index."""
+
+
+def _check(package_id: PackageId, *, allow_reserved: bool = False) -> None:
+    validate_entry.check_namespace_not_reserved(
+        package_id, operator_reserved=_BRAND, allow_reserved=allow_reserved
+    )
+
 
 def test_check_namespace_not_reserved_ok() -> None:
-    validate_entry.check_namespace_not_reserved(PackageId(namespace="kitware", package="cmake"))
+    _check(PackageId(segments=("kitware", "cmake")))
 
 
-def test_check_namespace_not_reserved_namespace_reserved_raises() -> None:
-    package_id = PackageId(namespace="ocx-contrib", package="cmake")
+def test_first_segment_reserved_raises() -> None:
     with pytest.raises(ValidationError, match="ADR-2 ND-4"):
-        validate_entry.check_namespace_not_reserved(package_id)
+        _check(PackageId(segments=("ocx-contrib", "cmake")))
 
 
-def test_check_namespace_not_reserved_package_reserved_raises() -> None:
+def test_last_segment_reserved_raises() -> None:
     with pytest.raises(ValidationError, match="ADR-2 ND-4"):
-        validate_entry.check_namespace_not_reserved(PackageId(namespace="kitware", package="admin"))
+        _check(PackageId(segments=("kitware", "admin")))
 
 
-def test_reserved_segments_cover_control_paths_brand_and_generic() -> None:
-    # Locks the ADR-2 ND-4 list against accidental drift.
-    assert "p" in validate_entry.RESERVED_NAMESPACE_SEGMENTS
-    assert "o" in validate_entry.RESERVED_NAMESPACE_SEGMENTS
-    assert "ocx-contrib" in validate_entry.RESERVED_NAMESPACE_SEGMENTS
-    assert "admin" in validate_entry.RESERVED_NAMESPACE_SEGMENTS
-    assert "kitware" not in validate_entry.RESERVED_NAMESPACE_SEGMENTS
-
-
-def test_reserved_brand_segments_is_a_subset_of_the_full_reserved_list() -> None:
-    assert {"ocx", "ocx-sh", "ocx-contrib", "ocx-rs"} == validate_entry.RESERVED_BRAND_SEGMENTS
-    assert validate_entry.RESERVED_BRAND_SEGMENTS <= validate_entry.RESERVED_NAMESPACE_SEGMENTS
-
-
-def test_check_namespace_not_reserved_allow_reserved_default_false_still_blocks_brand() -> None:
+def test_a_middle_segment_is_checked_too() -> None:
+    """The N-segment shape privileges no position: `p/team/docs/tool.json`
+    collides with a served route exactly as `p/docs/tool.json` would."""
     with pytest.raises(ValidationError, match="ADR-2 ND-4"):
-        validate_entry.check_namespace_not_reserved(PackageId(namespace="ocx", package="cli"))
+        _check(PackageId(segments=("team", "docs", "tool")))
 
 
-def test_check_namespace_not_reserved_allow_reserved_admits_brand_namespace() -> None:
-    package_id = PackageId(namespace="ocx", package="cli")
-    validate_entry.check_namespace_not_reserved(package_id, allow_reserved=True)  # no raise
+def test_always_reserved_covers_control_paths_and_generic_words() -> None:
+    """Locks the unconditional list against drift. Brand segments are
+    deliberately absent — they are per-deployment policy now."""
+    always = validate_entry.ALWAYS_RESERVED_SEGMENTS
+    assert {"p", "o", "c", "config", "schema", "admin", "root", "test"} <= always
+    assert "kitware" not in always
+    assert not (always & _BRAND), "brand segments belong to policy, not to the package"
 
 
-def test_check_namespace_not_reserved_allow_reserved_admits_brand_package() -> None:
-    package_id = PackageId(namespace="kitware", package="ocx-rs")
-    validate_entry.check_namespace_not_reserved(package_id, allow_reserved=True)  # no raise
+def test_allow_reserved_default_false_blocks_the_operator_list() -> None:
+    with pytest.raises(ValidationError, match="ADR-2 ND-4"):
+        _check(PackageId(segments=("ocx", "cli")))
 
 
-def test_check_namespace_not_reserved_allow_reserved_still_blocks_control_path_segment() -> None:
+def test_allow_reserved_admits_an_operator_reserved_first_segment() -> None:
+    _check(PackageId(segments=("ocx", "cli")), allow_reserved=True)  # no raise
+
+
+def test_allow_reserved_admits_an_operator_reserved_later_segment() -> None:
+    _check(PackageId(segments=("kitware", "ocx-rs")), allow_reserved=True)  # no raise
+
+
+def test_allow_reserved_never_admits_a_control_path_segment() -> None:
+    with pytest.raises(ValidationError, match="ADR-2 ND-4"):
+        _check(PackageId(segments=("p", "cmake")), allow_reserved=True)
+
+
+def test_allow_reserved_never_admits_a_generic_segment() -> None:
+    """`admin` under a flag would hand out exactly the ambiguity the
+    reservation exists to stop, so the flag cannot reach it."""
+    with pytest.raises(ValidationError, match="ADR-2 ND-4"):
+        _check(PackageId(segments=("admin", "cmake")), allow_reserved=True)
+
+
+def test_an_index_reserving_nothing_still_blocks_the_unconditional_set() -> None:
+    """A deployment with an empty `reserved_namespaces` is a coherent policy
+    and must not lose the structural guard with it."""
     with pytest.raises(ValidationError, match="ADR-2 ND-4"):
         validate_entry.check_namespace_not_reserved(
-            PackageId(namespace="p", package="cmake"), allow_reserved=True
-        )
-
-
-def test_check_namespace_not_reserved_allow_reserved_still_blocks_generic_segment() -> None:
-    with pytest.raises(ValidationError, match="ADR-2 ND-4"):
-        validate_entry.check_namespace_not_reserved(
-            PackageId(namespace="admin", package="cmake"), allow_reserved=True
+            PackageId(segments=("schema", "tool")), operator_reserved=frozenset()
         )
 
 
@@ -392,15 +416,19 @@ def test_parse_digest_rejects_malformed_and_malicious_input(raw: str) -> None:
 def test_cas_relpath_builds_the_p_ns_pkg_o_sha256_hex_ext_shape() -> None:
     digest = "sha256:" + "a" * 64
     assert (
-        validate_entry.cas_relpath("kitware", "cmake", digest, "json")
+        validate_entry.cas_relpath(PackageId(segments=("kitware", "cmake")), digest, "json")
         == f"p/kitware/cmake/o/sha256/{'a' * 64}.json"
     )
 
 
 def test_cas_relpath_varies_extension() -> None:
     digest = "sha256:" + "b" * 64
-    assert validate_entry.cas_relpath("kitware", "cmake", digest, "md").endswith(".md")
-    assert validate_entry.cas_relpath("kitware", "cmake", digest, "svg").endswith(".svg")
+    assert validate_entry.cas_relpath(
+        PackageId(segments=("kitware", "cmake")), digest, "md"
+    ).endswith(".md")
+    assert validate_entry.cas_relpath(
+        PackageId(segments=("kitware", "cmake")), digest, "svg"
+    ).endswith(".svg")
 
 
 # --- check_content_digest_self_consistent ------------------------------------
@@ -733,6 +761,53 @@ def test_parse_package_root_wrong_type_for_owners_raises() -> None:
         validate_entry.parse_package_root(payload)
 
 
+# --- parse_package_root tag-name grammar enforcement (A-5) -----------------
+
+
+def _root_payload_with_tag(tag_name: str) -> bytes:
+    """A structurally valid root payload whose one tag key is `tag_name` —
+    isolates the tag-name-grammar check from every other `parse_package_root`
+    concern."""
+    return json.dumps(
+        {
+            "name": "ocx.sh/kitware/cmake",
+            "repository": "oci://ghcr.io/ocx-contrib/cmake",
+            "owners": [{"github": "alice", "github_id": 1}],
+            "status": "active",
+            "deprecated_message": None,
+            "created": "2026-07-17",
+            "desc": None,
+            "tags": {
+                tag_name: {"content": "sha256:" + "a" * 64, "observed": "2026-07-17T00:00:00Z"}
+            },
+        }
+    ).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "tag_name",
+    [
+        "../blobs/sha256:" + "a" * 64,  # the A-5 exploit shape itself
+        "1.0/../../etc",
+        "tag/with/slash",
+        "tag%2Ftraversal",
+        "tag with space",
+        "",  # the pattern requires at least one character
+        "x" * 129,  # one over the 128-character cap
+    ],
+)
+def test_parse_package_root_rejects_tag_name_outside_oci_grammar(tag_name: str) -> None:
+    with pytest.raises(ValidationError, match="tag name"):
+        validate_entry.parse_package_root(_root_payload_with_tag(tag_name))
+
+
+def test_parse_package_root_accepts_the_widest_legal_tag_name() -> None:
+    # Exactly 128 characters — the pattern's cap — and legal throughout.
+    tag_name = "a" * 128
+    root = validate_entry.parse_package_root(_root_payload_with_tag(tag_name))
+    assert tag_name in root.tags
+
+
 # --- parse_image_index_digests (D4(c): the committed CAS object's kind) ----
 
 
@@ -816,26 +891,23 @@ _WALL_CLOCK_BOUND_SECONDS = 0.1
 
 
 def test_parse_package_id_happy_path() -> None:
-    assert validate_entry.parse_package_id("ocx-contrib/cmake") == PackageId(
-        namespace="ocx-contrib", package="cmake"
+    assert validate_entry.parse_package_id("ocx-contrib/cmake", name_segments=2) == PackageId(
+        segments=("ocx-contrib", "cmake")
     )
 
 
 def test_parse_package_id_accepts_dotted_underscored_package_segment() -> None:
     # Exercises every separator the package shape allows: ".", "_", "__", "-+".
-    assert validate_entry.parse_package_id("acme/lib.core_v2__beta-tools") == PackageId(
-        namespace="acme", package="lib.core_v2__beta-tools"
-    )
+    assert validate_entry.parse_package_id(
+        "acme/lib.core_v2__beta-tools", name_segments=2
+    ) == PackageId(segments=("acme", "lib.core_v2__beta-tools"))
 
 
 @pytest.mark.parametrize(
     "raw",
     [
-        "",
-        "cmake",  # missing namespace segment
-        "/cmake",  # empty namespace
-        "ocx-contrib/",  # empty package
-        "ocx-contrib/cmake/extra",  # too many segments
+        "/cmake",  # empty first segment
+        "ocx-contrib/",  # empty last segment
         "OCX-Contrib/cmake",  # uppercase not allowed
         "ocx_contrib/cmake",  # namespace forbids "_"
         "-ocx/cmake",  # namespace can't start with "-"
@@ -848,16 +920,45 @@ def test_parse_package_id_accepts_dotted_underscored_package_segment() -> None:
 )
 def test_parse_package_id_rejects_shape_violations(raw: str) -> None:
     with pytest.raises(ValidationError, match="does not match the expected shape"):
-        validate_entry.parse_package_id(raw)
+        validate_entry.parse_package_id(raw, name_segments=2)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",  # zero segments
+        "cmake",  # one segment
+        "ocx-contrib/cmake/extra",  # three
+    ],
+)
+def test_parse_package_id_rejects_the_wrong_segment_count(raw: str) -> None:
+    """A depth mismatch is its own diagnosis, not a generic shape failure:
+    the same string is perfectly valid on an index that declares a different
+    `name_segments`, and saying so is the difference between "fix your id"
+    and "fix your policy"."""
+    with pytest.raises(ValidationError, match="this index declares name_segments = 2"):
+        validate_entry.parse_package_id(raw, name_segments=2)
+
+
+def test_parse_package_id_accepts_a_flat_one_segment_index() -> None:
+    assert validate_entry.parse_package_id("cmake", name_segments=1) == PackageId(
+        segments=("cmake",)
+    )
+
+
+def test_parse_package_id_accepts_a_three_segment_index() -> None:
+    assert validate_entry.parse_package_id("platform/tools/mycli", name_segments=3) == PackageId(
+        segments=("platform", "tools", "mycli")
+    )
 
 
 def test_parse_package_id_rejects_over_combined_length_before_regex() -> None:
     # 70-char namespace + "/" + 70-char package = 141 chars, one over the
     # combined 140-char budget (ADR-2 ND-3) — must fail on length, not shape.
     raw = ("a" * 70) + "/" + ("b" * 70)
-    assert len(raw) == validate_entry.PACKAGE_ID_MAX_LENGTH + 1
+    assert len(raw) == package_id_max_length(2) + 1
     with pytest.raises(ValidationError, match="exceeds max length 140"):
-        validate_entry.parse_package_id(raw)
+        validate_entry.parse_package_id(raw, name_segments=2)
 
 
 def test_parse_package_id_rejects_namespace_over_its_own_cap() -> None:
@@ -866,7 +967,7 @@ def test_parse_package_id_rejects_namespace_over_its_own_cap() -> None:
     # can catch this (CONTRACTS.md §4 step 3).
     raw = ("a" * 40) + "/pkg"
     with pytest.raises(ValidationError, match="exceeds max length 39"):
-        validate_entry.parse_package_id(raw)
+        validate_entry.parse_package_id(raw, name_segments=2)
 
 
 def test_parse_package_id_rejects_package_over_its_own_cap_within_combined_budget() -> None:
@@ -874,26 +975,35 @@ def test_parse_package_id_rejects_package_over_its_own_cap_within_combined_budge
     # combined budget while still violating the 100-char package cap — the
     # exact scenario CONTRACTS.md §4 step 3 calls out.
     raw = "a/" + ("b" * 138)
-    assert len(raw) == validate_entry.PACKAGE_ID_MAX_LENGTH
+    assert len(raw) == package_id_max_length(2)
     with pytest.raises(ValidationError, match="exceeds max length 100"):
-        validate_entry.parse_package_id(raw)
+        validate_entry.parse_package_id(raw, name_segments=2)
 
 
 # --- hypothesis: acceptance property ---------------------------------------
 
 
 def _within_all_caps(raw: str) -> bool:
-    if len(raw) > validate_entry.PACKAGE_ID_MAX_LENGTH:
+    if len(raw) > package_id_max_length(2):
         return False
     namespace, package = raw.split("/", 1)
     return len(namespace) <= 39 and len(package) <= 100
 
 
-@given(st.from_regex(validate_entry.PACKAGE_ID_RE, fullmatch=True).filter(_within_all_caps))
+_TWO_SEGMENT_ID_RE = re.compile(rf"^{NAMESPACE_SHAPE}/{PACKAGE_SHAPE}$")
+"""Rebuilt here, in the test, from the same two shapes
+`parse_package_id` validates segment-by-segment. The combined pattern is
+deliberately no longer a production constant — an index declares its own
+depth, so there is no one combined shape to compile."""
+
+
+@given(st.from_regex(_TWO_SEGMENT_ID_RE, fullmatch=True).filter(_within_all_caps))
 @settings(max_examples=200)
 def test_parse_package_id_accepts_every_in_budget_regex_match(raw: str) -> None:
     namespace, package = raw.split("/", 1)
-    assert validate_entry.parse_package_id(raw) == PackageId(namespace=namespace, package=package)
+    assert validate_entry.parse_package_id(raw, name_segments=2) == PackageId(
+        segments=(namespace, package)
+    )
 
 
 # --- hypothesis: traversal / injection rejection property -------------------
@@ -920,7 +1030,7 @@ _TRAVERSAL_AND_INJECTION_PAYLOADS = (
 @given(st.sampled_from(_TRAVERSAL_AND_INJECTION_PAYLOADS))
 def test_parse_package_id_rejects_traversal_and_injection_payloads(raw: str) -> None:
     with pytest.raises(ValidationError):
-        validate_entry.parse_package_id(raw)
+        validate_entry.parse_package_id(raw, name_segments=2)
 
 
 # --- ReDoS wall-clock cap -----------------------------------------------
@@ -947,6 +1057,6 @@ def test_parse_package_id_rejects_traversal_and_injection_payloads(raw: str) -> 
 def test_parse_package_id_rejects_adversarial_input_within_wall_clock_bound(raw: str) -> None:
     start = time.monotonic()
     with pytest.raises(ValidationError):
-        validate_entry.parse_package_id(raw)
+        validate_entry.parse_package_id(raw, name_segments=2)
     elapsed = time.monotonic() - start
     assert elapsed < _WALL_CLOCK_BOUND_SECONDS

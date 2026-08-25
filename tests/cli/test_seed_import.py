@@ -10,7 +10,7 @@ from ocx_indexbot.cli import seed_import
 from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.ports import ClockPort, FilePort, RegistryPort
-from tests.fakes import FakeRegistry, FixedClock, InMemoryFiles
+from tests.fakes import FakeRegistry, FixedClock, InMemoryFiles, make_policy
 
 _REPO = "oci://ghcr.io/ocx-contrib/cmake"
 _ALLOWED_HOSTS = frozenset({"ghcr.io"})
@@ -27,9 +27,7 @@ def run(
     (`.github/index-policy.json`) — every test in this file runs under the
     public index's own allowlist. Tests needing a different policy call
     `seed_import.run` directly with their own `allowed_hosts`."""
-    return seed_import.run(
-        args, registry=registry, files=files, clock=clock, allowed_hosts=_ALLOWED_HOSTS
-    )
+    return seed_import.run(args, registry=registry, files=files, clock=clock, policy=make_policy())
 
 
 _INDEX_AMD64: dict[str, object] = {

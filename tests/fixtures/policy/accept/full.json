@@ -1,0 +1,20 @@
+{
+  "$schema": "https://ocx-sh.github.io/indexbot/schema/index-policy-v1.schema.json",
+  "name": "acme.corp",
+  "name_segments": 3,
+  "registry_hosts": [
+    "harbor.corp",
+    "registry.gitlab.com"
+  ],
+  "reserved_namespaces": [
+    "acme",
+    "admin"
+  ],
+  "governance": {
+    "auto_merge": "never"
+  },
+  "ci": {
+    "forge": "gitlab",
+    "run": "uv run --project bot-tools --frozen -- indexbot"
+  }
+}
