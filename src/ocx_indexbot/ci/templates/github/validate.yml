@@ -1,0 +1,133 @@
+name: validate
+
+# The UNPRIVILEGED half of ADR-4 (adr_index_bot_and_workflow_security.md)
+# BD-5's privileged/unprivileged split, extended by ADR-6
+# (adr_fork_pr_announce.md) for the fork-PR announce lane. The privileged half
+# — `governance-gate` + `arm-auto-merge` + `deploy-on-merge` on
+# `pull_request_target` — lives in `governance.yml`.
+#
+# One trigger per workflow, and that is a security property, not tidiness.
+# Both halves used to live in this file, which declared BOTH `pull_request`
+# and `pull_request_target` with a job-level `if: github.event_name == ...`
+# picking the half to run. A job skipped by such an `if:` still emits a check
+# run — conclusion `skipped` — under its own name, so every
+# `pull_request_target` run published a SKIPPED check run named
+# `schema-validate-pr`: exactly the context branch protection requires on
+# `main`. GitHub treats `skipped` as satisfying a required check and resolves
+# duplicate-named contexts to the most recent, so re-running the
+# `pull_request_target` half after a red validation turned the required
+# context green with nothing validated — and a first-time fork contributor's
+# `pull_request` run, held in `action_required`, materialises no job-level
+# check runs at all, leaving the skipped one as the context's ONLY bearer.
+# Since ND-4's reserved-namespace carve-out is withheld from fork PRs (below),
+# this is the only automated check that reads a fork PR's roots at all:
+# `governance.yml`'s gate decides whether the MACHINE lane may merge, and it
+# decides that from base-ref data without ever inspecting a root's content. So
+# a falsely-green context is what auto-merge waits on for an announce-shaped
+# fork PR, and what a human reads before merging anything else. The context is
+# not itself the enforcement — that is `cli/validate_pr.py`, running under the
+# BASE ref's policy — but it is the whole of what reports it.
+# Trigger-disjoint workflows make the collision structurally impossible.
+# Pinned by the index deployment's own workflow-split tests.
+#
+#   schema-validate-pr (zero secrets, checks out PR head — safe, GitHub strips
+#     secrets for this trigger): `indexbot validate-pr` against this PR's own
+#     changed package roots. It also byte-verifies every CAS file under each
+#     changed root's `o/sha256/` tree and re-derives every claimed tag/desc-blob
+#     digest from registry truth (ADR-6 FP-1/FP-4) — the CLI walks the CAS tree
+#     itself from each root path it selects.
+#
+# The job is named "schema-validate-pr", not ADR-4's literal
+# "schema-validate", because ci.yml already owns that name for a different,
+# unrelated check (schema/*.schema.json + fixtures only, not this PR's diff).
+# It is on main's required-check list (owner gate G-8); renaming it means
+# updating branch protection in the same change.
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  schema-validate-pr:
+    name: schema-validate-pr
+    runs-on: ubuntu-latest
+    concurrency:
+      group: schema-validate-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read # checkout PR head, then read the local history — no write ever needed
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Load-bearing, not caution: `validate-pr` diffs three-dot against
+          # `origin/$GITHUB_BASE_REF`, and a shallow clone has no merge base
+          # to find.
+          fetch-depth: 0
+          persist-credentials: false
+{{setup_step}}
+      # This step used to be three, and every line of shell in them was a
+      # security control that a well-meaning edit could soften silently. They
+      # now live in `cli/validate_pr.py` and `core/policy.py` with named tests,
+      # because YAML is not testable and each of these HAS gone wrong:
+      #
+      #   * the changed-root pathspec, `:(glob)`-quoted so `*` stops at `/`.
+      #     A plain `p/*/*.json` also selects the CAS objects every announce
+      #     PR adds, which `validate` then rejects as malformed roots — this
+      #     required check failed on every announce PR until the magic
+      #     pathspec went in. It is now derived from the deployment's own
+      #     `name_segments` at run time rather than baked in at render time,
+      #     so an index that is not two segments deep is correct without a
+      #     re-render.
+      #   * three-dot (merge-base...HEAD), never two-dot. Two-dot compares
+      #     TREES, so a branch cut moments before another announce merged
+      #     re-verified STALE copies of roots it never touched against
+      #     registry truth (PRs #351/#423/#538).
+      #   * `--diff-filter=d` (everything but deletes), not an ACMR allowlist:
+      #     a root swapped for a symlink is status T, which ACMR dropped —
+      #     zero roots selected, validate skipped, required check green.
+      #   * each changed root's BASE-ref bytes, materialized OUTSIDE the
+      #     workspace. ADR-2 ND-4 gates CLAIMING a reserved segment, not
+      #     UPDATING a root already committed under one, and telling those
+      #     apart needs both versions — while the head tree must stay exactly
+      #     as checked out, since `validate` byte-compares it against its own
+      #     canonical serialization. A root absent at the base ref is simply
+      #     not written, so it reads as a new claim: fail closed.
+      #   * the deployment policy this gate obeys, taken from the BASE ref.
+      #     This job checks out `pull_request.head.sha` — it is the half that
+      #     reads PR-head content — so `.github/index-policy.json` under that
+      #     root is the PULL REQUEST's copy, and every field in it steers this
+      #     check: `name_segments` builds the pathspec above, and a fork
+      #     declaring `"name_segments": 3` leaves its own two-segment
+      #     `p/<reserved>/pkg.json` matching nothing, so this required context
+      #     goes green having validated nothing at all. `reserved_namespaces`
+      #     emptied is the shorter spelling. The command byte-compares the
+      #     head's copy against the base ref's before it diffs anything and
+      #     refuses when they differ — or when the base ref has no policy at
+      #     all. That file is deployment policy: it lands on the default
+      #     branch, never through a pull request the same file governs.
+      #   * ND-4's reserved-brand carve-out, gated on PR provenance. A segment
+      #     this index reserves for itself cannot host the operator's own
+      #     first-party roots without it, but granting it unconditionally
+      #     would let any fork PR publish under the index's own brand and be
+      #     believed by every client resolving through this index. The command
+      #     reads `pull_request.head.repo.full_name` from `$GITHUB_EVENT_PATH`
+      #     against `$GITHUB_REPOSITORY` — both written by the runner, never by
+      #     the PR author — and a null `head.repo` (a deleted fork) or an
+      #     unrecognised environment reads as "fork": fail closed.
+      #     `--same-repo-pr`/`--fork-pr` override that only for a pipeline this
+      #     bot did not generate, which is why neither appears here.
+      #
+      # Nothing above is passed on the command line, deliberately: every one
+      # of them was a `${{ }}` expression or a hand-written pathspec, and the
+      # command sniffing its own provenance and its own base commit is what
+      # makes that class of edit impossible to make in this file at all.
+      #
+      # Failure reporting moved with them. `validate-pr` writes the ::error
+      # annotation the checks UI surfaces and puts every failing root's message
+      # inside a fenced block on the job summary — fenced because those
+      # messages are derived from PR content and must never reach a `::error`
+      # title or any other command-evaluated position (ADR-4 BD-4).
+      - name: indexbot validate-pr
+        run: {{run}} validate-pr

@@ -1,0 +1,81 @@
+name: reconcile
+
+# Nightly verify-only sweep (ADR-6 adr_fork_pr_announce.md FP-3, superseding
+# ADR-4 BD-1/BD-2's regenerate-and-write reconcile). `indexbot reconcile`
+# never writes to `p/` any more — no regenerate, no diff, no commit, no PR —
+# it only re-derives every committed root's claimed tags/desc blobs from
+# registry truth and, on an anomaly, files or updates the tracking issue
+# itself via `GitHubPort.create_or_update_issue` (CONTRACTS.md §12). This
+# workflow therefore needs no `index-write` Environment and no write-scoped
+# secret at all: the plain default `GITHUB_TOKEN` (`issues: write`) is
+# everything the CLI's own issue-filing needs. Single privileged job — still
+# gets harden-runner (audit mode, BD-6) and a `concurrency` group that never
+# cancels a run mid-sweep.
+#
+# Exit-code contract (ADR-4 BD-2), and where each case is now handled:
+#   exit 0  -> OK. Nothing further to do.
+#   exit 65 -> ANOMALY. Never auto-healed (G-13/FP-3). `--anomaly-ok` below is
+#              this translation, folded into the command: `indexbot reconcile`
+#              has already filed/updated the tracking issue by the time it
+#              would exit 65, so it writes the same notice to the job summary
+#              and returns 0 instead. The job stays GREEN on purpose — the
+#              filed issue is the human signal (FP-3), and failing the nightly
+#              build on top of an already-actioned condition is alarm fatigue.
+#              Drop the flag and the raw 65 comes back, for a pipeline that
+#              wants to branch on it itself.
+#   exit 75 -> TRANSIENT. Backoff exhausted (G-10). `--anomaly-ok` deliberately
+#              does not touch this: a transient failure is never "ok", the job
+#              goes red, and the nightly cron itself is the retry.
+#   anything else -> a non-zero exit fails the job, which is what "never
+#              silently passed" now means with nothing left to mis-transcribe.
+#
+# The three shell steps that used to do that translation — one per exit code,
+# each re-deriving the same `::error`/`::warning`/summary block — are gone.
+# They were the observability floor (BCR #176) written in the least testable
+# place available; `cli/reconcile.py` writes the same blocks through
+# `_common.write_ci_summary`, with the anomaly findings inside a fenced block
+# rather than an annotation title, because a finding can carry a
+# registry-observed tag name (ADR-4 BD-4).
+on:
+  schedule:
+    - cron: "{{cron_reconcile}}" # ci.schedules.reconcile — off-peak, off the top of the hour
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: reconcile
+    # Cron is upstream-only: a fork sweeping this index's roots against
+    # registry truth files its anomaly issues in the fork, where nobody
+    # reads them.
+    if: github.repository_owner == '{{owner}}'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout only — verify-only reconcile never writes to p/
+      issues: write # indexbot reconcile itself opens/updates the anomaly-tracking issue via GitHubPort
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+{{setup_step}}
+
+      # No `working-directory:`. It used to be `bot`, so the bot ran with a cwd
+      # one level below the `p/` tree it reads and relied on
+      # `$GITHUB_WORKSPACE` to route around its own cwd. With the source
+      # extracted there is no `bot/` to sit in: the run happens at the checkout
+      # root, where the index data actually is.
+      - name: indexbot reconcile
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: {{run}} reconcile --anomaly-ok

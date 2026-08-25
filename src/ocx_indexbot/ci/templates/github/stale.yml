@@ -1,0 +1,64 @@
+name: stale
+
+# ADR-6 (adr_fork_pr_announce.md) FP-8 spam posture, second half: fork PRs
+# `pr-checks-label.yml` already labeled `checks-failed` get stale-closed on
+# the ordinary open-source triage schedule — "no CAPTCHA, no allowlist, no
+# first-contributor approval wall in v1", just label + stale-close.
+#
+# `actions/stale` used to do this, and no longer does. Not because the action
+# is bad — it is the reason the thresholds and messages below read the way
+# they do — but because it is GitHub-only, and this lane has to exist
+# identically on GitLab, where there is no equivalent action at all. One
+# implementation in `cli/stale.py` is the only way both forges can be the same
+# lane rather than two lanes that resemble each other. It also drops a
+# third-party action from a job that holds `pull-requests: write`.
+#
+# Its configuration travelled with it, verbatim and as package constants
+# rather than deployment policy: `only-labels: checks-failed` (the trigger
+# label), 14 days to stale, 7 more to close, `checks-failed-stale` as the
+# stale marker, both messages word for word. None of them was ever rendered
+# from policy in this template — every one was already the same literal for
+# every deployment, so `.github/index-policy.json` gains no keys for them
+# either.
+#
+# Issue staling stays off, as `days-before-issue-stale: -1` used to say
+# structurally: `indexbot stale` sweeps pull requests and nothing else, so the
+# anomaly-tracking issues `reconcile`/`validate` file — a different lane with
+# a different owner — are untouchable from here by construction rather than by
+# configuration.
+on:
+  schedule:
+    - cron: "{{cron_stale}}" # ci.schedules.stale
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: stale
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    name: stale
+    # Cron is upstream-only: a fork inherits every schedule in this file and
+    # would triage its own copy of the PR queue.
+    if: github.repository_owner == '{{owner}}'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout only, to run the pinned indexbot
+      pull-requests: write # indexbot stale labels and closes stale PRs
+      issues: write # its stale/close comments post via the Issues API even for a PR — pull-requests: write alone 403s them
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+{{setup_step}}
+
+      # Comments are posted idempotently against a hidden HTML marker, so a
+      # re-run — or a `workflow_dispatch` fired by hand — updates the existing
+      # notice rather than adding another one to a PR that is already being
+      # closed for lack of activity.
+      - name: indexbot stale
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: {{run}} stale

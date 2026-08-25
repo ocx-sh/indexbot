@@ -1,0 +1,78 @@
+name: pr-checks-label
+
+# ADR-6 (adr_fork_pr_announce.md) FP-8 spam posture: label fork PRs whose
+# checks failed, so `stale.yml` can later close them on the ordinary
+# open-source triage schedule. A dedicated `workflow_run` workflow because
+# `governance.yml`'s `governance-gate` job (`pull_request_target`) runs
+# alongside `schema-validate-pr` (`pull_request`), not after it, and so has
+# no way to see that job's conclusion (CONTRACTS.md §12/ADR-6 FP-8 open
+# question — resolved here).
+#
+# Trust boundary: this workflow never checks out any PULL-REQUEST commit,
+# fork-authored or otherwise, and never runs PR-controlled code. It reads the
+# completed run's metadata and, through the GitHub API, the associated pull
+# request's head repository, then applies a label. The `workflow_run` trigger
+# runs with base-repo privileges regardless of who authored the workflow that
+# just completed, which is exactly why no pull-request content is ever checked
+# out here.
+#
+# The checkout below is the DEFAULT ref — the default branch, base-authored,
+# and the only thing `workflow_run` will give it. It exists because running
+# `indexbot` needs the repository, not because anything in the PR is wanted;
+# `github.event.workflow_run.head_sha` reaches the command as an argument, not
+# as a ref. Nothing here may ever gain a `ref:`.
+on:
+  # zizmor: ignore[dangerous-triggers] workflow_run runs with base-repo
+  # privileges by design, but every job below checks out only the default
+  # branch (never the completed run's commit, fork or otherwise) and never
+  # executes PR-controlled code — GitHub API reads and one label write only.
+  workflow_run:
+    workflows: ["validate"]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: pr-checks-label-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  label-checks-failed:
+    name: label-checks-failed
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout the default branch to run the pinned indexbot; never the completed run's commit
+      pull-requests: write # label the fork PR associated with the failed run
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+{{setup_step}}
+
+      # `--head-sha` is passed explicitly and MUST be. The command falls back
+      # to `$GITHUB_SHA` when it is omitted, and on a `workflow_run` event that
+      # variable names the DEFAULT BRANCH's head, not the head of the run that
+      # just failed — the fallback would look up the wrong commit entirely.
+      # Env-var indirection, never `run:` interpolation (ADR-4 BD-4).
+      #
+      # What the command now owns, and what each part of it cost when it was
+      # `gh api` + two `jq` filters here:
+      #   * `workflow_run`'s own `pull_requests` array is empty for fork PRs —
+      #     GitHub populates it only for same-repo PRs — so the PR is found by
+      #     its head commit instead, which does work for fork-originated PRs.
+      #   * that lookup is filtered to an EXACT head-sha match, never "first
+      #     result": a commit can belong to more than one PR's history (a
+      #     rebase or merge chain), and taking `.[0]` could label — and later
+      #     stale-close — an innocent PR that merely contains the sha.
+      #   * FP-8 scopes this to FORK PRs only. A same-repo PR's failing checks
+      #     are already visible to every maintainer with push access, and
+      #     labeling it would put it on a stale-close clock nobody asked for.
+      # All three are `ForgePort.find_pull_request_by_head_sha` +
+      # `cli/label_failed_run.py` now, with named tests, and identical on
+      # GitLab — which the `jq` version could never be.
+      - name: indexbot label-failed-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: {{run}} label-failed-run --head-sha "$HEAD_SHA"

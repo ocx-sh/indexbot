@@ -1,0 +1,243 @@
+name: governance
+
+# The privileged half of ADR-4 (adr_index_bot_and_workflow_security.md) BD-5's
+# privileged/unprivileged split, extended by ADR-6 (adr_fork_pr_announce.md)
+# for the fork-PR announce lane. The unprivileged half — `schema-validate-pr`,
+# the required check that reads THIS PR's own `p/**` diff — lives in
+# `validate.yml` on the `pull_request` trigger.
+#
+# The split is one-workflow-per-trigger, and that is a security property, not
+# tidiness. Both halves used to live in one workflow that declared BOTH
+# `pull_request` and `pull_request_target`, with a job-level
+# `if: github.event_name == ...` picking which half ran. A job skipped by such
+# an `if:` still emits a check run — with conclusion `skipped` — under its own
+# name, so every `pull_request_target` run published a SKIPPED check run named
+# `schema-validate-pr`, the exact context branch protection requires on `main`.
+# GitHub treats `skipped` as satisfying a required check and resolves
+# duplicate-named contexts to the most recent one, so re-running the
+# `pull_request_target` half after a red validation turned the required
+# context green without validating anything (and for a first-time fork
+# contributor, whose `pull_request` run is held in `action_required` and
+# materialises NO job-level check runs at all, the skipped one was the only
+# bearer of the context). Two trigger-disjoint workflows make the collision
+# structurally impossible: nothing here is named `schema-validate-pr`, and no
+# job in either file is skipped for trigger reasons.
+# Pinned by the index deployment's own workflow-split tests.
+#
+#   governance-gate (GITHUB_TOKEN only, NEVER checks out PR head):
+#     `indexbot governance-gate --no-arm`. Classifies the diff via the GitHub
+#     API only, labels the PR, sets the "governance/review-required" commit
+#     status (G-19 owners-membership + G-20 reviewer assignment), and
+#     publishes its own `disposition` as a job output. `--no-arm` is what
+#     keeps it at `contents: read`.
+#   arm-auto-merge: the only job that holds `contents: write`, because arming
+#     or withdrawing auto-merge is a deferred write to the base branch. Same
+#     command, `--arm-only`: it classifies nothing and writes no label and no
+#     status, it only replays the disposition governance-gate already
+#     published — never the raw classify-pr label, which cannot see the G-19
+#     ownership result. GitHub itself merges once branch protection's required
+#     checks are green; when they are ALREADY green the forge refuses to arm
+#     (CLEAN/UNSTABLE are already-mergeable states) and the adapter performs
+#     the identical squash itself, pinned to the gated head, never `--admin`,
+#     so branch protection binds either way.
+#   deploy-on-merge (rendered only when `ci.deploy_workflow` names one;
+#     checkout-free, `actions: write` and nothing else): the
+#     machine lane's deploy trigger. GitHub performs the armed merge with
+#     GITHUB_TOKEN, whose push starts no workflow run, so `render-deploy`'s
+#     `push` trigger never fires for this lane (ocx-sh/index#67). This job stays alive
+#     across the merge and fires the one trigger that IS exempt from that
+#     recursion guard — `workflow_dispatch`. It can merge nothing and write
+#     nothing; losing it costs the fast path only.
+#
+# ## Why arm-auto-merge is still its own job
+#
+# It used to be a job with no dependencies at all: no checkout, no `uses:`,
+# nothing but `gh` calls, and that dependency-free-ness WAS the argument — a
+# job that can move the base branch executes nothing, so there is no code
+# there for a supply-chain compromise to inhabit. Running `indexbot` gives
+# that up, and the trade is stated rather than softened:
+#
+#   Given up: the job holding `contents: write` now checks out the base ref
+#   and runs this bot and its whole dependency tree. A compromise of either
+#   reaches a token that can move an unprotected branch and merge a pull
+#   request.
+#
+#   Bought: arming and withdrawing are tested Python instead of untested
+#   shell — head-SHA binding, an idempotent withdraw that does not error on a
+#   PR that was never armed, and the already-mergeable fallback, each with a
+#   named test — and one CI job is one `indexbot` command, so a hand-written
+#   pipeline reimplements none of it.
+#
+#   Why it is acceptable: the code is version-pinned and hash-locked by the
+#   deployment's own lockfile and is ALREADY running one job over, in
+#   `governance-gate`, which holds `pull-requests`/`issues`/`statuses: write`
+#   — and, in the render lane, with the credential that publishes the served
+#   index clients actually read. Withholding `contents: write` from that same
+#   code here never closed the path it looked like it closed.
+#
+# So the two-job split does NOT survive as permission scoping — both jobs run
+# the same pinned code, and a bot that could lie about `disposition` could arm
+# on its own lie either way. It survives because of `if: ${{ !cancelled() }}`
+# below: a gate that ERRORS still reaches the withdraw, and publishes an empty
+# disposition that can only take the withdraw branch. One job cannot do that —
+# a process that dies mid-gate leaves an earlier arming standing on a stale
+# evaluation. Fail-closed withdrawal is the property, and it is why merging
+# these two back into one is a regression even though the permissions would
+# look tidier.
+#
+# "governance/review-required" is deliberately NOT a required check and must
+# not become one: governance-check reports it `pending` for every human-lane
+# PR and nothing re-runs it green after approval, so requiring it would
+# deadlock the human lane permanently. No job in this file may be added to
+# the required-check list either: `arm-auto-merge`'s superseded pending runs
+# and `deploy-on-merge`'s superseded polls are cancelled by design — and
+# `deploy-on-merge` waits ON the required checks, so requiring it would
+# deadlock the machine lane against itself.
+#
+# One consequence of that design, accepted rather than scoped away: a
+# cancelled JOB sets the whole RUN's conclusion. A superseded `deploy-on-merge`
+# poll therefore makes an otherwise clean governance run conclude `cancelled`
+# (live: run 30246486520 — governance-gate success, arm-auto-merge success,
+# deploy-on-merge cancelled → run `cancelled`; before this job existed the
+# same run would have read `success`). Both escapes are worse than the flip:
+# dropping `cancel-in-progress` stacks a second 25-minute poll behind the
+# first and dispatches the deploy twice, and moving the job into its own
+# workflow duplicates the privileged `pull_request_target` gate it reads
+# `disposition` from. The flip is also the honest signal — that run really
+# did not finish every job it started.
+#
+# So the RUN-level conclusion of this workflow carries no governance meaning
+# and must not be audited or alerted on. Read the per-job conclusions instead
+# (`gh run view <id> --json jobs`): `governance-gate` and `arm-auto-merge` are
+# the ones that mean something, and a `cancelled` on either is the pending-job
+# supersession described one paragraph up, never a withdrawal that was skipped.
+
+on:
+  # zizmor: ignore[dangerous-triggers] ADR-4 BD-5's deliberate privileged
+  # split: no job here ever checks out PR-head content (default base-ref
+  # checkout, and `ref:` appears nowhere in this file — WF-05), none runs
+  # PR-controlled code, and the diff is only ever read through the GitHub API
+  # — the exact posture this audit otherwise warns is usually missing.
+  pull_request_target:
+
+permissions: {}
+
+jobs:
+  governance-gate:
+    name: governance-gate
+    runs-on: ubuntu-latest
+    # Serialize per-PR: BD-5 Risk 1 flags label/status races between
+    # concurrent classification runs (e.g. two rapid pushes) as untested
+    # territory. Queuing (not cancelling) avoids a run being cut off between
+    # its label-apply and status-set steps.
+    concurrency:
+      group: governance-gate-${{ github.event.pull_request.number }}
+    outputs:
+      disposition: ${{ steps.gate.outputs.disposition }}
+    permissions:
+      contents: read # checkout base ref only; runs the pinned indexbot, never PR-head code
+      pull-requests: write # classify-pr's add_labels + G-20 reviewer assignment
+      statuses: write # governance-check's set_commit_status (governance/review-required); a separate scope from pull-requests
+      issues: write # governance-check's create_comment (G-20) posts via the Issues API even for a PR — pull-requests: write alone 403s it
+    steps:
+      # pull_request_target's default checkout ref is the BASE branch tip —
+      # deliberately left unset (never github.event.pull_request.head.sha).
+      # This job only ever runs base-branch code against an API-derived diff.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+{{setup_step}}
+
+      # One command for what used to be two steps wiring two subcommands
+      # together (`classify-pr`, then `governance-check`) and reading one's
+      # output into the other's `if:`. `--no-arm` is the whole reason this job
+      # can stay at `contents: read`: it stops short of the auto-merge write
+      # and hands `arm-auto-merge` the disposition instead.
+      #
+      # `--pr` goes through an env var, not `run:` interpolation (ADR-4 BD-4).
+      # The PR number is runner-supplied and integer-shaped, so this is
+      # discipline rather than a live hazard — but the discipline is what
+      # survives someone later adding a field that is neither.
+      - name: indexbot governance-gate
+        id: gate
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: {{run}} governance-gate --pr "$PR_NUMBER" --no-arm
+
+  arm-auto-merge:
+    name: arm-auto-merge
+    needs: governance-gate
+    # Withdrawal is fail-closed, so this job must not inherit the default
+    # `success()` a `needs:` implies: a governance-gate that *errors* (API 5xx,
+    # a malformed base-ref root, a `uv` resolution failure) would skip this job
+    # and leave an already-armed PR armed on a stale evaluation. `!cancelled()`
+    # keeps it reachable; a failed gate publishes an empty `disposition`, which
+    # `--arm-only` reads as "not success" and turns into a withdraw, and which
+    # can never be read as an arm. This is the property the two-job split
+    # exists for (file header) — do not weaken this `if:`. No
+    # `github.event_name` half is needed (or wanted) here: this workflow has
+    # exactly one trigger, and a trigger-discriminating `if:` is precisely the
+    # skipped-check-run hazard the header describes.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # Serialize per PR, so a stale arm can never land after a fresh withdraw:
+    # arm jobs become eligible in gate-completion order, and a queue without
+    # cancel-in-progress preserves that order. Deliberately its OWN group and
+    # not governance-gate's: GitHub cancels "any previously pending job or
+    # workflow in the concurrency group" when a new one queues, so sharing the
+    # gate's group would let a newly eligible arm job cancel a still-pending
+    # gate for a newer head — reintroducing the very stale arm this
+    # serialization exists to prevent. Never add this job to the required-check
+    # list: a superseded pending run is cancelled by design.
+    concurrency:
+      group: arm-auto-merge-${{ github.event.pull_request.number }}
+    permissions:
+      # Enabling or withdrawing auto-merge IS a deferred write to the base
+      # branch — and when GitHub reports the PR already mergeable, the adapter
+      # performs the squash merge itself — GitHub documents the REST sibling
+      # (PUT /repos/{owner}/{repo}/pulls/{n}/merge) as needing Contents:
+      # write. Granting it here rather than widening governance-gate is what
+      # the file header's fail-closed-withdrawal argument rests on.
+      contents: write
+      pull-requests: write
+    steps:
+      # Base ref only, same as governance-gate: `ref:` appears nowhere in this
+      # file, so no job here can check out PR-head content (WF-05).
+      # `persist-credentials: false` matters more in THIS job than anywhere
+      # else in the tree — the default would write a `contents: write` token
+      # into `.git/config`, where every later step inherits it through plain
+      # `git`, dependency resolution included. Pinned by WF-06.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+{{setup_step}}
+
+      # G-19: arm on governance-check's own `disposition` — the
+      # ownership-checked machine-lane result (refresh classification AND the
+      # PR author owns every touched root), not the raw classify-pr label,
+      # which cannot see the G-19 outcome. Anything other than `success`,
+      # the empty string a failed gate publishes included, withdraws instead.
+      #
+      # HEAD_SHA is the head THIS EVENT delivered, and binding to it is the
+      # arm's optimistic-concurrency guard. If the author pushed between the
+      # event and the gate, the forge answers "head moved" and nothing is
+      # armed — the `synchronize` event for the new head re-gates it. Stale
+      # decisions expire; they never arm.
+      #
+      # Both values go through env vars rather than `run:` interpolation
+      # (ADR-4 BD-4): `disposition` is bot-authored from a closed set and
+      # `head.sha` is runner-supplied, so neither is untrusted today, and the
+      # indirection is what keeps that true after the next edit.
+      - name: indexbot governance-gate --arm-only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DISPOSITION: ${{ needs.governance-gate.outputs.disposition }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # One line on purpose, long as it is: `run: >-` would fold it across
+        # three, and "this job runs one command" stops being readable off the
+        # page the moment it takes a YAML scalar style to see it.
+        run: {{run}} governance-gate --pr "$PR_NUMBER" --arm-only --disposition "$DISPOSITION" --head-sha "$HEAD_SHA"
+
+{{deploy_job}}

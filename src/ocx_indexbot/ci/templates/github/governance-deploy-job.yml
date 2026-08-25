@@ -1,0 +1,100 @@
+  deploy-on-merge:
+    name: deploy-on-merge
+    needs: [governance-gate, arm-auto-merge]
+    if: needs.governance-gate.outputs.disposition == 'success'
+    runs-on: ubuntu-latest
+    # The whole point is to outlive the merge, so the ceiling is generous;
+    # the loop below stops itself at 25 min so its own warning gets printed
+    # instead of being cut off by this.
+    timeout-minutes: 30
+    # NOT arm-auto-merge's group, and cancel-in-progress on purpose. Sharing
+    # the arm group would park a fresh withdrawal behind this job's 25-minute
+    # wait, which is exactly the stale-arm window that serialization exists to
+    # prevent. A `synchronize` supersedes the poll instead: the newer run
+    # watches the same PR for the same outcome. Never add this job to the
+    # required-check list - a superseded run is cancelled by design.
+    concurrency:
+      group: deploy-on-merge-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    # The one job in this generator that is still shell rather than a single
+    # `indexbot` command, deliberately. It is not governance: it holds no
+    # opinion about the pull request, it waits for a merge someone else armed
+    # and presses `workflow_dispatch` - a trigger with no GitLab counterpart,
+    # on a workflow whose name is the deployment's own hosting choice. Folding
+    # it into the bot would put a 25-minute forge-specific poll loop behind a
+    # command surface that has to mean the same thing on both forges, to buy
+    # tests for a path whose entire failure mode is "the schedule deploys
+    # instead". If a second forge ever needs it, that is the moment it becomes
+    # a command.
+    #
+    # No checkout, no `uses:`, no secret, and deliberately NOT contents:
+    # write - this job only observes the PR and pushes a button. Pinned by
+    # the index deployment's own workflow-split tests.
+    permissions:
+      actions: write # gh workflow run {{deploy_workflow}} (workflow_dispatch)
+      pull-requests: read # gh pr view
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+    steps:
+      # Issue ocx-sh/index#67. `arm-auto-merge` hands the merge to GitHub, which performs
+      # it with GITHUB_TOKEN - and a push made with GITHUB_TOKEN starts no
+      # workflow run, so `{{deploy_workflow}}`'s `push` trigger never fires for the
+      # machine lane and the published index silently stops advancing. `*/15` is the
+      # standing mitigation and delivers ~hourly in practice (ocx-sh/index#67's measured
+      # gap series: worst 222 min).
+      #
+      # `workflow_dispatch` IS a documented exception to that recursion guard,
+      # so a bot-fired dispatch does start a run. The thing that was missing
+      # was a bot process still alive after the merge to fire it - this job is
+      # that process. It holds no write on the base branch and cannot merge
+      # anything; it watches the merge `arm-auto-merge` already armed and,
+      # the moment GitHub lands it, dispatches the deploy. Race window is one
+      # poll interval (15 s), not one cron gap.
+      #
+      # Failure is a soft landing by construction: arming is what merges the
+      # PR, and that has already happened by the time this job runs, so a
+      # cancelled/timed-out/failed poll costs the fast path only - the
+      # schedule still deploys, exactly as it does today. That is why the
+      # timeout warns instead of failing: red here would mean "the PR sat
+      # waiting for a required check", which is normal, and would train the
+      # lane's only red X to be ignored.
+      # Every API call below is fail-OPEN, the deliberate opposite of
+      # `arm-auto-merge`, which lets every forge error surface. That job runs
+      # BEFORE the merge and must go red rather than leave a stale arm
+      # standing (its one swallowed case is a moved head, which is a stale
+      # decision rather than a failure); this one runs
+      # after, so `set -e` on a single 502 or secondary rate-limit — in up to
+      # 100 polls plus a dispatch — would paint an already-merged PR red,
+      # which is precisely the never-red-on-a-merged-PR property argued
+      # above, and far likelier than the timeout that path already softened
+      # to a warning. Nothing in this step may exit non-zero.
+      - name: Dispatch the deploy workflow once the merge lands
+        run: |
+          set -euo pipefail
+          api_failures=0
+          for _ in $(seq 1 100); do
+            # A failed read leaves `state` empty, matches no case below, and
+            # polls again; only the count survives, for the warning's sake.
+            state="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq .state)" || api_failures=$((api_failures + 1))
+            case "$state" in
+              MERGED)
+                # --ref main, not the merge commit: `workflow_dispatch` only
+                # accepts a ref, and main can only have moved FORWARD past our
+                # merge, so the tree deployed always contains it.
+                if gh workflow run "{{deploy_workflow}}" --repo "$REPO" --ref main; then
+                  echo "::notice title=deploy::PR #$PR_NUMBER merged - {{deploy_workflow}} dispatched for main."
+                else
+                  echo "::warning title=deploy::PR #$PR_NUMBER merged but the deploy dispatch was rejected; the deploy workflow falls back to whatever schedule it carries - see ocx-sh/index#67 for what that actually delivers."
+                fi
+                exit 0
+                ;;
+              CLOSED)
+                echo "::notice title=deploy::PR #$PR_NUMBER was closed without merging - nothing to deploy."
+                exit 0
+                ;;
+            esac
+            sleep 15
+          done
+          echo "::warning title=deploy::PR #$PR_NUMBER did not merge within 25 min ($api_failures of 100 polls could not reach the API; required checks still pending?). Auto-merge stays armed and will land it; the deploy workflow falls back to whatever schedule it carries - see ocx-sh/index#67 for what that actually delivers."

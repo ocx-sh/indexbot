@@ -1,0 +1,258 @@
+# The index's own CI lanes, for a GitLab-hosted deployment.
+#
+# This file is INCLUDED, never the root. A repository's `.gitlab-ci.yml` is
+# where its owner puts everything else — a docs build, a catalog build, their
+# own jobs — so a generator that owned the root would either clobber that or
+# have to parse and merge it. The root includes this file instead:
+#
+#   include:
+#     - local: .gitlab-ci/indexbot.yml
+#
+# ## Why there is a poll lane and not a privileged merge-request job
+#
+# GitHub Actions has `pull_request_target`: base-authored workflow code, with
+# base secrets, triggered by a fork's pull request. The whole privileged half
+# of the GitHub lane is built on it (ADR-4 BD-5, ADR-6 FP-7).
+#
+# GitLab has no equivalent, and the near-misses are worse than nothing. A
+# fork's merge-request pipeline runs in the fork under the fork's variables —
+# the right boundary, and the same one GitHub's plain `pull_request` gives.
+# Every feature that would put the PARENT's variables on a fork MR works by
+# running the fork's own `.gitlab-ci.yml` in the parent's context, which is
+# precisely the compromise `pull_request_target` exists to avoid.
+#
+# So the privileged actor here is a SCHEDULE on the default branch. A
+# scheduled pipeline runs the default branch's config and never a fork's, and
+# it holds the parent's own variables because it is the parent's own pipeline.
+# `indexbot governance-poll` then classifies, labels, gates and arms every
+# open merge request through the API — it checks out nothing.
+#
+# Polling costs latency, not safety. A commit status starts out ABSENT, and
+# under "pipelines must succeed" an absent status already blocks the merge
+# (measured on gitlab.com Free: `detailed_merge_status` reads `ci_must_pass`
+# with no status at all). A merge request opened between two ticks is
+# unmergeable until the poller reaches it — never briefly mergeable.
+#
+# ## The three schedules
+#
+# GitLab schedules are project settings, not pipeline config, so there is no
+# cron here. Create three, all on the default branch, each carrying one
+# variable:
+#
+#   INDEXBOT_LANE = governance    (frequent — this is the merge gate)
+#   INDEXBOT_LANE = reconcile     (nightly — the verify-only sweep)
+#   INDEXBOT_LANE = housekeeping  (daily — FP-8 stale-closes abandoned MRs)
+#
+# ## Required setup
+#
+#   Settings > Merge requests > "All threads must be resolved"
+#     — REQUIRED. This is the merge gate. The bot holds one resolvable thread
+#     per merge request and leaves it unresolved while review is owed;
+#     `detailed_merge_status` then reports `discussions_not_resolved`. It is
+#     Free-tier, it lives in THIS project, and — unlike a commit status — it
+#     holds a fork merge request, whose head pipeline is the fork's own and
+#     therefore fork-authored. Without this setting nothing blocks.
+#   Settings > Merge requests > "Pipelines must succeed"     — belt to that
+#     braces: it gates a same-project merge request through the commit status
+#     the bot posts. It does NOT gate a fork merge request
+#   Settings > Merge requests > "Remove all approvals when commits are added"
+#     — REQUIRED, and it is the one invariant on this lane the bot cannot
+#     enforce for you. A maintainer's approval is what turns a human-lane
+#     merge request green, and GitLab's approvals carry no commit, so without
+#     this setting an approval of an earlier push still counts for whatever
+#     was force-pushed over it.
+#   Settings > CI/CD > Variables > GITLAB_TOKEN              — masked, and a
+#     project or group access token with `api` scope. NOT `$CI_JOB_TOKEN`,
+#     which cannot write labels, notes or merge requests.
+#
+# ## What the image must provide
+#
+# `git`, for `indexbot validate-pr`'s merge-base diff. The default image does
+# not ship it guaranteed, so `before_script` installs it when missing; an
+# image of your own is your responsibility.
+#
+# Every `script:` below is a single `indexbot` command, which is the point:
+# there is no shell here to get wrong under busybox ash, and nothing in this
+# file that a hand-written pipeline would have to copy rather than call.
+
+default:
+  image: {{image}}
+
+variables:
+  # `dotenv` sink for the job outputs the bot publishes. GitLab has no
+  # `$GITHUB_OUTPUT`; a dotenv report is the equivalent, and the bot writes
+  # this path when the variable is set.
+  #
+  # No job generated here reads it: the poll lane reaches its own disposition
+  # and arms in one process, so there is nothing to hand between jobs. It is
+  # declared anyway because the sink is chosen by which variable EXISTS — an
+  # unset one makes `governance-gate --no-arm` fail rather than publish — and
+  # that is the one hand-written GitLab arrangement (gate in one job, arm in
+  # another) this file does not itself use. Add
+  # `artifacts: {reports: {dotenv: indexbot.env}}` to whichever job publishes,
+  # or the value never reaches the job meant to consume it.
+  INDEXBOT_OUTPUT: indexbot.env
+
+.indexbot:
+  before_script:
+    # `uvx --from git+...` needs git too, so this runs before anything else.
+    - if ! command -v git >/dev/null 2>&1; then apk add --no-cache git; fi
+    - {{run}} --version
+
+# The unprivileged half. Runs on the merge request's own pipeline — in the
+# fork, for a fork MR — and therefore holds no token and needs none: it reads
+# the checkout and the registry, and writes nothing anywhere.
+#
+# One command, and everything it used to spell out in `sh` is now
+# `cli/validate_pr.py` with named tests. Two of those were live incidents, and
+# both were shell bugs rather than logic bugs:
+#
+#   * the `:(glob)` pathspec that stops `*` at a `/`. Without it the pathspec
+#     also selects the CAS object every announce adds, which `validate` then
+#     rejects as a malformed root — failing this gate on every announce PR.
+#     It now follows the deployment's own `name_segments` at run time instead
+#     of being rendered in, so an index that is not two segments deep needs no
+#     re-render to be right.
+#   * three-dot (merge-base...HEAD), never two-dot: two-dot compares TREES, so
+#     a branch cut before another announce merged re-verified STALE copies of
+#     roots this merge request never touched.
+#   * the reserved-segment carve-out, gated on provenance. The comparison is
+#     `$CI_MERGE_REQUEST_SOURCE_PROJECT_PATH` against
+#     `$CI_MERGE_REQUEST_PROJECT_PATH`, and getting that wrong once let a fork
+#     claim a segment the index reserves for itself: `$CI_PROJECT_PATH` names
+#     the project the pipeline is RUNNING in, and a fork MR's pipeline runs in
+#     the fork, so comparing against it is true for every merge request, fork
+#     or not. `$CI_MERGE_REQUEST_PROJECT_PATH` is the target project wherever
+#     the pipeline executes. The command reads both itself and defaults to
+#     "fork" when it can resolve neither — fail closed — so the wrong variable
+#     is no longer expressible here.
+#   * the accumulation loop that fed the file list to `validate`: an unquoted
+#     `for file in $changed` word-split a path containing a space and
+#     glob-expanded one containing `*`. There is no list to pass any more.
+indexbot-validate:
+  extends: .indexbot
+  variables:
+    # Deep history: `validate-pr` diffs against the merge base, and a shallow
+    # clone has none to find.
+    GIT_DEPTH: 0
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - {{run}} validate-pr
+
+# The privileged half: the parent's own scheduled pipeline. It never checks
+# out merge-request content — `GIT_STRATEGY: none` says so structurally rather
+# than by convention — and every input arrives through the API.
+indexbot-governance-poll:
+  extends: .indexbot
+  variables:
+    GIT_STRATEGY: none
+  rules:
+    # Cron is upstream-only. A fork does not inherit a schedule (they are
+    # project settings), but a fork whose owner creates one would otherwise
+    # gate merge requests against its own stale copy of this file.
+    - if: >-
+        $CI_PIPELINE_SOURCE == "schedule" &&
+        $INDEXBOT_LANE == "governance" &&
+        $CI_PROJECT_NAMESPACE == "{{owner}}"
+  script:
+    - {{run}} governance-poll
+
+# Verify-only nightly sweep. Never writes to p/ — an anomaly is filed as an
+# issue, and `--anomaly-ok` is what keeps this job green on that: the filed
+# issue is the human signal, and a red nightly on top of an already-filed
+# issue is alarm fatigue. The flag does not cover a transient failure (exit
+# 75, backoff exhausted), which still fails the job, because the next tick is
+# the retry and "transient" is never "ok".
+indexbot-reconcile:
+  extends: .indexbot
+  # No `GIT_STRATEGY: none` here, unlike every other scheduled lane in this
+  # file: reconcile reads the committed `p/**` tree from the checkout and
+  # verifies it against the registry. The governance/housekeeping lanes reach
+  # the forge only, and say so structurally.
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "schedule" &&
+        $INDEXBOT_LANE == "reconcile" &&
+        $CI_PROJECT_NAMESPACE == "{{owner}}"
+  script:
+    - {{run}} reconcile --anomaly-ok
+
+# FP-8 spam posture, first half: label a merge request whose pipeline failed,
+# so the stale lane below can close it later.
+#
+# `when: on_failure` on the merge-request pipeline is the only trigger GitLab
+# offers for "this MR's checks failed" — there is no `workflow_run`, no
+# cross-pipeline completion event, nothing a scheduled lane could react to
+# without a sweep command that does not exist.
+#
+# And that trigger cannot reach the case FP-8 is actually about. A fork MR's
+# pipeline runs IN THE FORK, under the fork's variables, with no `GITLAB_TOKEN`
+# — the same boundary this file's header calls the right one — so the job that
+# would label the parent's merge request has no way to write to the parent.
+# The rule below therefore requires the pipeline to be running in the TARGET
+# project, which is exactly where `$GITLAB_TOKEN` exists; without it the job
+# would fail tokenless on every fork MR instead of labeling anything.
+#
+# What that leaves on a fork MR is nothing, and it must stay nothing. The one
+# setting that would change it — "run pipelines in the parent project for
+# merge requests from forks" — does not merely move where the pipeline runs.
+# It runs the FORK's `.gitlab-ci.yml` in the parent's context, so every job in
+# a fork-authored file holds the masked `$GITLAB_TOKEN`: `api` scope, able to
+# label, comment and merge. That is precisely the compromise this file's
+# header names as the reason the privileged actor here is a schedule, and
+# GitLab's own mitigation — a parent-project Developer has to press start — is
+# a speed bump in front of a write credential, not the boundary it looks like.
+#
+# Do not enable it for this lane. All FP-8 buys is a `checks-failed` label so
+# the sweep below can close an abandoned merge request later; no amount of
+# that is worth handing fork-authored config the parent's token. The gap
+# between the forges is the price, and it is the cheaper side of the trade.
+#
+# So without the setting this job runs only on same-project merge requests,
+# where the command deliberately does nothing: FP-8 scopes the label to fork
+# MRs, because a same-project MR's failing checks are already visible to
+# everyone with push access. The lane is inert by design, not by omission.
+#
+# So this is not the GitHub lane's equal, and the gap is structural rather
+# than an omission: `workflow_run` is what makes the GitHub half possible —
+# base-authored code, base token, triggered by a fork's pipeline finishing —
+# and GitLab has no counterpart that does not trade the boundary for it. `$CI_COMMIT_SHA` — the MR head, which the command
+# falls back to on its own — is the one input it needs.
+indexbot-label-failed-run:
+  extends: .indexbot
+  # `.post`, and that is load-bearing: `when: on_failure` means "a job in an
+  # EARLIER stage failed", so leaving this in the default `test` stage
+  # alongside `indexbot-validate` would mean it could never fire at all.
+  stage: .post
+  variables:
+    GIT_STRATEGY: none
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "merge_request_event" &&
+        $CI_PROJECT_PATH == $CI_MERGE_REQUEST_PROJECT_PATH
+      when: on_failure
+  script:
+    - {{run}} label-failed-run
+
+# FP-8 spam posture, second half: close merge requests the lane above labeled
+# `checks-failed` and nobody followed up on — 14 days to stale, 7 more to
+# close. GitHub delegated this to `actions/stale`; GitLab has no equivalent
+# action, which is why the sweep is `cli/stale.py` on both forges rather than
+# an action on one and something else here.
+#
+# A schedule, and the parent's own: it writes labels, comments and closes,
+# so it needs the parent token, and the same cron-upstream-only guard as
+# every other scheduled lane in this file. It touches pull requests only —
+# never the anomaly-tracking issues `reconcile` files.
+indexbot-stale:
+  extends: .indexbot
+  variables:
+    GIT_STRATEGY: none
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "schedule" &&
+        $INDEXBOT_LANE == "housekeeping" &&
+        $CI_PROJECT_NAMESPACE == "{{owner}}"
+  script:
+    - {{run}} stale
