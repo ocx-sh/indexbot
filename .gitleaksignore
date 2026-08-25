@@ -1,0 +1,13 @@
+# One test fixture, in two historical commits, whose value began `glpat-`.
+#
+# It is `tests/adapters/test_gitlab_api.py`'s bearer-token fixture — never a
+# credential, and the string never named one. gitleaks' `gitlab-pat` rule keys
+# on the prefix alone, so it matched. The fixture no longer carries that
+# prefix, but a value in a commit stays in that commit, and rewriting published
+# history to retire a string that was always fake is the wrong trade.
+#
+# Fingerprints, not a rule exemption: these two commit:file:rule:line instances
+# and nothing else. A real `glpat-` committed anywhere — including a new line
+# of this same file — still fails the scan.
+c19ee7db1e576efaadb2b2b34daf6d9d69e700f8:tests/adapters/test_gitlab_api.py:gitlab-pat:30
+82029d59608081c80f4b9955cf6dc7abbcaa80ea:tests/adapters/test_gitlab_api.py:gitlab-pat:29

@@ -28,7 +28,7 @@ from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import CommitStatusState
 from ocx_indexbot.ports import ForgePort
 
-_TOKEN = "glpat-super-secret-token-value"  # noqa: S105 - test fixture, not a real credential
+_TOKEN = "not-a-real-token"  # noqa: S105 - test fixture, deliberately not PAT-shaped
 _API = "https://gitlab.com/api/v4"
 _PROJECT = f"{_API}/projects/42"
 
