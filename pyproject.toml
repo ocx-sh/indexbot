@@ -1,6 +1,6 @@
 [project]
 name = "ocx-indexbot"
-version = "0.3.0"
+version = "0.3.1"
 description = "Write path for an OCX package index — announce, reconcile, validate, render."
 readme = "README.md"
 license = "Apache-2.0"
