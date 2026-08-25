@@ -18,10 +18,11 @@ takes when its path is wrong.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from typing import cast
 
-from ocx_indexbot.core.gitlab_invariants import check_gitlab
+from ocx_indexbot.core.gitlab_invariants import check_gitlab, top_level_section
 from ocx_indexbot.core.policy import FORGE_VALUES
 from ocx_indexbot.core.workflow_invariants import Finding, check_workflows
 from ocx_indexbot.errors import ValidationError
@@ -31,6 +32,12 @@ from ocx_indexbot.ports import FilePort
 DEFAULT_DIR = ".github/workflows"
 DEFAULT_GITLAB_DIR = ".gitlab-ci"
 _GITLAB_ROOT_FILE = ".gitlab-ci.yml"
+# One `include:` list entry: `- local: x`, `- remote: x`, `- project: x`
+# (paired with a sibling `file:` line this scan never needs to read — the
+# `project:` key alone is enough to know the form), `- template: x`. Matches
+# equally against the single-mapping spelling (`include:\n  local: x`, no
+# leading `-`).
+_INCLUDE_ENTRY_RE = re.compile(r"^[ \t]*-?[ \t]*(local|remote|project|template):[ \t]*(.*)$")
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -107,13 +114,77 @@ def _load_local_actions(files: FilePort, directory: str) -> dict[str, str]:
     return loaded
 
 
-def _load_gitlab_pipeline(files: FilePort, directory: str) -> dict[str, str]:
-    """The root `.gitlab-ci.yml` plus every `*.yml`/`*.yaml` under `directory`,
-    keyed by their path from the checkout root.
+def _local_include_target(value: str) -> str:
+    """A `local:` value, comment and quotes stripped, its GitLab-optional
+    leading `/` removed.
 
-    Unlike GitHub's workflow directory, a GitLab `include: - local:` can name
-    a file nested at any depth (`.gitlab-ci/jobs/build.yml`), so this walks
-    the whole subtree rather than stopping at the top level.
+    GitLab documents `templates/x.yml` and `/templates/x.yml` as identical —
+    both relative to the project root — so treating the slash as an
+    OS-absolute path would reject the commonly-recommended spelling. A
+    genuine traversal attempt (`../../etc/passwd`) is unaffected: only one
+    leading `/` is ever stripped, and what is left still goes through
+    `FilePort.read_text`, which rejects `..` and an absolute path itself —
+    the same untrusted-path discipline every other read in this package
+    uses, not a bespoke check here.
+    """
+    return _strip_comment(value).strip("'\"").removeprefix("/")
+
+
+def _strip_comment(value: str) -> str:
+    return value.partition(" #")[0].strip()
+
+
+def _include_local_targets(text: str) -> list[str]:
+    """Every `local:` include target `text`'s top-level `include:` block
+    names.
+
+    GitLab accepts a bare scalar (`include: 'ci/jobs.yml'`) as shorthand for
+    one local include, or one or more mapping entries — `- local: …`,
+    `- project: …` (with a sibling `file:`), `- remote: …`, `- template: …`.
+    Only `local:` names a file this checkout actually holds; the other three
+    point somewhere this static audit cannot read at all (another project, an
+    arbitrary URL, a GitLab-bundled template). Reporting a clean audit over a
+    pipeline whose real job definitions live behind one of those is the bug
+    this loader exists to close, so any of the three raises rather than being
+    silently skipped.
+    """
+    section = top_level_section(text, "include")
+    if not section:
+        return []
+    lines = section.splitlines()
+    header_value = lines[0].partition(":")[2].strip()
+    if len(lines) == 1:
+        return [_local_include_target(header_value)] if header_value else []
+    targets: list[str] = []
+    for line in lines[1:]:
+        match = _INCLUDE_ENTRY_RE.match(line)
+        if match is None:
+            continue
+        kind, value = match.groups()
+        if kind != "local":
+            raise ValidationError(
+                f"include: `{kind}:` cannot be followed by a static audit — this "
+                "loader only reads `local:` includes from the checkout"
+            )
+        targets.append(_local_include_target(value))
+    return targets
+
+
+def _load_gitlab_pipeline(files: FilePort, directory: str) -> dict[str, str]:
+    """The root `.gitlab-ci.yml`, every `*.yml`/`*.yaml` under `directory`,
+    and every file `include:` names anywhere in that set — recursively, since
+    an included file may itself `include:` further ones — keyed by their path
+    from the checkout root.
+
+    The directory walk and the `include:` walk are both kept: unlike GitHub's
+    workflow directory, a GitLab `include: - local:` can name a file nested at
+    any depth, or outside `directory` entirely (a hand-written pipeline
+    conventionally puts its own job files at the repository root, not under
+    `.gitlab-ci/`), so neither alone would see everything a real pipeline
+    reads. An `include:` this loader cannot follow, or a `local:` target that
+    does not resolve to a real file, raises `ValidationError` — see
+    `_include_local_targets` — rather than letting `check_gitlab` report a
+    clean audit over a tree it never read.
     """
     loaded: dict[str, str] = {}
     root_text = files.read_text(_GITLAB_ROOT_FILE)
@@ -125,6 +196,19 @@ def _load_gitlab_pipeline(files: FilePort, directory: str) -> dict[str, str]:
         text = files.read_text(path)
         if text is not None:
             loaded[path] = text
+
+    pending = list(loaded.values())
+    while pending:
+        for target in _include_local_targets(pending.pop()):
+            if target in loaded:
+                continue
+            included = files.read_text(target)
+            if included is None:
+                raise ValidationError(
+                    f"include: local: {target!r} does not resolve to a file in this checkout"
+                )
+            loaded[target] = included
+            pending.append(included)
     return loaded
 
 

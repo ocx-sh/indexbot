@@ -382,6 +382,139 @@ def test_a_non_action_file_under_the_actions_tree_is_ignored(
     assert "1 workflow(s) audited, no findings" in capsys.readouterr().err
 
 
+_GITLAB_INCLUDED_FLOATING_IMAGE = "build:\n  image: python:3.13\n  script:\n    - echo hi\n"
+
+
+def test_gitlab_include_local_target_outside_dir_is_loaded_and_audited() -> None:
+    """The reported hole: a `local:` include naming a file that lives outside
+    `--dir` entirely used to be invisible — the audit read the root file plus
+    whatever `--dir` walked and nothing `include:` actually pointed at."""
+    files = InMemoryFiles()
+    files.write_text(".gitlab-ci.yml", "include:\n  - local: ci/jobs.yml\n\n" + _GITLAB_CLEAN)
+    files.write_text("ci/jobs.yml", _GITLAB_INCLUDED_FLOATING_IMAGE)
+
+    with pytest.raises(ValidationError, match="1 pipeline invariant violation"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_bare_scalar_shorthand_is_treated_as_local() -> None:
+    files = InMemoryFiles()
+    files.write_text(".gitlab-ci.yml", "include: ci/jobs.yml\n\n" + _GITLAB_CLEAN)
+    files.write_text("ci/jobs.yml", _GITLAB_INCLUDED_FLOATING_IMAGE)
+
+    with pytest.raises(ValidationError, match="1 pipeline invariant violation"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_local_leading_slash_is_project_root_relative() -> None:
+    """GitLab documents `templates/x.yml` and `/templates/x.yml` as
+    identical, both relative to the project root."""
+    files = InMemoryFiles()
+    files.write_text(".gitlab-ci.yml", "include:\n  - local: /ci/jobs.yml\n\n" + _GITLAB_CLEAN)
+    files.write_text("ci/jobs.yml", _GITLAB_INCLUDED_FLOATING_IMAGE)
+
+    with pytest.raises(ValidationError, match="1 pipeline invariant violation"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_local_target_that_does_not_exist_raises() -> None:
+    """A clean audit over a pipeline this loader never fully read is the bug
+    — an unresolvable `local:` target must fail loudly, not be skipped."""
+    files = InMemoryFiles()
+    files.write_text(".gitlab-ci.yml", "include:\n  - local: ci/missing.yml\n\n" + _GITLAB_CLEAN)
+
+    with pytest.raises(ValidationError, match="does not resolve"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_local_path_traversal_raises() -> None:
+    """`..` in a `local:` value goes through `FilePort.read_text` unchanged —
+    the same untrusted-path discipline every other read in this package
+    uses, not a bespoke check in the loader."""
+    files = InMemoryFiles()
+    files.write_text(
+        ".gitlab-ci.yml", "include:\n  - local: '../../etc/passwd'\n\n" + _GITLAB_CLEAN
+    )
+
+    with pytest.raises(ValidationError, match="path escapes root"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_remote_raises() -> None:
+    files = InMemoryFiles()
+    files.write_text(
+        ".gitlab-ci.yml", "include:\n  - remote: 'https://example.com/ci.yml'\n\n" + _GITLAB_CLEAN
+    )
+
+    with pytest.raises(ValidationError, match="remote:"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_project_raises() -> None:
+    files = InMemoryFiles()
+    files.write_text(
+        ".gitlab-ci.yml",
+        "include:\n  - project: 'group/other'\n    file: '/ci.yml'\n\n" + _GITLAB_CLEAN,
+    )
+
+    with pytest.raises(ValidationError, match="project:"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_template_raises() -> None:
+    files = InMemoryFiles()
+    files.write_text(
+        ".gitlab-ci.yml",
+        "include:\n  - template: Auto-DevOps.gitlab-ci.yml\n\n" + _GITLAB_CLEAN,
+    )
+
+    with pytest.raises(ValidationError, match="template:"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_entry_with_a_conditional_rules_key_is_still_local() -> None:
+    """A `local:` include entry may carry its own `rules:` (GitLab's
+    per-include condition) — a line that is none of the four recognised
+    forms is skipped rather than mistaken for one of them."""
+    files = InMemoryFiles()
+    files.write_text(
+        ".gitlab-ci.yml",
+        "include:\n"
+        "  - local: ci/jobs.yml\n"
+        "    rules:\n"
+        "      - if: '$CI_PIPELINE_SOURCE'\n\n" + _GITLAB_CLEAN,
+    )
+    files.write_text("ci/jobs.yml", _GITLAB_INCLUDED_FLOATING_IMAGE)
+
+    with pytest.raises(ValidationError, match="1 pipeline invariant violation"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_follows_a_nested_include_in_an_included_file() -> None:
+    files = InMemoryFiles()
+    files.write_text(".gitlab-ci.yml", "include:\n  - local: ci/jobs.yml\n\n" + _GITLAB_CLEAN)
+    files.write_text(
+        "ci/jobs.yml", "include:\n  - local: ci/deploy.yml\n\nbuild:\n  script:\n    - echo hi\n"
+    )
+    files.write_text("ci/deploy.yml", _GITLAB_INCLUDED_FLOATING_IMAGE)
+
+    with pytest.raises(ValidationError, match="1 pipeline invariant violation"):
+        workflows_check.run(_args(None, forge="gitlab"), files=files)
+
+
+def test_gitlab_include_cycle_does_not_loop_forever() -> None:
+    """Two files including each other is invalid GitLab in practice (real
+    GitLab caps include depth), but this loader must still terminate rather
+    than rediscover the same target forever — `loaded` membership is checked
+    before a target is queued for a second pass."""
+    files = InMemoryFiles()
+    files.write_text(".gitlab-ci.yml", "include:\n  - local: ci/a.yml\n\n" + _GITLAB_CLEAN)
+    files.write_text("ci/a.yml", "include:\n  - local: ci/b.yml\n")
+    files.write_text("ci/b.yml", "include:\n  - local: ci/a.yml\n")
+
+    assert workflows_check.run(_args(None, forge="gitlab"), files=files) == ExitCode.OK
+
+
 def test_a_composite_action_that_vanishes_between_listing_and_reading_is_skipped() -> None:
     """Same race as the workflow loader's, same answer. An action that reads
     back as `None` must not become an empty one whose absent `run:` steps
