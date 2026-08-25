@@ -25,7 +25,7 @@ from ocx_indexbot.model import (
 from ocx_indexbot.ports import FilePort, ForgePort, RegistryPort
 from tests.fakes import FakeGitHub, FakeRegistry, InMemoryFiles, make_policy
 
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 _CMAKE_REPO = "oci://ghcr.io/ocx-contrib/cmake"
 _WIDGET_REPO = "oci://ghcr.io/ocx-contrib/widget"
 _ISSUE_TITLE = "indexbot reconcile: anomalies detected"

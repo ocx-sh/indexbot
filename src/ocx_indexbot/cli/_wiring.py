@@ -7,9 +7,7 @@ Each `_run_*` function builds its own port set at *call* time, not at import
 time. This matters because several `indexbot` subcommands run in CI jobs that
 deliberately hold no write-scoped credential at all — `validate.yml`'s
 `schema-validate-pr` job runs `indexbot validate` with "no network, no write
-scope" (no `GITHUB_TOKEN`/`GITHUB_REPOSITORY` in its env), and
-`cli/announce.py`'s `--out` mode reads the index repo anonymously the same
-way (no token required at all, `_index_forge`). If `DISPATCH`'s
+scope" (no `GITHUB_TOKEN`/`GITHUB_REPOSITORY` in its env). If `DISPATCH`'s
 values were already-constructed port instances (e.g. bound once at import
 time via `functools.partial`), merely importing this module would eagerly
 read `GITHUB_TOKEN` for every subcommand, including ones that need it not at
@@ -48,7 +46,6 @@ from ocx_indexbot.adapters.registry_v2 import (
 )
 from ocx_indexbot.adapters.system_clock import SystemClock
 from ocx_indexbot.cli import (
-    announce,
     ci_cmd,
     classify_pr,
     governance_check,
@@ -161,8 +158,9 @@ def _index_policy(raw: bytes | None) -> IndexPolicy:
 
     `raw` is the policy file's bytes as read through whichever port the
     calling subcommand already holds (`FilePort` for the checkout-resident
-    subcommands, `ForgePort` at `main` for the publisher-side `announce` —
-    both return `None` when the path does not exist).
+    subcommands, `ForgePort` at the base ref for the privileged ones that
+    never check the repository out — both return `None` when the path does
+    not exist).
 
     Two failure modes, both raised here at wiring time, before the subcommand
     does any work:
@@ -213,10 +211,10 @@ def _forge_kind(args: argparse.Namespace | None = None) -> Forge:
     `indexbot ci` renders workflows for, and says nothing about where a given
     process is running.
 
-    `announce` is the one subcommand a human runs from their own machine,
-    where neither variable is set, so it carries an explicit `--forge`. Its
-    fallback stays GitHub: that is a transport default for a flag, unlike the
-    `ocx.sh` prefix 0.2.0 removed, which was baked into published bytes.
+    `workflows-check` is the one subcommand a human runs outside any runner,
+    so it carries an explicit `--forge`. The fallback stays GitHub: that is a
+    transport default for a flag, unlike the `ocx.sh` prefix 0.2.0 removed,
+    which was baked into published bytes.
     """
     explicit = None if args is None else cast("str | None", getattr(args, "forge", None))
     if explicit is not None:
@@ -229,8 +227,7 @@ def _project_api(project: str, *, kind: Forge, token: str) -> ForgePort:
 
     `project` is whatever that forge calls a repository: `<owner>/<repo>` on
     GitHub, a numeric id or a full namespace path on GitLab. `token` may be
-    empty — a public project's read endpoints work unauthenticated, which is
-    what `announce --out` relies on.
+    empty — a public project's read endpoints work unauthenticated.
     """
     if kind == "gitlab":
         return GitLabApi(
@@ -263,57 +260,6 @@ def _forge_api() -> ForgePort:
         )
     return _project_api(
         _require_env("GITHUB_REPOSITORY"), kind="github", token=_require_env("GITHUB_TOKEN")
-    )
-
-
-def _index_forge(args: argparse.Namespace) -> ForgePort:
-    """Read-only access to `--index-repo` at `main`.
-
-    Anonymous by default (`$GITHUB_TOKEN`/`$GITLAB_TOKEN` if present, empty
-    otherwise): a public index's file-read endpoints work unauthenticated on
-    both forges, which is what `--out` mode's "unauthenticated read is fine"
-    call rests on. `--fork` mode reads through this same instance and only
-    needs write scope to open the merge request; the fork-side commit goes
-    through a separate, always-authenticated client (see `_run_announce`).
-    """
-    kind = _forge_kind(args)
-    token = os.environ.get("GITLAB_TOKEN" if kind == "gitlab" else "GITHUB_TOKEN", "")
-    return _project_api(cast(str, args.index_repo), kind=kind, token=token)
-
-
-def _run_announce(args: argparse.Namespace) -> ExitCode:
-    """A local publisher tool (fork-PR announce revamp) — no index-side
-    credential, no `repository_dispatch` doorbell, no privileged/unprivileged
-    CI split any more. `--out` mode never touches `fork_github` (stays
-    `None`); `--fork` mode needs the publisher's own write-scoped
-    `GITHUB_TOKEN` to commit to their fork and open the PR."""
-    kind = _forge_kind(args)
-    fork = cast("str | None", getattr(args, "fork", None))
-    fork_github: ForgePort | None = None
-    if fork:
-        fork_github = _project_api(
-            fork,
-            kind=kind,
-            token=_require_env("GITLAB_TOKEN" if kind == "gitlab" else "GITHUB_TOKEN"),
-        )
-    index_github = _index_forge(args)
-    # The one subcommand whose policy does NOT come from the local checkout:
-    # a publisher runs `announce` from their own working directory (the fork
-    # commit goes over the API, there is no index checkout to read), so the
-    # governing policy is the target index's own committed file at `main` —
-    # read through the same `ForgePort`, at the same base ref, as the root
-    # this run is about to regenerate. A publisher cannot widen it locally.
-    policy = _index_policy(
-        index_github.get_file_contents(INDEX_POLICY_PATH, cast("str", args.base_ref))
-    )
-    return announce.run(
-        args,
-        registry=_registry(),
-        index_github=index_github,
-        fork_github=fork_github,
-        files=LocalFiles(root=_repo_root()),
-        clock=SystemClock(),
-        policy=policy,
     )
 
 
@@ -407,7 +353,7 @@ _BASE_REF_ENV: Final[tuple[str, ...]] = (
 what GitHub Actions and GitLab CI set on a pull- or merge-request event. Every
 one of them is *parent*-controlled — a fork can push to no branch of the index
 — so reading a policy at any of them is the same trust direction as reading it
-at the default branch, and it has the property `announce.BASE_REF` does not:
+at the default branch, and it has the property `_DEFAULT_BASE_REF` does not:
 it agrees with the ref `cli/validate_pr.py` diffs against, so both halves of
 the gate judge one pull request under one policy even when it targets a branch
 that is not called `main`.
@@ -424,8 +370,16 @@ the diff already came from the pull request's base while the policy came from
 """
 
 
+_DEFAULT_BASE_REF: Final[str] = "main"
+"""`_base_ref`'s last fallback — what the privileged subcommands read this
+deployment's policy file at when the runner names no target branch, which is
+every scheduled lane. `.github/index-policy.json` names an owner and a forge
+but never a default-branch name (GitLab and a corporate GitHub org alike are
+free to call it something else), so this is a floor, not a policy field."""
+
+
 def _base_ref(environ: Mapping[str, str]) -> str:
-    """The branch the running pull request targets, or `announce.BASE_REF`.
+    """The branch the running pull request targets, or `_DEFAULT_BASE_REF`.
 
     A deployment whose default branch is not `main` — GitLab's `master`
     holdovers, a corporate GitHub org's `trunk` — has no policy field naming
@@ -436,7 +390,7 @@ def _base_ref(environ: Mapping[str, str]) -> str:
         value = environ.get(name)
         if value:
             return value
-    return announce.BASE_REF
+    return _DEFAULT_BASE_REF
 
 
 def _base_ref_policy(github: ForgePort) -> IndexPolicy:
@@ -500,7 +454,6 @@ def _run_stale(args: argparse.Namespace) -> ExitCode:
 
 
 DISPATCH: dict[str, Callable[[argparse.Namespace], ExitCode]] = {
-    "announce": _run_announce,
     "reconcile": _run_reconcile,
     "validate": _run_validate,
     "validate-pr": _run_validate_pr,

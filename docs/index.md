@@ -7,7 +7,9 @@ An OCX index is a static sparse HTTP tree — package roots at
 indices, no server and no database. `indexbot` is the process that maintains
 one: it validates announced roots against registry truth, regenerates derived
 fields, enforces the governance contracts that let untrusted fork pull requests
-announce safely, and renders the wire tree a static host serves.
+announce safely, and renders the wire tree a static host serves. It does not
+publish — that is [`ocx package announce`](https://github.com/ocx-sh/ocx)'s
+job, and indexbot is what stands between it and the index.
 
 Start with the [Quickstart](guide/quickstart.md) — it takes an index
 repository from empty to serving. The [CLI reference](reference/cli.md) has
@@ -36,7 +38,6 @@ Full detail in the [CLI reference](reference/cli.md).
 
 | Subcommand | Purpose |
 |---|---|
-| `announce` | Record an owner-curated tag, CI-verified against the physical registry |
 | `reconcile` | Verify committed index state against registry truth; file anomalies, never auto-heal |
 | `validate` | The unprivileged PR gate — semantic checks a JSON Schema cannot express |
 | `validate-pr` | The same gate as one command: resolve the PR's changed roots, their base-ref bytes and its provenance, then validate |

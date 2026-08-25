@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     from ocx_indexbot.model import OwnershipProbeResult
 
-_DEFAULT_OWNERS: tuple[Owner, ...] = (Owner(github="indexbot-tester", github_id=1),)
+_DEFAULT_OWNERS: tuple[Owner, ...] = (Owner(login="indexbot-tester", id=1),)
 _FIXED_TIMESTAMP = "2026-07-17T00:00:00Z"
 
 

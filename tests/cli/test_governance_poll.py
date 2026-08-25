@@ -20,9 +20,9 @@ from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import Owner, PackageRoot, PullRequestInfo, TagEntry
 from tests.fakes import FakeGitHub, make_policy
 
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 _MAINTAINERS_PATH = ".github/maintainers.yml"
-_MAINTAINERS_YML = b"maintainers:\n  - github: carol\n    github_id: 99\n"
+_MAINTAINERS_YML = b"maintainers:\n  - login: carol\n    id: 99\n"
 _STATUS_CONTEXT = "governance/review-required"
 
 

@@ -1,6 +1,6 @@
 {
   "format_version": 1,
   "packages": {
-    "mvdan/shfmt": "sha256:02933fa58319706b763c286326afe2f978de11b414ffa6b7b13a14e95d086919"
+    "mvdan/shfmt": "sha256:258b5674a2f4266bd240b5050a430aacdc00e6382557ed8519817ce288024b42"
   }
 }

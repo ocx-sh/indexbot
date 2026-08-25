@@ -58,14 +58,32 @@ class ManifestFetch:
 
 @dataclass(frozen=True, slots=True)
 class Owner:
-    """One entry in `owners[]` (ADR-1 D2).
+    """One entry in `owners[]` — and, reused verbatim, one entry in
+    `.github/maintainers.yml` (ADR-1 D2, renamed forge-neutral in
+    `adr_forge_neutral_owners.md` D1).
 
-    `github_id` is mandatory — it survives GitHub username rename/recycling,
-    unlike `github` alone.
+    `login` is a **username**: the handle a forge API resolves to a numeric
+    user id. It is never a display name — `ForgePort.request_reviewers` hands
+    this exact string to the forge, and on GitLab that is
+    `GET /users?username=<login>`, whose `name` field is a different thing
+    entirely (the human's full name). Requesting review by display name
+    resolves to nobody, silently.
+
+    `id` is mandatory and is the ownership key: it survives a forge username
+    rename or recycling, which `login` alone does not. G-19 matches the pull
+    request author against it and never against `login`
+    (`cli/governance_check.py`).
+
+    Neither field names a forge, deliberately. The same two fields carry a
+    GitHub login and user id on a GitHub-hosted index and a GitLab username
+    and user id on a GitLab-hosted one; an index reachable from
+    `.github/index-policy.json`'s `ci.forge` knows which. The wire keeps the
+    pre-0.5.0 spelling (`github`, `github_id`) alongside these, derived, for
+    one release — see `core/validate_entry.py`'s codec.
     """
 
-    github: str
-    github_id: int
+    login: str
+    id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,11 +166,11 @@ class PullRequestInfo:
 
     `author_login`/`author_id` (fork-PR announce revamp, G-19): the PR
     author's GitHub identity — `author_id` is the stable numeric id (survives
-    username rename/recycling, same rationale as `Owner.github_id`),
+    username rename/recycling, same rationale as `Owner.id`),
     `author_login` the current login (self-review carve-out display /
     reviewer-list filtering, `cli/governance_check.py`). `cli/classify_pr.py`
     does not read either field; they exist for `governance_check.py`'s G-19
-    "PR author `github_id` in every touched package's `owners[]`" gate.
+    "PR author id in every touched package's `owners[]`" gate.
     Defaulted (not required) so every existing `classify_pr`-only construction
     site stays unchanged; a caller that needs G-19 always sets both.
 

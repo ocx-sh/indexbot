@@ -4,11 +4,10 @@ adapters (ADR-4 BD-1; WP2-M).
 `_DISPATCH` is seeded from `cli/_wiring.py`'s `DISPATCH` — the one module
 that constructs real `adapters/*` instances — so this file itself never
 imports `adapters/*` or `httpx`. `_ARG_POPULATORS` supplies each registered
-subcommand's CLI surface: `validate`, `classify-pr`, `governance-check`,
-`announce`, and `reconcile` reuse their own modules' `add_arguments` (fork-PR
-announce revamp widened that convention to cover both — their CLI surfaces
-are non-trivial enough, mutually-exclusive groups included, to live next to
-the module they belong to); `render` and `seed-import` don't define an
+subcommand's CLI surface: `validate`, `classify-pr`, `governance-check` and
+`reconcile` reuse their own modules' `add_arguments` (their CLI surfaces are
+non-trivial enough, mutually-exclusive groups included, to live next to the
+module they belong to); `render` and `seed-import` don't define an
 equivalent `add_arguments` of their own (CONTRACTS.md §12 documents each
 module's expected `args.*` attributes only in prose), so this file
 hand-rolls their argparse surfaces directly from those docstrings. See
@@ -30,7 +29,6 @@ from collections.abc import Callable, Sequence
 from typing import cast
 
 from ocx_indexbot import __version__
-from ocx_indexbot.cli import announce as _announce_cli
 from ocx_indexbot.cli import ci_cmd as _ci_cli
 from ocx_indexbot.cli import classify_pr as _classify_pr_cli
 from ocx_indexbot.cli import governance_check as _governance_check_cli
@@ -50,7 +48,7 @@ from ocx_indexbot.exit_codes import ExitCode
 
 _DISPATCH: dict[str, Callable[[argparse.Namespace], ExitCode]] = dict(_PRODUCTION_DISPATCH)
 """Subcommand name -> handler, seeded from `cli/_wiring.DISPATCH` (WP2-M):
-`announce`, `reconcile`, `validate`, `render`, `seed-import`. A plain `dict`
+`reconcile`, `validate`, `render`, `seed-import`, … A plain `dict`
 copy (not a re-exported reference) so tests may freely `monkeypatch.setitem`
 this module's own `_DISPATCH` without mutating `cli/_wiring.DISPATCH`."""
 
@@ -85,8 +83,23 @@ def _add_seed_import_arguments(parser: argparse.ArgumentParser) -> None:
         help="explicit package (derived from --catalog-md if omitted)",
     )
     parser.add_argument("--out", default=None, help='output root prefix, defaults to "p"')
-    parser.add_argument("--owner-github", required=True, help="initial owner's GitHub login")
-    parser.add_argument("--owner-github-id", required=True, help="initial owner's stable GitHub id")
+    # The pre-0.5.0 spellings stay as aliases on the same `dest`: seed-import
+    # is a bulk-import tool operators drive from their own scripts, and
+    # renaming a required flag out from under one is a break with no upside.
+    parser.add_argument(
+        "--owner-login",
+        "--owner-github",
+        dest="owner_login",
+        required=True,
+        help="initial owner's forge username (never a display name)",
+    )
+    parser.add_argument(
+        "--owner-id",
+        "--owner-github-id",
+        dest="owner_id",
+        required=True,
+        help="initial owner's stable numeric forge user id",
+    )
     parser.add_argument("--upstream-org", default=None)
     parser.add_argument("--upstream-repository-url", default=None)
     parser.add_argument("--upstream-disclaimer", default=None)
@@ -110,7 +123,6 @@ def _add_seed_import_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 _ARG_POPULATORS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
-    "announce": _announce_cli.add_arguments,
     "reconcile": _reconcile_cli.add_arguments,
     "validate": _validate_cli.add_arguments,
     "validate-pr": _validate_pr_cli.add_arguments,

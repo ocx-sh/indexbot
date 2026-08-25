@@ -459,7 +459,7 @@ class GitHubApi:
         simply not an approval of this one.
 
         `user.id`, never `user.login`: the caller matches these against
-        `.github/maintainers.yml`'s `github_id`, because a login that has been
+        `.github/maintainers.yml`'s `id`, because a login that has been
         renamed and recycled would otherwise carry a former maintainer's veto
         to whoever holds the name now (`ports.ForgePort.list_approvals`).
         """

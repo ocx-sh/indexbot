@@ -1286,7 +1286,7 @@ def test_an_approval_is_reported_by_numeric_id_never_by_login() -> None:
     A GitHub login is renameable and, once released, claimable by a stranger;
     `user.id` is not. Reporting the login here would carry a former
     maintainer's veto to whoever holds their old name — which is why
-    `owners[].github_id` exists in the first place. The payload below gives
+    `owners[].id` exists in the first place. The payload below gives
     both fields, so a revert to `user.login` still parses and this assertion
     is what catches it.
     """

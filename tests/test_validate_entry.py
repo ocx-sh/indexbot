@@ -40,7 +40,7 @@ def _minimal_root(**overrides: object) -> PackageRoot:
     defaults: dict[str, object] = {
         "name": "ocx.sh/kitware/cmake",
         "repository": "oci://ghcr.io/ocx-contrib/cmake",
-        "owners": (Owner(github="alice", github_id=123456),),
+        "owners": (Owner(login="alice", id=123456),),
         "status": "active",
         "deprecated_message": None,
         "created": "2026-07-17",
@@ -535,7 +535,7 @@ def test_check_no_dangling_references_reports_every_missing_reference() -> None:
 
 
 def test_serialize_package_root_full_shape_and_key_order() -> None:
-    owner = Owner(github="alice", github_id=123456)
+    owner = Owner(login="alice", id=123456)
     upstream = Upstream(org="Kitware", repository_url="https://github.com/Kitware/CMake")
     desc = Desc(
         digest="sha256:" + "9" * 64,
@@ -652,7 +652,7 @@ def test_serialize_package_root_upstream_repository_url_omitted_when_none() -> N
 
 
 def test_parse_package_root_round_trips_serialize_output() -> None:
-    owner = Owner(github="alice", github_id=123456)
+    owner = Owner(login="alice", id=123456)
     upstream = Upstream(
         org="Kitware", repository_url="https://github.com/Kitware/CMake", disclaimer="Unofficial."
     )

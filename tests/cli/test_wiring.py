@@ -19,7 +19,7 @@ from ocx_indexbot.adapters.gitlab_api import GitLabApi
 from ocx_indexbot.adapters.local_files import LocalFiles
 from ocx_indexbot.adapters.local_git import LocalGit
 from ocx_indexbot.adapters.registry_v2 import GHCR_HOST, GITLAB_HOST, OCX_SH_HOST, OCX_SH_REALM
-from ocx_indexbot.cli import _wiring, announce
+from ocx_indexbot.cli import _wiring
 from ocx_indexbot.cli import main as main_module
 from ocx_indexbot.core.observe import observe
 from ocx_indexbot.core.policy import INDEX_POLICY_PATH
@@ -33,7 +33,7 @@ _NS = "kitware"
 _PKG = "cmake"
 _REPO = "oci://ghcr.io/kitware/cmake"
 _ROOT_PATH = f"p/{_NS}/{_PKG}.json"
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 _POLICY_BYTES = (
     b'{"name": "ocx.sh", "name_segments": 2, "registry_hosts": ["ghcr.io"], '
     b'"reserved_namespaces": ["ocx", "ocx-sh", "ocx-contrib", "ocx-rs"]}\n'
@@ -147,9 +147,9 @@ def test_forge_api_on_gitlab_without_a_write_token_raises(
 def test_an_explicit_forge_flag_overrides_the_runner_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`announce` is the one subcommand a human runs from their own machine,
-    where neither runner variable is set — and where the fallback would
-    otherwise send a GitLab publisher at github.com."""
+    """`workflows-check` is the one subcommand a human runs outside any
+    runner, where neither runner variable is set — and where the fallback
+    would otherwise send a GitLab operator at github.com."""
     monkeypatch.setenv("GITLAB_CI", "true")
     github_args = argparse.Namespace(forge="github")
     gitlab_args = argparse.Namespace(forge="gitlab")
@@ -177,9 +177,8 @@ def test_forge_api_missing_token_raises(monkeypatch: pytest.MonkeyPatch) -> None
 # --- DISPATCH table shape -------------------------------------------------------
 
 
-def test_dispatch_registers_exactly_the_fifteen_subcommands() -> None:
+def test_dispatch_registers_exactly_the_fourteen_subcommands() -> None:
     assert set(_wiring.DISPATCH) == {
-        "announce",
         "ci",
         "reconcile",
         "validate",
@@ -377,7 +376,7 @@ def test_the_privileged_policy_read_follows_the_branch_the_request_targets(
 def test_the_base_ref_falls_back_to_main_off_a_request_event() -> None:
     """`reconcile` and `stale` run on a schedule, where no forge sets a
     target-branch variable. `main` is the fallback, not a required input."""
-    assert _wiring._base_ref({}) == announce.BASE_REF  # pyright: ignore[reportPrivateUsage]
+    assert _wiring._base_ref({}) == "main"  # pyright: ignore[reportPrivateUsage]
 
 
 def test_an_explicit_base_ref_env_beats_the_forge_s_own(
@@ -394,44 +393,6 @@ def test_gitlab_s_target_branch_variable_is_read_too() -> None:
     target branch under its own name."""
     environ = {"CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "master"}
     assert _wiring._base_ref(environ) == "master"  # pyright: ignore[reportPrivateUsage]
-
-
-def test_announce_reads_the_index_policy_at_the_ref_it_was_told_to_target(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`--base-ref` is the flag a publisher passes when the index's default
-    branch is not `main`, and the policy governing that announce is the copy
-    committed *there*. Reading it at the constant instead sent every publisher
-    on such an index the fail-closed refusal."""
-    tag = "1.0.0"
-    committed = _root({})
-    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index()})
-    github = FakeGitHub(files={(_ROOT_PATH, "master"): serialize_package_root(committed)})
-    files = InMemoryFiles()
-    _patch_adapters(monkeypatch, registry=registry, github=github, files=files)
-    # This index's default branch is `master`; `_patch_adapters` seeds the
-    # policy at `main`, which here does not exist.
-    del github.files[(INDEX_POLICY_PATH, "main")]
-    github.files[(INDEX_POLICY_PATH, "master")] = _POLICY_BYTES
-
-    result = main_module.main(
-        [
-            "announce",
-            "--index-repo",
-            "ocx-sh/index",
-            "--package",
-            f"{_NS}/{_PKG}",
-            "--tags",
-            tag,
-            "--base-ref",
-            "master",
-            "--out",
-            "dist",
-        ]
-    )
-
-    assert result == ExitCode.OK
-    assert files.exists(f"dist/{_ROOT_PATH}")
 
 
 def test_local_policy_reads_the_checkout_copy() -> None:
@@ -493,8 +454,7 @@ def _observed_content_digest(tag: str) -> str:
     """The exact `Observation.content_digest` `observe()` computes for a
     single-tag, single-platform manifest — used to seed a committed root's
     `TagEntry.content` so a later `observe()` call over the same fake
-    registry state reproduces byte-identical output (a genuine no-op diff),
-    matching `tests/cli/test_announce.py`'s established fixture pattern.
+    registry state reproduces byte-identical output (a genuine no-op diff).
     """
     registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index()})
     (observation,) = observe(_REPO, registry)
@@ -515,16 +475,15 @@ def _patch_adapters(
     ONLY module that constructs adapters" boundary). Both `_forge_api`
     (`reconcile`/`classify-pr`/`governance-check`/`governance-poll`, which
     also require the runner's env vars via `_require_env`) and `_project_api`
-    (`_run_announce`'s index-side and fork-side clients, which never go
-    through `_forge_api` at all — fork-PR announce revamp) are patched, so no
-    test here needs a real env var, and neither needs to care which forge the
-    sniff would have picked."""
+    (the per-project constructor `_forge_api` itself routes through) are
+    patched, so no test here needs a real env var, and neither needs to care
+    which forge the sniff would have picked."""
     files_double = files if files is not None else InMemoryFiles()
     github_double = github or FakeGitHub()
     # Every real checkout carries the deployment's registry-host policy, and
-    # `announce` reads the index repo's copy over the API — seed both so the
-    # `_run_*` functions under test see what production sees (a test asserting
-    # the ABSENT-policy failure seeds neither; see `_index_policy` below).
+    # the privileged subcommands read it over the API instead — seed both so
+    # the `_run_*` functions under test see what production sees (a test
+    # asserting the ABSENT-policy failure seeds neither; see `_index_policy`).
     files_double.write_bytes(INDEX_POLICY_PATH, _POLICY_BYTES)
     github_double.files[(INDEX_POLICY_PATH, "main")] = _POLICY_BYTES
 
@@ -545,59 +504,6 @@ def _patch_adapters(
 
 
 # --- end-to-end happy paths, one per subcommand (exit 0) -----------------------
-
-
-def test_announce_out_mode_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    tag = "1.0.0"
-    committed = _root({})
-    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index()})
-    github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(committed)})
-    files = InMemoryFiles()
-    _patch_adapters(monkeypatch, registry=registry, github=github, files=files)
-
-    result = main_module.main(
-        [
-            "announce",
-            "--index-repo",
-            "ocx-sh/index",
-            "--package",
-            f"{_NS}/{_PKG}",
-            "--tags",
-            tag,
-            "--out",
-            "dist",
-        ]
-    )
-
-    assert result == ExitCode.OK
-    assert files.exists(f"dist/{_ROOT_PATH}")
-
-
-def test_announce_fork_mode_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "publisher-token")
-    tag = "1.0.0"
-    committed = _root({})
-    registry = FakeRegistry(tags={_REPO: [tag]}, manifests={(_REPO, tag): _index()})
-    github = FakeGitHub(
-        files={(_ROOT_PATH, "main"): serialize_package_root(committed)}, refs={"main": "sha"}
-    )
-    _patch_adapters(monkeypatch, registry=registry, github=github)
-
-    result = main_module.main(
-        [
-            "announce",
-            "--index-repo",
-            "ocx-sh/index",
-            "--package",
-            f"{_NS}/{_PKG}",
-            "--tags",
-            tag,
-            "--fork",
-            "alice/index",
-        ]
-    )
-
-    assert result == ExitCode.OK
 
 
 def test_reconcile_empty_index_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -655,7 +561,8 @@ def test_validate_base_dir_wires_a_second_file_port(monkeypatch: pytest.MonkeyPa
     _patch_adapters(monkeypatch, files=files)
 
     # `_patch_adapters` hands every `LocalFiles(...)` the same double, so the
-    # base-dir port sees the same committed root — an announce-shaped no-op.
+    # base-dir port sees the same committed root — an announce-shaped no-op
+    # (`ocx package announce`'s re-announce of an unchanged root).
     assert (
         main_module.main(["validate", reserved_path, "--offline", "--base-dir", "base"])
         == ExitCode.OK
@@ -744,8 +651,8 @@ def test_governance_check_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyP
         base_sha="base-sha",
         head_sha="head-sha",
         changed_paths=(_ROOT_PATH,),
-        author_login=_OWNER.github,
-        author_id=_OWNER.github_id,
+        author_login=_OWNER.login,
+        author_id=_OWNER.id,
     )
     github = FakeGitHub(
         files={
@@ -782,8 +689,8 @@ def test_governance_gate_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         base_sha="base-sha",
         head_sha="head-sha",
         changed_paths=(_ROOT_PATH,),
-        author_login=_OWNER.github,
-        author_id=_OWNER.github_id,
+        author_login=_OWNER.login,
+        author_id=_OWNER.id,
     )
     github = FakeGitHub(
         files={
@@ -862,8 +769,8 @@ def test_governance_poll_happy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         base_sha="base-sha",
         head_sha="head-sha",
         changed_paths=(_ROOT_PATH,),
-        author_login=_OWNER.github,
-        author_id=_OWNER.github_id,
+        author_login=_OWNER.login,
+        author_id=_OWNER.id,
     )
     github = FakeGitHub(
         files={
@@ -939,29 +846,6 @@ def test_validate_missing_path_exits_validation_failure(monkeypatch: pytest.Monk
     _patch_adapters(monkeypatch, files=InMemoryFiles())
 
     result = main_module.main(["validate", "p/does/not-exist.json", "--offline"])
-
-    assert result == ExitCode.VALIDATION_FAILURE
-
-
-def test_announce_typo_tag_exits_validation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    committed = _root({})
-    github = FakeGitHub(files={(_ROOT_PATH, "main"): serialize_package_root(committed)})
-    registry = FakeRegistry()  # no tags/manifests registered at all
-    _patch_adapters(monkeypatch, registry=registry, github=github)
-
-    result = main_module.main(
-        [
-            "announce",
-            "--index-repo",
-            "ocx-sh/index",
-            "--package",
-            f"{_NS}/{_PKG}",
-            "--tags",
-            "9.9.9-typo",
-            "--out",
-            "dist",
-        ]
-    )
 
     assert result == ExitCode.VALIDATION_FAILURE
 

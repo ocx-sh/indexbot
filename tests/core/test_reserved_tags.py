@@ -88,7 +88,7 @@ def _root(tags: dict[str, TagEntry]) -> PackageRoot:
     return PackageRoot(
         name="ocx.sh/kitware/cmake",
         repository="oci://ghcr.io/ocx-contrib/cmake",
-        owners=(Owner(github="alice", github_id=1),),
+        owners=(Owner(login="alice", id=1),),
         status="active",
         deprecated_message=None,
         created="2026-07-17",

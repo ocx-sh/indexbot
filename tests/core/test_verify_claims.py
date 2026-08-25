@@ -9,7 +9,7 @@ from tests.fakes import FakeRegistry
 
 _PACKAGE_ID = PackageId(segments=("kitware", "cmake"))
 _REPO = "oci://ghcr.io/ocx-contrib/cmake"
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 
 
 def _root(tags: dict[str, TagEntry] | None = None, *, desc: Desc | None = None) -> PackageRoot:

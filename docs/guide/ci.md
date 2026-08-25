@@ -12,6 +12,21 @@ The rule the whole surface is designed around: **one CI job runs one
 something the bot already owns — and the bot's copy is the one with the
 tests.
 
+## What is *not* a lane: publishing
+
+None of the five lanes below publishes. Announcing a tag — reading it from
+the physical registry, storing the image index it resolved to as a
+content-addressed CAS object, updating the package root and opening the fork
+pull request — is [`ocx package announce`](https://github.com/ocx-sh/ocx)'s
+job, and it runs in the **publisher's** pipeline, not the index's. indexbot
+owns the index side: everything that happens to that pull request once it
+exists.
+
+0.5.0 removed this package's own `announce` subcommand for exactly that
+reason (`adr_forge_neutral_owners.md` D3) — it was a second implementation of
+the same byte-exact writer, in a second language, that nothing in production
+called.
+
 ## The five lanes
 
 An index repository has five independent lanes. They differ in what triggers
@@ -434,7 +449,7 @@ its lane uses.
 | `GITHUB_STEP_SUMMARY` | GitHub jobs | failure summaries |
 
 A command that finds no token runs read-only where that is meaningful
-(`announce --out`) and fails with a clear message where it is not.
+(`validate`, `render`) and fails with a clear message where it is not.
 
 ## Exit codes
 

@@ -382,7 +382,7 @@ class ForgePort(Protocol):
         returns decides whether a change merges without a second person. A
         login is renameable and, once released, recyclable: match on one and a
         stranger who acquires a former maintainer's name inherits their veto
-        over the human lane. `model.Owner.github_id` exists for exactly this
+        over the human lane. `model.Owner.id` exists for exactly this
         reason and `cli/governance_check._author_owns_every_touched_package`
         already binds on it — this method is the other half. Both forges hand
         the id back beside the login (GitHub's review `user.id`, GitLab's

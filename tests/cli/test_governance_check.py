@@ -11,14 +11,14 @@ from ocx_indexbot.errors import ForgeError
 from ocx_indexbot.model import Owner, PackageRoot, PullRequestInfo, TagEntry
 from tests.fakes import FakeGitHub, make_policy
 
-_OWNER = Owner(github="alice", github_id=1)
-_OTHER_OWNER = Owner(github="bob", github_id=2)
+_OWNER = Owner(login="alice", id=1)
+_OTHER_OWNER = Owner(login="bob", id=2)
 _BASE = "base-sha"
 _HEAD = "head-sha"
 _ROOT_PATH = "p/kitware/cmake.json"
 _STATUS_CONTEXT = "governance/review-required"
 _MAINTAINERS_PATH = ".github/maintainers.yml"
-_MAINTAINERS_YML = b"maintainers:\n  - github: carol\n    github_id: 99\n"
+_MAINTAINERS_YML = b"maintainers:\n  - login: carol\n    id: 99\n"
 _COMMENT_MARKER = "<!-- indexbot:governance -->"
 
 
@@ -202,9 +202,7 @@ def test_human_review_required_classification_sets_pending_status() -> None:
 def test_author_who_is_also_a_maintainer_is_excluded_from_reviewers() -> None:
     before = _root(owners=(_OWNER,))
     after = _root(owners=(_OTHER_OWNER,))
-    maintainers = (
-        b"maintainers:\n  - github: alice\n    github_id: 1\n  - github: carol\n    github_id: 99\n"
-    )
+    maintainers = b"maintainers:\n  - login: alice\n    id: 1\n  - login: carol\n    id: 99\n"
     github = _github(
         pr_number=1, base=before, head=after, author_login="alice", maintainers=maintainers
     )
@@ -217,7 +215,7 @@ def test_author_who_is_also_a_maintainer_is_excluded_from_reviewers() -> None:
 def test_no_reviewers_assigned_when_every_maintainer_is_the_author() -> None:
     before = _root(owners=(_OWNER,))
     after = _root(owners=(_OTHER_OWNER,))
-    maintainers = b"maintainers:\n  - github: alice\n    github_id: 1\n"
+    maintainers = b"maintainers:\n  - login: alice\n    id: 1\n"
     github = _github(
         pr_number=1, base=before, head=after, author_login="alice", maintainers=maintainers
     )
@@ -361,10 +359,7 @@ def test_the_self_review_carve_out_binds_on_id_not_on_the_authors_current_login(
     own reviewer — which GitHub's API rejects outright — and their own
     approval releases the lane they are meant to be waiting in.
     """
-    maintainers = (
-        b"maintainers:\n  - github: alice-old\n    github_id: 1\n"
-        b"  - github: carol\n    github_id: 99\n"
-    )
+    maintainers = b"maintainers:\n  - login: alice-old\n    id: 1\n  - login: carol\n    id: 99\n"
     head = _root(tags={"1.0.0": TagEntry(content="sha256:" + "b" * 64, observed="T1")})
     github = _github(pr_number=1, base=None, head=head, maintainers=maintainers, approvals=[1])
 

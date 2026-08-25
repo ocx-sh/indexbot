@@ -11,7 +11,7 @@ the shared pure function, not a second hand-rolled diff walk).
 Disposition:
 
 - **Machine lane** (`refresh`): green (`success`) requires the PR author's
-  `github_id` to appear in `owners[]` of *every* touched package root — read
+  numeric forge id to appear in `owners[]` of *every* touched package root — read
   from the **base** ref only (`ForgePort.get_file_contents`, never the PR
   head; the same untrusted-head-content trust boundary
   `cli/classify_pr.py`'s module docstring already documents for
@@ -25,7 +25,7 @@ Disposition:
   comment — G-20. Never `failure`: nothing has actually gone wrong, the PR
   just needs a human before it may merge.
 - **A maintainer's approval releases it.** Any committed maintainer other than
-  the author — matched by `github_id`, never by login — approving at the PR's
+  the author — matched by `owners[].id`, never by login — approving at the PR's
   current head turns the status `success`.
   This is the human lane's exit and it exists because on GitLab the commit
   status *is* the merge gate: without it, a human-lane merge request has no
@@ -38,11 +38,11 @@ those two lanes, and nothing else: `owners` is the description above,
 `never` sends every PR to the human lane, `always` accepts the `refresh`
 classification without G-19. See `_disposition`.
 
-Reviewers are every `.github/maintainers.yml` entry's `github` login, minus
+Reviewers are every `.github/maintainers.yml` entry's `login`, minus
 the PR author (self-review carve-out — GitHub's API itself rejects
 assigning a PR's own author as one of their own reviewers). The login is the
 right field there and only there: `ForgePort.request_reviewers` assigns by
-name, while the approval that *releases* the lane is matched on `github_id`
+name, while the approval that *releases* the lane is matched on `id`
 (see `_approver`). The comment uses
 a hidden HTML marker (`<!-- indexbot:governance -->`) so a later
 `governance-check` run on the same PR updates the existing comment in place
@@ -103,7 +103,7 @@ def _is_package_root_path(path: str, *, name_segments: int) -> bool:
 def _author_owns_every_touched_package(
     info: PullRequestInfo, github: ForgePort, *, policy: IndexPolicy
 ) -> bool:
-    """G-19: the PR author's `github_id` must appear in `owners[]` of every
+    """G-19: the PR author's numeric forge id must appear in `owners[]` of every
     touched `p/<namespace>/<package>.json` root, read from the base ref
     (never the PR head).
 
@@ -127,7 +127,7 @@ def _author_owns_every_touched_package(
             # contract regardless of that upstream guarantee.
             return False
         root = parse_package_root(base_raw)
-        if info.author_id not in {owner.github_id for owner in root.owners}:
+        if info.author_id not in {owner.id for owner in root.owners}:
             return False
     return True
 
@@ -197,7 +197,7 @@ def _committed_maintainers(github: ForgePort, base_sha: str) -> tuple[Owner, ...
 
 def _eligible_maintainers(github: ForgePort, info: PullRequestInfo) -> tuple[Owner, ...]:
     """Every committed maintainer except the PR's own author, matched on
-    `github_id`.
+    `id`.
 
     The self-review carve-out is not politeness: GitHub's API rejects
     assigning a PR's author as their own reviewer, and an approval by the
@@ -206,7 +206,7 @@ def _eligible_maintainers(github: ForgePort, info: PullRequestInfo) -> tuple[Own
     a maintainer who has since renamed still authors PRs under the same id.
     """
     maintainers = _committed_maintainers(github, info.base_sha)
-    return tuple(maintainer for maintainer in maintainers if maintainer.github_id != info.author_id)
+    return tuple(maintainer for maintainer in maintainers if maintainer.id != info.author_id)
 
 
 def _reviewer_logins(github: ForgePort, info: PullRequestInfo) -> list[str]:
@@ -216,14 +216,14 @@ def _reviewer_logins(github: ForgePort, info: PullRequestInfo) -> list[str]:
     back to ids at its own boundary). Asking a person to look is not
     authorization; `_approver` is, and it uses ids.
     """
-    return [maintainer.github for maintainer in _eligible_maintainers(github, info)]
+    return [maintainer.login for maintainer in _eligible_maintainers(github, info)]
 
 
 def _approver(github: ForgePort, info: PullRequestInfo) -> str | None:
     """The first committed maintainer, other than the author, who has approved
     this PR at its current head — or `None`.
 
-    Matched by numeric `github_id`, never by login. This is the human lane's
+    Matched by numeric `id`, never by `login`. This is the human lane's
     only exit and it outranks every disposition including
     `governance.auto_merge = never`, so a login match would let whoever
     acquires a renamed-and-released maintainer name release the gate. The
@@ -232,8 +232,7 @@ def _approver(github: ForgePort, info: PullRequestInfo) -> str | None:
     the status description, never the thing that was compared.
     """
     eligible = {
-        maintainer.github_id: maintainer.github
-        for maintainer in _eligible_maintainers(github, info)
+        maintainer.id: maintainer.login for maintainer in _eligible_maintainers(github, info)
     }
     if not eligible:
         return None

@@ -44,8 +44,8 @@ _HEAD_SHA = "head-sha"
 _ROOT_PATH = "p/kitware/cmake.json"
 _OWN_CAS_PATH = f"p/kitware/cmake/o/sha256/{'b' * 64}.json"
 _ROOT_SEGMENTS = ("contents", "p", "kitware", "cmake.json")
-_OWNER = Owner(github="alice", github_id=1)
-_OTHER_OWNER = Owner(github="bob", github_id=2)
+_OWNER = Owner(login="alice", id=1)
+_OTHER_OWNER = Owner(login="bob", id=2)
 
 
 def _root(*, owners: tuple[Owner, ...] = (_OWNER,), tags: dict[str, TagEntry]) -> PackageRoot:
@@ -70,7 +70,7 @@ def _pr_payload() -> dict[str, object]:
     return {
         "base": {"sha": _BASE_SHA},
         "head": {"sha": _HEAD_SHA},
-        "user": {"login": _OWNER.github, "id": _OWNER.github_id},
+        "user": {"login": _OWNER.login, "id": _OWNER.id},
         "updated_at": "2026-07-17T00:00:00Z",
         "labels": [],
     }

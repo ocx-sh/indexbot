@@ -87,8 +87,8 @@ def _args(**overrides: object) -> argparse.Namespace:
         "namespace": "kitware",
         "package": "cmake",
         "out": "p",
-        "owner_github": "alice",
-        "owner_github_id": 123456,
+        "owner_login": "alice",
+        "owner_id": 123456,
         "upstream_org": None,
         "upstream_repository_url": None,
         "upstream_disclaimer": None,
@@ -131,7 +131,9 @@ def test_happy_path_writes_root_and_cas_objects() -> None:
 
     assert root["name"] == "ocx.sh/kitware/cmake"
     assert root["repository"] == _REPO
-    assert root["owners"] == [{"github": "alice", "github_id": 123456}]
+    assert root["owners"] == [
+        {"login": "alice", "id": 123456, "github": "alice", "github_id": 123456}
+    ]
     assert root["status"] == "active"
     assert root["deprecated_message"] is None
     assert root["created"] == "2026-07-17"
@@ -229,10 +231,11 @@ def test_upstream_repository_url_bad_scheme_raises_before_write() -> None:
     assert not files.exists("p/kitware/cmake.json")
 
 
-def test_owner_github_id_coerced_from_string() -> None:
+def test_owner_id_coerced_from_string() -> None:
     files = _files()
-    run(_args(owner_github_id="123456"), registry=_registry(), files=files, clock=FixedClock())
+    run(_args(owner_id="123456"), registry=_registry(), files=files, clock=FixedClock())
     root = json.loads(files.read_bytes("p/kitware/cmake.json") or b"{}")
+    assert root["owners"][0]["id"] == 123456
     assert root["owners"][0]["github_id"] == 123456
 
 

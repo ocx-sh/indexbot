@@ -105,7 +105,7 @@ def _root_bytes(name: str) -> bytes:
         PackageRoot(
             name=name,
             repository=_REPOSITORY,
-            owners=(Owner(github="alice", github_id=1),),
+            owners=(Owner(login="alice", id=1),),
             status="active",
             deprecated_message=None,
             created="2026-07-17",

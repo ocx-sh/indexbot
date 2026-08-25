@@ -47,8 +47,7 @@ that cannot be what it claims to be.
 which API to talk to at run time: that comes from the runner's own variables
 (`$GITLAB_CI`). The privileged subcommands read this very file *through* a
 forge port, so a policy-derived port choice would need the port it was
-choosing — and a publisher running `announce` from a laptop is on neither
-runner regardless.
+choosing.
 
 `ci.owner` has no default because every generated schedule carries a
 cron-upstream-only guard keyed on it. A fork inherits every schedule in a
@@ -200,6 +199,6 @@ self-authorization hole:
 - The no-adapter guard closes it independently: a PR-head policy naming a host
   with no client fails the run outright.
 
-`announce` is the one flow that deliberately does not read a local policy —
-its publisher runs outside any index checkout, so it reads the target index's
-committed policy at the base ref over the API instead.
+The privileged subcommands deliberately do not read a local policy — they
+never check the repository out, so they read the committed policy at the base
+ref over the API instead.

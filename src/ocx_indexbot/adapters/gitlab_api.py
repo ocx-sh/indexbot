@@ -592,7 +592,7 @@ class GitLabApi:
         which is why the gate is a commit status and this is only its release.
 
         Both reads are joined on `user.id`, never on `username`: the caller
-        matches these against `.github/maintainers.yml`'s `github_id`, and a
+        matches these against `.github/maintainers.yml`'s `id`, and a
         GitLab username is renameable and recyclable exactly as a GitHub login
         is (`ports.ForgePort.list_approvals`).
         """

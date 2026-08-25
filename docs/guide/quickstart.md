@@ -83,36 +83,45 @@ cannot be served produces roots that validate and then fail every download.
 indexbot seed-import \
   --catalog-md   mirrors/kitware/cmake/CATALOG.md \
   --mirror-yml   mirrors/kitware/cmake/mirror.yml \
-  --owner-github someone --owner-github-id 1234567 \
+  --owner-login  someone --owner-id 1234567 \
   --out p
 ```
 
-Commit the result. From here on, tags arrive through `announce`.
+Commit the result. From here on, tags arrive by announce.
+
+`--owner-login` is a forge **username**, never a display name: it is what the
+forge API resolves to a user id when this bot requests review. `--owner-id` is
+that numeric id, and it — not the login — is the ownership key G-19 matches a
+pull request author against. A login can be renamed and, once released,
+recycled; an id cannot.
 
 ## 3. Announce a tag
 
-The publisher runs this — from a fork, with no write access to the index:
+indexbot does not publish. The publisher runs
+[`ocx package announce`](https://github.com/ocx-sh/ocx) — from a fork, with no
+write access to the index:
 
 ```bash
-indexbot announce --package kitware/cmake --tags 3.31.0,3.30.5 --fork someone/index
+ocx package announce --package kitware/cmake --tags-file tags.txt --fork someone/index
 ```
 
 It reads the tags from the physical registry, writes the image index it
 resolved to as a content-addressed CAS object, updates the root, and opens a
-pull request. `--out <dir>` writes the same files locally instead, for a dry
-run.
+pull request. Everything from here on — validating that pull request,
+classifying it, gating it, merging it, rendering the result — is indexbot's
+half.
 
-The tag list is **owner-curated**: the bot records what the owner announces,
-and CI verifies each claim against registry truth. It never enumerates a
-registry and never invents a tag.
+The tag list is **owner-curated**: the index records what the owner announces,
+and CI (indexbot's `validate-pr`) verifies each claim against registry truth.
+Nothing enumerates a registry, and nothing invents a tag.
 
 !!! warning "That list is the whole set, not an addition"
 
-    `--tags` writes the root's tag map from what this run names. A tag the
-    root already carries and this run omits is dropped. Announcing one tag per
+    An announce writes the root's tag map from what that run names. A tag the
+    root already carries and the run omits is dropped. Announcing one tag per
     push — `--tags "$CI_COMMIT_TAG"` — therefore publishes that tag and
-    deletes the rest. Pass every tag you want kept, every time; see
-    [`announce`](../reference/cli.md#announce).
+    deletes the rest. Pass every tag you want kept, every time; `--tags-file`
+    exists so that list can be a committed file rather than a shell variable.
 
 ## 4. Gate the pull request
 
@@ -125,7 +134,7 @@ Two workflows, deliberately in two files (see
   head) — `indexbot classify-pr` routes the PR to the machine or human lane,
   and `indexbot governance-check` decides whether it may auto-merge.
 
-Authorization comes from the **base branch's** committed `owners[].github_id`,
+Authorization comes from the **base branch's** committed `owners[].id`,
 never from the PR's own content. A pull request editing its own `owners[]` is
 a human-lane change and cannot self-authorize.
 

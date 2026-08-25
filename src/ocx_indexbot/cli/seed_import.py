@@ -28,9 +28,9 @@ Inputs, all read via `FilePort` (never a bare filesystem call):
   repository exists.
 - `--namespace`/`--package`, or derived from `--catalog-md`'s path (its parent
   two path segments, e.g. `seeds/kitware/cmake/CATALOG.md` -> `kitware/cmake`).
-- `--owner-github`/`--owner-github-id` and optional `--upstream-*`: **not** in
+- `--owner-login`/`--owner-id` and optional `--upstream-*`: **not** in
   CONTRACTS.md §12's args list for this module, but `PackageRoot.owners` is
-  schema-required (`minItems: 1`, `github_id` mandatory per ADR-2 ND-8) and
+  schema-required (`minItems: 1`, `id` mandatory per ADR-2 ND-8) and
   neither CATALOG.md nor mirror.yml carries ownership/attribution data — see
   `open_questions`.
 
@@ -283,7 +283,7 @@ def run(
 
     Expected `args` attributes: `catalog_md` (str), `mirror_yml` (str), `logo`
     (str | None), `namespace` (str | None), `package` (str | None), `out` (str,
-    defaults to `"p"`), `owner_github` (str), `owner_github_id` (int | str),
+    defaults to `"p"`), `owner_login` (str), `owner_id` (int | str),
     `upstream_org`/`upstream_repository_url`/`upstream_disclaimer` (str | None),
     `repository` (str | None — `--repository` override, see
     `_resolve_repository`), `allow_reserved_namespace` (bool, default `False`
@@ -300,8 +300,8 @@ def run(
     mirror_yml_path = cast(str, args.mirror_yml)
     logo_path = cast("str | None", getattr(args, "logo", None))
     out_dir = cast(str, getattr(args, "out", None) or _DEFAULT_OUT_DIR)
-    owner_github = cast(str, args.owner_github)
-    owner_github_id = int(cast("str | int", args.owner_github_id))
+    owner_login = cast(str, args.owner_login)
+    owner_id = int(cast("str | int", args.owner_id))
     upstream_org = cast("str | None", getattr(args, "upstream_org", None))
     upstream_repository_url = cast("str | None", getattr(args, "upstream_repository_url", None))
     upstream_disclaimer = cast("str | None", getattr(args, "upstream_disclaimer", None))
@@ -405,7 +405,7 @@ def run(
     root = PackageRoot(
         name=f"{policy.name}/{package_id}",
         repository=repository,
-        owners=(Owner(github=owner_github, github_id=owner_github_id),),
+        owners=(Owner(login=owner_login, id=owner_id),),
         status="active",
         deprecated_message=None,
         created=clock.now_iso8601()[:10],

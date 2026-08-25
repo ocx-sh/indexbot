@@ -94,7 +94,7 @@ def _build(
     root = PackageRoot(
         name=name,
         repository=repository,
-        owners=(Owner(github="alice", github_id=1),),
+        owners=(Owner(login="alice", id=1),),
         status="active",
         deprecated_message=None,
         created="2026-07-17",
@@ -649,7 +649,7 @@ _RESERVED_CAS = {
 def _reserved_root(
     *,
     repository: str = _REPOSITORY,
-    owners: tuple[Owner, ...] = (Owner(github="alice", github_id=1),),
+    owners: tuple[Owner, ...] = (Owner(login="alice", id=1),),
     status: str = "active",
     tags: dict[str, TagEntry] | None = None,
 ) -> PackageRoot:
@@ -732,9 +732,7 @@ def test_fork_pr_cannot_repoint_an_existing_reserved_root() -> None:
 
 def test_fork_pr_cannot_write_itself_into_an_existing_reserved_roots_owners() -> None:
     base = _reserved_root()
-    head = _reserved_root(
-        owners=(Owner(github="alice", github_id=1), Owner(github="mallory", github_id=999))
-    )
+    head = _reserved_root(owners=(Owner(login="alice", id=1), Owner(login="mallory", id=999)))
     assert _fork_validate(head, base) == ExitCode.VALIDATION_FAILURE
 
 
@@ -752,7 +750,7 @@ def test_the_exemption_never_widens_a_control_path_segment() -> None:
     root = PackageRoot(
         name="ocx.sh/admin/cmake",
         repository=_REPOSITORY,
-        owners=(Owner(github="alice", github_id=1),),
+        owners=(Owner(login="alice", id=1),),
         status="active",
         deprecated_message=None,
         created="2026-07-17",

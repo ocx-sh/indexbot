@@ -7,7 +7,7 @@ from ocx_indexbot.core.regenerate import regenerate
 from ocx_indexbot.model import Desc, Owner, PackageRoot, TagEntry, Upstream, Yank
 from tests.fakes import FixedClock
 
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 _UPSTREAM = Upstream(org="Kitware")
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64

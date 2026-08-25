@@ -4,7 +4,7 @@ from ocx_indexbot.core.anomaly import AnomalyFinding, check_tag_mutations
 from ocx_indexbot.core.observe import Observation
 from ocx_indexbot.model import Owner, PackageId, PackageRoot, TagEntry
 
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 _PKG = PackageId(segments=("kitware", "cmake"))
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64

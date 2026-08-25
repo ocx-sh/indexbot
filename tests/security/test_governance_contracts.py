@@ -56,7 +56,7 @@ from pathlib import Path
 
 import pytest
 
-from ocx_indexbot.cli import announce, governance_check, reconcile
+from ocx_indexbot.cli import governance_check, reconcile
 from ocx_indexbot.cli import render as cli_render
 from ocx_indexbot.core.anomaly import AnomalyFinding, check_tag_mutations
 from ocx_indexbot.core.backoff import BackoffPolicy, delay_seconds, is_retryable_status
@@ -95,7 +95,7 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "ocx_indexbot"
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 _TS = "2026-07-17T00:00:00Z"
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 _PKG = PackageId(segments=("kitware", "cmake"))
 
 
@@ -185,7 +185,7 @@ def test_g04_new_package_is_human_lane() -> None:
 
 _G05_MUTATIONS: list[tuple[str, Callable[[PackageRoot], PackageRoot]]] = [
     ("repository", lambda r: replace(r, repository="oci://ghcr.io/ocx-contrib/other")),
-    ("owners", lambda r: replace(r, owners=(Owner(github="bob", github_id=2),))),
+    ("owners", lambda r: replace(r, owners=(Owner(login="bob", id=2),))),
     ("status", lambda r: replace(r, status="deprecated")),
     ("deprecated_message", lambda r: replace(r, deprecated_message="gone")),
     ("superseded_by", lambda r: replace(r, superseded_by="kitware/cmake3")),
@@ -265,12 +265,23 @@ def test_g07_render_idempotent_noop() -> None:
 
 def test_g08_no_repository_dispatch_surface() -> None:
     """G-08 RETIRED (ADR-4 Amendment A1 / ADR-6 FP-1): no `client_payload` /
-    `PACKAGE_ID` reader in `announce.py`, no `core/validate_payload.py`, no
-    `.github/workflows/announce.yml`."""
-    announce_src = Path(announce.__file__).read_text(encoding="utf-8")
-    assert "client_payload" not in announce_src
-    assert "PACKAGE_ID" not in announce_src
+    `PACKAGE_ID` reader anywhere in the package, no `core/validate_payload.py`,
+    no `.github/workflows/announce.yml`.
+
+    0.5.0 deleted `cli/announce.py` itself (`adr_forge_neutral_owners.md` D3),
+    which used to be the one module this scanned. Widened to the whole package
+    rather than dropped: the retired doorbell's shape is what must stay absent,
+    and it could reappear in any module.
+    """
+    assert not (_SRC / "cli" / "announce.py").exists()
     assert not (_SRC / "core" / "validate_payload.py").exists()
+    # The QUOTED spellings, not the bare words: a reader of either is a
+    # subscript or an `os.environ` lookup, and both names still appear in
+    # prose across the package explaining what was retired and why.
+    for module in sorted(_SRC.rglob("*.py")):
+        source = module.read_text(encoding="utf-8")
+        for spelling in ('"client_payload"', "'client_payload'", '"PACKAGE_ID"', "'PACKAGE_ID'"):
+            assert spelling not in source, f"{module}: {spelling}"
 
 
 # --- G-09 ------------------------------------------------------------------
@@ -546,7 +557,7 @@ def _refresh_pr_github(
         (
             ".github/maintainers.yml",
             "base-sha",
-        ): b"maintainers:\n  - github: carol\n    github_id: 99\n",
+        ): b"maintainers:\n  - login: carol\n    id: 99\n",
     }
     info = PullRequestInfo(
         number=1,
@@ -657,10 +668,8 @@ def test_g20_human_lane_assigns_maintainers_reviewers(_github_output: Path) -> N
     updates in place rather than reposting)."""
     root_path = "p/kitware/cmake.json"
     base = _root(owners=(_OWNER,))
-    head = _root(owners=(Owner(github="bob", github_id=2),))  # owners change -> human lane
-    maintainers = (
-        b"maintainers:\n  - github: alice\n    github_id: 1\n  - github: carol\n    github_id: 99\n"
-    )
+    head = _root(owners=(Owner(login="bob", id=2),))  # owners change -> human lane
+    maintainers = b"maintainers:\n  - login: alice\n    id: 1\n  - login: carol\n    id: 99\n"
     files = {
         (root_path, "base-sha"): serialize_package_root(base),
         (root_path, "head-sha"): serialize_package_root(head),

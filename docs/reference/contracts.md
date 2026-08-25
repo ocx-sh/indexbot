@@ -38,8 +38,8 @@ minified encoder is now free, because the bytes never round-trip.
 
 `core/observe.py` records `ManifestFetch.raw` as `Observation.raw` and
 `ManifestFetch.digest` as `Observation.content_digest`; every writer
-(`cli/announce.py`, `cli/seed_import.py`, `core/render.py`) copies that
-`bytes` object through unchanged.
+(`cli/seed_import.py`, `core/render.py`) copies that `bytes` object through
+unchanged.
 
 The one JSON document this bot *does* author is the package root, and it has
 its own byte-exact form (§5.6, §14) — pretty-printed for PR review, never
@@ -120,8 +120,8 @@ constants stay structurally distinct, only their *file* is shared now). The
 original rationale for a standalone module — `parse_package_id` was reached
 via `cli/_common.py`'s `read_validated_env`, the `repository_dispatch`
 `PACKAGE_ID` env-var-indirection reader (ADR-4 BD-4) — no longer applies:
-`cli/announce.py`'s doorbell pipeline (env var, `--validate-only`) retired
-entirely in the revamp (owner-confirmed decision set 2026-07-18,
+the doorbell pipeline (env var, `--validate-only`) retired entirely in the
+revamp (owner-confirmed decision set 2026-07-18,
 "Fork-PR announce": publishers open PRs from forks under their own GitHub
 identity, no index-side credentials, no doorbell). `read_validated_env`
 itself is deleted from `cli/_common.py` along with its tests — every
@@ -355,9 +355,9 @@ def observe_one_tag(repository: str, tag: str, registry: RegistryPort) -> Observ
     publishing fault to surface, not a shape to convert. Extracted (fork-PR
     announce revamp, 2026-07-18) so a caller that already knows which
     *specific* tags it cares about — `core/verify_claims.py` re-deriving one
-    claimed tag, `cli/announce.py` observing only the publisher's curated tag
-    set — never has to call `registry.list_tags()` first just to reach a
-    single tag's manifest.
+    claimed tag, a publisher's own tool observing only its curated tag set —
+    never has to call `registry.list_tags()` first just to reach a single
+    tag's manifest.
     """
 
 
@@ -510,8 +510,8 @@ def regenerate(
 ```
 
 - `current` is **required, never `None`** — a package_id with no committed
-  root is a validation error the caller (`cli/announce.py`/`cli/reconcile.py`)
-  raises *before* calling `regenerate` (namespace claiming, ADR-2 ND-5, is a
+  root is a validation error the caller (`cli/reconcile.py`,
+  `cli/seed_import.py`) raises *before* calling `regenerate` (namespace claiming, ADR-2 ND-5, is a
   separate human-PR flow that already commits a root with empty `tags`
   before the first `announce` ever runs — `regenerate` never synthesizes a
   root from scratch).
@@ -561,8 +561,8 @@ def diff(current: PackageRoot, target: PackageRoot) -> Patch | None:
     both are frozen, so this is a plain `==`) — BD-2's `ExitCode.OK` no-op
     case. Otherwise a `Patch`. `new_objects` is target's tags whose content
     digest does not appear anywhere in `current.tags` — already-existing
-    objects (shared digest / cascade aliasing, ADR-1 D3) are excluded so
-    `cli/announce.py` never re-writes a CAS object that's already committed.
+    objects (shared digest / cascade aliasing, ADR-1 D3) are excluded so a
+    publisher never re-writes a CAS object that's already committed.
     """
 
 
@@ -819,47 +819,21 @@ line, no configuration surface.
 
 Each subcommand module exposes one function matching `cli/main.py`'s
 existing `_DISPATCH` shape: `def run(args: argparse.Namespace) -> ExitCode`.
-Registration (`_DISPATCH["announce"] = announce.run`, plus the matching
+Registration (`_DISPATCH["reconcile"] = reconcile.run`, plus the matching
 `subparsers.add_parser(...)` args) is WP2-M's production-wiring job, done
 last, once every subcommand module exists — **do not** edit `cli/main.py`'s
 `_build_parser`/`_DISPATCH` from an individual WP2-H..L work package; land
 your module's `run` function and its own tests, leave wiring to WP2-M.
 
-- **`cli/announce.py`** (fully repurposed, fork-PR announce revamp,
-  2026-07-18 — no longer a `repository_dispatch` doorbell target): a
-  publisher reference tool. `--package` (required) + `--tags`/`--tags-file`
-  (mutually exclusive, one required) + `--out`/`--fork` (mutually exclusive,
-  one required) + `--index-repo` (default `ocx-sh/index`) +
-  `--yank`/`--unyank`/`--yank-reason`. Pipeline: resolve the curated tag set
-  -> read the current root from the index repo at `main`
-  (`ForgePort.get_file_contents`, via a keyword-only `index_github` port —
-  unauthenticated is fine for `--out`; missing root -> `ValidationError`,
-  "unclaimed namespace — new packages go through the human lane") ->
-  `check_repository_allowlisted` (SSRF ordering; `allowed_hosts` comes from
-  the *index repo's* own `.github/index-policy.json` at `main`, read through
-  the same `index_github` port — a publisher runs this from their own working
-  directory and cannot widen the target index's policy locally, §15) ->
-  `observe_one_tag` once
-  per curated tag (a tag that does not resolve -> hard `ValidationError`,
-  never silently dropped — a publisher typo) -> `desc.check_desc_change` ->
-  `regenerate` (owner curation: the curated observed set *is* the new `tags`
-  map — `core/regenerate.py`'s existing "observations are the universe,
-  absent means removed" semantics already gives exactly this add/remove
-  authority, no core change needed) -> `--yank`/`--unyank` marker toggles ->
-  build root + CAS bytes -> `--out`: write via `FilePort` under the wire
-  paths; `--fork`: `commit_files` against a *second*, keyword-only
-  `fork_github` port scoped to `--fork`, then `open_or_update_pull_request`
-  on `index_github` with the new `head_owner` parameter (§3) set to the
-  fork's owner. Announce branch base ref: an already-open announce branch
-  (`fork_github.get_ref_sha(branch)`) is reused as-is; a fresh branch is cut
-  from **upstream** index main (`index_github.get_ref_sha(BASE_REF)`), never
-  the fork's own main — root content is generated from upstream main + live
-  registry truth, so a stale fork main would produce a stale merge-base (fork
-  networks share object storage, so creating a fork ref at an upstream SHA
-  works). No index-side credential is ever read by this module itself
-  — `cli/_wiring.py` decides token presence per port. Server-side privileged
-  verification (G-19 ownership, claim re-derivation) happens in CI, never
-  here — see `cli/governance_check.py` and `cli/validate.py` below.
+- **`cli/announce.py`** — **removed** (0.5.0,
+  `adr_forge_neutral_owners.md` D3). It was a second implementation of the
+  wire-format writer, in a second language, on no production path: publishing
+  is `ocx package announce`'s job (`ocx-sh/ocx`), which is what `ocx-mirror`
+  actually shells out to. Its subcommand, its wiring entry
+  (`_run_announce`, `_index_forge`) and its docs went with it. `core/`
+  did **not**: `core/regenerate.py`, `core/observe.py` and
+  `core/verify_claims.py` are the read/verify half and are shared by
+  `reconcile`, `validate` and `seed-import`.
 - **`cli/reconcile.py`** (rewritten verify-only, fork-PR announce revamp,
   2026-07-18 — owner-confirmed decision set "Verify-only reconcile"):
   `FilePort.list_files("p/")` to enumerate every `*.json` root (excluding
@@ -967,7 +941,7 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   G-20): re-derives the classification via
   `classify_pr.classify_pull_request` (unchanged single-source-of-truth
   approach), then: **machine lane** (`refresh`) requires the PR author's
-  `github_id` (`PullRequestInfo.author_id`, §3) to appear in `owners[]` of
+  numeric forge id (`PullRequestInfo.author_id`, §3) to appear in `owners[]` of
   *every* touched package root, read from the **base** ref only (never the
   PR head — the same `governance-gate` trust boundary
   `cli/classify_pr.py` already documents) — pass -> `success`; fail ->
@@ -1064,6 +1038,20 @@ form, never digested itself):**
   (`owners[]`, `desc`, `tags[*]`, `tags[*].yanked`) use their own dataclass's
   declared field order the same way — see `validate_entry.py`'s
   `_*_to_dict` helpers for the exact per-type key list.
+- `owners[]` carries **four** keys per entry, in this order: `login`, `id`,
+  `github`, `github_id` (`adr_forge_neutral_owners.md` D1/D2). `login`/`id`
+  are canonical and forge-neutral — `login` is a forge **username**, never a
+  display name, because `ForgePort.request_reviewers` hands it straight to
+  the forge (GitLab's `name` is a different field and resolves to nobody);
+  `id` is the numeric forge user id and is the ownership key G-19 matches
+  on. `github`/`github_id` are the pre-0.5.0 spelling, emitted **derived**
+  from the canonical pair — `model.Owner` cannot express them separately.
+  The read side takes `login`/`id` when present and falls back to
+  `github`/`github_id`, so every root published before 0.5.0 parses
+  unchanged, and refuses a root carrying both spellings in disagreement:
+  that would show one identity to a human reviewer and hand another to the
+  auto-merge gate. Dropping the legacy pair is a breaking change gated on
+  `format_version`, not a later quiet cleanup.
 - `desc: None` serializes as the JSON literal `null` (the key itself is
   **never** omitted — this is the one field whose absence-vs-null semantics
   differ from `upstream`/`superseded_by` above).
@@ -1081,9 +1069,9 @@ form, never digested itself):**
   correctly but isn't already in this exact canonical form (different key
   order, different indent, minified, missing/extra trailing newline, ...)
   is rejected — `cli/validate.py`'s "committed bytes are not the canonical
-  root serialization" failure. A publisher's own tooling (`cli/announce.py`,
-  or a third-party port of this spec) must emit exactly this form, not
-  merely schema-equivalent JSON.
+  root serialization" failure. A publisher's own tooling (`ocx package
+  announce`, or a third-party port of this spec) must emit exactly this form,
+  not merely schema-equivalent JSON.
 
 **`p/<namespace>/<package>/o/sha256/<hex>.json` (the content-addressed CAS
 object):**
@@ -1167,14 +1155,14 @@ file fails there).
 
 `cli/_wiring.py` — the composition root, the only module that constructs
 adapters — loads the policy at wiring time, before the subcommand does any
-work, and passes the resulting `frozenset[str]` into `announce.run`,
-`reconcile.run`, `validate.run` and `seed_import.run` as a keyword-only
+work, and passes the resulting `frozenset[str]` into `reconcile.run`,
+`validate.run` and `seed_import.run` as a keyword-only
 `allowed_hosts`. `render`/`classify-pr`/`governance-check` never resolve a
 `repository` and deliberately need no policy file at all (the same
 per-subcommand independence that already governs env-var requirements there).
 Source of the bytes: the local checkout via `FilePort` for
-`validate`/`reconcile`/`seed-import`; the index repo at `main` via
-`ForgePort` for `announce`, whose publisher runs outside any checkout.
+`validate`/`reconcile`/`seed-import`; the base ref via `ForgePort` for the
+privileged subcommands, which never check the repository out.
 
 Two failures are raised there, both loud and both early:
 

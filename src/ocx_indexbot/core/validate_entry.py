@@ -521,11 +521,45 @@ def check_no_dangling_references(root: PackageRoot, cas_digests: frozenset[str])
 
 
 def _owner_to_dict(owner: Owner) -> dict[str, Any]:
-    return {"github": owner.github, "github_id": owner.github_id}
+    """Both spellings, with the pre-0.5.0 pair DERIVED from the canonical one
+    (`adr_forge_neutral_owners.md` D2).
+
+    `github`/`github_id` are not independently settable — `model.Owner` does
+    not carry them — so a root this bot writes cannot express two identities
+    for one owner. The read side refuses the hand-authored case
+    (`_owner_from_dict`). Dropping the legacy pair is a breaking change gated
+    on `format_version`, not something a later release does quietly.
+    """
+    return {
+        "login": owner.login,
+        "id": owner.id,
+        "github": owner.login,
+        "github_id": owner.id,
+    }
 
 
 def _owner_from_dict(data: dict[str, Any]) -> Owner:
-    return Owner(github=data["github"], github_id=data["github_id"])
+    """`login`/`id` win; the pre-0.5.0 `github`/`github_id` are the fallback.
+
+    A root carrying only the legacy pair parses unchanged, which is what makes
+    this migration a non-event for an index published before 0.5.0. A root
+    carrying both is accepted only when they agree: the alternative is a root
+    that shows one identity to a human reader and hands a different one to the
+    G-19 auto-merge gate, which is a privilege-relevant divergence, not a
+    formatting nit.
+    """
+    login = data["login"] if "login" in data else data["github"]
+    owner_id = data["id"] if "id" in data else data["github_id"]
+    legacy_login = data.get("github", login)
+    legacy_id = data.get("github_id", owner_id)
+    if legacy_login != login or legacy_id != owner_id:
+        raise ValidationError(
+            f"owners[] entry carries both spellings and they disagree: "
+            f"login={login!r}/id={owner_id!r} vs "
+            f"github={legacy_login!r}/github_id={legacy_id!r}. "
+            f"The canonical pair is login/id; github/github_id is derived from it."
+        )
+    return Owner(login=login, id=owner_id)
 
 
 def _upstream_to_dict(upstream: Upstream) -> dict[str, Any]:

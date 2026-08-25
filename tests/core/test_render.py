@@ -25,7 +25,7 @@ def _digest(letter: str) -> str:
 
 
 def _owner() -> Owner:
-    return Owner(github="alice", github_id=1)
+    return Owner(login="alice", id=1)
 
 
 _DEFAULT_PLATFORM = {"architecture": "amd64", "os": "linux"}
@@ -83,7 +83,10 @@ def _root_raw(root: PackageRoot) -> bytes:
     payload: dict[str, object] = {
         "name": root.name,
         "repository": root.repository,
-        "owners": [{"github": o.github, "github_id": o.github_id} for o in root.owners],
+        "owners": [
+            {"login": o.login, "id": o.id, "github": o.login, "github_id": o.id}
+            for o in root.owners
+        ],
         "status": root.status,
         "deprecated_message": root.deprecated_message,
         "created": root.created,

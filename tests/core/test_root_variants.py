@@ -27,7 +27,7 @@ from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.model import Owner, PackageRoot, TagEntry
 from tests.fakes import FixedClock
 
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 
@@ -152,7 +152,7 @@ def test_parsing_a_root_that_predates_the_field_yields_an_empty_tuple() -> None:
             {
                 "name": "ocx.sh/astral-sh/python-build-standalone",
                 "repository": "oci://ghcr.io/ocx-contrib/python-build-standalone",
-                "owners": [{"github": "alice", "github_id": 1}],
+                "owners": [{"login": "alice", "id": 1, "github": "alice", "github_id": 1}],
                 "status": "active",
                 "deprecated_message": None,
                 "created": "2026-07-29",

@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from ocx_indexbot.adapters.local_files import LocalFiles
-from ocx_indexbot.cli import announce, governance_check
+from ocx_indexbot.cli import governance_check
 from ocx_indexbot.cli import validate as validate_cli
 from ocx_indexbot.core.diff import classify_change, diff
 from ocx_indexbot.core.observe import Observation
@@ -49,7 +49,7 @@ _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 _TS = "2026-07-17T00:00:00Z"
 _ROOT_PATH = "p/kitware/cmake.json"
-_MAINTAINERS = b"maintainers:\n  - github: carol\n    github_id: 99\n"
+_MAINTAINERS = b"maintainers:\n  - login: carol\n    id: 99\n"
 _PKG = PackageId(segments=("kitware", "cmake"))
 
 
@@ -68,7 +68,7 @@ def _root(
     *,
     name: str = "ocx.sh/kitware/cmake",
     repository: str = "oci://ghcr.io/ocx-contrib/cmake",
-    owners: tuple[Owner, ...] = (Owner(github="alice", github_id=1),),
+    owners: tuple[Owner, ...] = (Owner(login="alice", id=1),),
     tags: dict[str, TagEntry] | None = None,
 ) -> PackageRoot:
     return PackageRoot(
@@ -98,7 +98,7 @@ class _RaisingRegistry:
     """A `RegistryPort` whose every method fails the test if reached — proves
     `check_repository_allowlisted` runs BEFORE any `RegistryPort` call (ADR-4
     BD-1 SSRF ordering). Structurally conforms to the port (checked by the
-    typed `announce.run` call below)."""
+    typed `validate.run` call below)."""
 
     def list_tags(self, repository: str) -> list[str]:
         raise AssertionError("registry reached before host-allowlist check (SSRF ordering broken)")
@@ -117,35 +117,34 @@ class _RaisingRegistry:
 
 
 def test_threat_ssrf_allowlist_before_registry() -> None:
-    """`announce.run` on a committed root whose `repository` host is not
-    allowlisted raises `ValidationError` from `check_repository_allowlisted`
-    BEFORE any registry call — the raising registry double is never invoked."""
+    """`validate` on a committed root whose `repository` host is not
+    allowlisted fails from `check_repository_allowlisted` BEFORE any registry
+    call — the raising registry double is never invoked.
+
+    The vehicle used to be `announce`, deleted in 0.5.0
+    (`adr_forge_neutral_owners.md` D3). The property is the subcommand-side
+    one, not that command's: every entry point that resolves a `repository`
+    out of PR-authored bytes must clear the host allowlist before it can turn
+    that string into an outbound request. `validate` is the one such entry
+    point a fork PR reaches at all.
+    """
     hostile_root = _root(repository="oci://registry.evil.example/ocx-contrib/widget")
-    index_github = FakeGitHub(
-        files={("p/ns/pkg.json", "main"): serialize_package_root(hostile_root)}
-    )
+    files = InMemoryFiles(files={"p/ns/pkg.json": serialize_package_root(hostile_root)})
     args = argparse.Namespace(
-        package="ns/pkg",
-        tags="1.0.0",
-        tags_file=None,
-        out="dist",
-        fork=None,
-        index_repo="ocx-sh/index",
-        base_ref="main",
-        yank=[],
-        unyank=[],
-        yank_reason="yanked via announce",
+        paths=["p/ns/pkg.json"],
+        offline=False,
+        allow_reserved_namespace=False,
+        base_dir=None,
     )
-    with pytest.raises(ValidationError):
-        announce.run(
-            args,
-            registry=_RaisingRegistry(),
-            index_github=index_github,
-            fork_github=None,
-            files=InMemoryFiles(),
-            clock=FixedClock(),
-            policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
-        )
+
+    result = validate_cli.run(
+        args,
+        files=files,
+        registry=_RaisingRegistry(),
+        policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
+    )
+
+    assert result == ExitCode.VALIDATION_FAILURE
 
 
 # --- pull_request_target never checks out PR head --------------------------
@@ -159,8 +158,8 @@ def test_threat_self_authorizing_owners_edit(_github_output: Path) -> None:
     self-authorize: G-19 reads the BASE root's `owners[]`, and the head edit
     is itself a G-05 change — so the PR is human-lane (`pending`), reviewers
     assigned."""
-    legit = Owner(github="alice", github_id=1)
-    attacker = Owner(github="mallory", github_id=999)
+    legit = Owner(login="alice", id=1)
+    attacker = Owner(login="mallory", id=999)
     base = _root(owners=(legit,), tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
     head = _root(
         owners=(legit, attacker), tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)}
@@ -339,7 +338,7 @@ _RESERVED_CAS_PATH = f"p/ocx/cli/o/sha256/{_RESERVED_DIGEST.removeprefix('sha256
 def _reserved_root(
     *,
     repository: str = _RESERVED_REPOSITORY,
-    owners: tuple[Owner, ...] = (Owner(github="alice", github_id=1),),
+    owners: tuple[Owner, ...] = (Owner(login="alice", id=1),),
     tags: dict[str, TagEntry] | None = None,
 ) -> PackageRoot:
     return PackageRoot(
@@ -397,7 +396,5 @@ def test_threat_fork_pr_may_refresh_but_never_re_aim_a_reserved_root() -> None:
     assert _fork_pr_validate(_reserved_root(), None) == ExitCode.VALIDATION_FAILURE
     repointed = _reserved_root(repository="oci://ghcr.io/mallory/cli")
     assert _fork_pr_validate(repointed, base) == ExitCode.VALIDATION_FAILURE
-    self_owned = _reserved_root(
-        owners=(Owner(github="alice", github_id=1), Owner(github="mallory", github_id=999))
-    )
+    self_owned = _reserved_root(owners=(Owner(login="alice", id=1), Owner(login="mallory", id=999)))
     assert _fork_pr_validate(self_owned, base) == ExitCode.VALIDATION_FAILURE

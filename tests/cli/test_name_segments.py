@@ -27,7 +27,7 @@ from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import Owner, PackageRoot
 from tests.fakes import InMemoryFiles, make_policy
 
-_OWNER = Owner(github="alice", github_id=1)
+_OWNER = Owner(login="alice", id=1)
 
 
 def _root(name: str) -> PackageRoot:

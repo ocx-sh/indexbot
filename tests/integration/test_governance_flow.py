@@ -48,9 +48,9 @@ _HEAD_SHA = "head-sha"
 _ROOT_PATH = "p/kitware/cmake.json"
 _ROOT_SEGMENTS = ("contents", "p", "kitware", "cmake.json")
 _MAINTAINERS_SEGMENTS = ("contents", ".github", "maintainers.yml")
-_MAINTAINERS_YML = b"maintainers:\n  - github: carol\n    github_id: 99\n"
-_OWNER = Owner(github="alice", github_id=1)
-_OTHER_OWNER = Owner(github="bob", github_id=2)
+_MAINTAINERS_YML = b"maintainers:\n  - login: carol\n    id: 99\n"
+_OWNER = Owner(login="alice", id=1)
+_OTHER_OWNER = Owner(login="bob", id=2)
 
 
 def _root(*, owners: tuple[Owner, ...] = (_OWNER,), tags: dict[str, TagEntry]) -> PackageRoot:
@@ -240,8 +240,8 @@ def test_owner_refresh_arms_auto_merge_with_success_status(
         monkeypatch,
         fake_forge,
         tmp_path,
-        login=_OWNER.github,
-        uid=_OWNER.github_id,
+        login=_OWNER.login,
+        uid=_OWNER.id,
         base_root=before,
         head_root=after,
     )
@@ -280,8 +280,8 @@ def test_new_package_is_pending_human_lane(
         monkeypatch,
         fake_forge,
         tmp_path,
-        login=_OWNER.github,
-        uid=_OWNER.github_id,
+        login=_OWNER.login,
+        uid=_OWNER.id,
         base_root=None,
         head_root=head,
     )
@@ -306,8 +306,8 @@ def test_a_maintainers_approval_releases_the_human_lane(
         monkeypatch,
         fake_forge,
         tmp_path,
-        login=_OWNER.github,
-        uid=_OWNER.github_id,
+        login=_OWNER.login,
+        uid=_OWNER.id,
         base_root=None,
         head_root=_root(tags={}),
         approvals=[_approval("carol", 99, _HEAD_SHA)],
@@ -326,8 +326,8 @@ def test_a_stale_approval_does_not_release_the_human_lane(
         monkeypatch,
         fake_forge,
         tmp_path,
-        login=_OWNER.github,
-        uid=_OWNER.github_id,
+        login=_OWNER.login,
+        uid=_OWNER.id,
         base_root=None,
         head_root=_root(tags={}),
         approvals=[_approval("carol", 99, "older-push")],
@@ -353,8 +353,8 @@ def test_a_recycled_maintainer_login_does_not_release_the_human_lane(
         monkeypatch,
         fake_forge,
         tmp_path,
-        login=_OWNER.github,
-        uid=_OWNER.github_id,
+        login=_OWNER.login,
+        uid=_OWNER.id,
         base_root=None,
         head_root=_root(tags={}),
         approvals=[_approval("carol", 4242, _HEAD_SHA)],
@@ -373,11 +373,11 @@ def test_an_approval_from_outside_the_maintainer_list_is_not_a_review(
         monkeypatch,
         fake_forge,
         tmp_path,
-        login=_OWNER.github,
-        uid=_OWNER.github_id,
+        login=_OWNER.login,
+        uid=_OWNER.id,
         base_root=None,
         head_root=_root(tags={}),
-        approvals=[_approval(_OWNER.github, _OWNER.github_id, _HEAD_SHA)],
+        approvals=[_approval(_OWNER.login, _OWNER.id, _HEAD_SHA)],
     )
 
     assert "pending" in output

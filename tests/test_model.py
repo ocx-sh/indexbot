@@ -19,15 +19,15 @@ from ocx_indexbot.model import (
 
 
 def test_owner_fields() -> None:
-    owner = Owner(github="alice", github_id=123456)
-    assert owner.github == "alice"
-    assert owner.github_id == 123456
+    owner = Owner(login="alice", id=123456)
+    assert owner.login == "alice"
+    assert owner.id == 123456
 
 
 def test_owner_is_frozen() -> None:
-    owner = Owner(github="alice", github_id=1)
+    owner = Owner(login="alice", id=1)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        owner.github = "bob"  # type: ignore[misc]
+        owner.login = "bob"  # type: ignore[misc]
 
 
 def test_upstream_defaults() -> None:
@@ -91,7 +91,7 @@ def test_package_id_str_and_fields() -> None:
 
 
 def test_package_root_example_from_adr_1() -> None:
-    owner = Owner(github="alice", github_id=123456)
+    owner = Owner(login="alice", id=123456)
     upstream = Upstream(org="Kitware", repository_url="https://github.com/Kitware/CMake")
     desc = Desc(
         digest="sha256:9f2c",

@@ -3,6 +3,8 @@
   "repository": "oci://ghcr.io/ocx-contrib/shfmt",
   "owners": [
     {
+      "login": "alice",
+      "id": 1,
       "github": "alice",
       "github_id": 1
     }

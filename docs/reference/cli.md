@@ -1,10 +1,17 @@
 # CLI reference
 
-One console script, `indexbot`, with 15 subcommands: `announce`, `reconcile`,
+One console script, `indexbot`, with 14 subcommands: `reconcile`,
 `validate`, `validate-pr`, `ci`, `render`, `seed-import`, `classify-pr`,
 `governance-check`, `governance-gate`, `governance-poll`, `label-failed-run`,
 `stale`, `workflows-check`, `schema`. `--version` prints the installed
 distribution version.
+
+None of them publishes. Announcing a tag — building a package root and its
+CAS objects from registry truth and opening the fork pull request — is
+[`ocx package announce`](https://github.com/ocx-sh/ocx)'s job, and 0.5.0
+removed this package's second implementation of it
+(`adr_forge_neutral_owners.md` D3). indexbot owns the index side: validate,
+classify, gate, label, reconcile, render, generate CI.
 
 Every subcommand builds its own ports at call time, so each one's environment
 requirements are independent: a job running `validate` needs no token, and
@@ -27,68 +34,6 @@ stdout carries a subcommand's result; diagnostics, progress and errors go to
 stderr. A failure also lands a `## <subcommand> failed` block on
 `$GITHUB_STEP_SUMMARY` when one is set — a publisher-visible failure must
 never be a bare stderr line on a page nobody reads.
-
-## `announce`
-
-Record an owner-curated tag list, verified against the physical registry.
-
-```bash
-indexbot announce --index-repo REPO --package <ns>/<pkg>
-                  (--tags a,b | --tags-file FILE) (--out DIR | --fork REPO)
-                  [--forge github|gitlab] [--yank TAG]... [--unyank TAG]... [--yank-reason TEXT]
-```
-
-| Flag | Meaning |
-|---|---|
-| `--package` | `<namespace>/<package>` to announce |
-| `--tags` / `--tags-file` | The **entire** curated tag list, comma-separated or from a file. Exactly one. Not additive — see below |
-| `--out` | Write the root and new CAS objects under this directory. Exactly one of this or `--fork` |
-| `--fork` | The fork to commit to and open a pull request from |
-| `--index-repo` | **Required.** The index repository to announce into — `<owner>/<repo>` on GitHub, a namespace path or numeric project id on GitLab |
-| `--forge` | Which forge hosts `--index-repo` and `--fork`. Defaults to the CI runner's own signal (`$GITLAB_CI`), then to `github` |
-| `--yank` / `--unyank` | Mark or clear a tag's yank marker (repeatable) |
-| `--yank-reason` | Reason recorded for every `--yank` in this run |
-
-`--fork` needs a write-scoped token — `GITHUB_TOKEN` or `GITLAB_TOKEN`,
-whichever forge. `--out` needs none: it reads the target index's committed
-policy anonymously and writes locally, which is what makes a dry run possible
-from anywhere.
-
-`--index-repo` has no default. It used to be `ocx-sh/index`, which meant a
-publisher whose index is somewhere else announced into the public one by
-forgetting a flag — the same argument that removed the `ocx.sh` prefix default
-from [deployment policy](policy.md).
-
-The bot never enumerates a registry. It records the tags it is given, and each
-one is verified: the tag must resolve, and the bytes stored at
-`o/sha256/<hex>.json` must hash to the digest in their own path.
-
-!!! warning "`--tags` replaces the curated set — it does not add to it"
-
-    Every run writes the root's `tags` map from the list this run was given.
-    A tag the root already carries and this run does not name is **dropped**,
-    which is how a tag removed upstream leaves the index at all.
-
-    So the shape a pipeline reaches for first — one `announce` per tag push,
-    naming only the tag that was just pushed — publishes that tag and deletes
-    every other one the package had:
-
-    ```bash
-    # WRONG: the root now carries 3.31.1 and nothing else.
-    indexbot announce --package kitware/cmake --tags "$CI_COMMIT_TAG" --fork …
-    ```
-
-    Pass every tag that should survive, every time. Where that list lives is
-    the publisher's to decide — `--tags-file` exists so it can be a committed
-    file rather than a shell variable:
-
-    ```bash
-    indexbot announce --package kitware/cmake --tags-file tags.txt --fork …
-    ```
-
-    Yanking is the other direction and is not this: `--yank` marks a tag
-    without removing it, and the marker survives a re-announce that still
-    names the tag (G-05).
 
 ## `validate`
 
@@ -501,7 +446,7 @@ GitLab column; anything else uses GitHub.
 
 | Variable | Read by |
 |---|---|
-| `GITHUB_TOKEN` | `announce --fork`, and the seven above |
+| `GITHUB_TOKEN` | the seven above |
 | `GITHUB_REPOSITORY` | the seven above, as `<owner>/<repo>` — plus `validate-pr`, which compares it against the pull request's head-repository provenance rather than resolving a project through it |
 | `GITHUB_WORKSPACE` | every filesystem-reading subcommand, as the checkout root (defaults to the working directory) |
 | `GITHUB_OUTPUT` | `classify-pr`, `governance-check`, `governance-gate` (unless `--arm-only`, which publishes nothing) |
@@ -521,7 +466,7 @@ On GitLab CI:
 |---|---|
 | `GITLAB_CI` | the forge selector — set by every GitLab job |
 | `CI_PROJECT_ID` | the same seven subcommands as the GitHub column's `GITHUB_REPOSITORY` — `classify-pr`, `governance-check`, `governance-gate`, `governance-poll`, `label-failed-run`, `stale`, `reconcile` |
-| `GITLAB_TOKEN` | the same seven, plus `announce --fork`. **Not** `$CI_JOB_TOKEN`, which cannot write labels, notes or merge requests — set a project or group access token as a masked CI variable |
+| `GITLAB_TOKEN` | the same seven. **Not** `$CI_JOB_TOKEN`, which cannot write labels, notes or merge requests — set a project or group access token as a masked CI variable |
 | `CI_API_V4_URL` | the API root; defaults to `https://gitlab.com/api/v4`, and every self-hosted runner sets it |
 | `INDEXBOT_OUTPUT` | `classify-pr`, `governance-check`, `governance-gate` (unless `--arm-only`) — the path the job also declares as its `artifacts:reports:dotenv`. Names are upper-cased (`CLASSIFICATION`, `DISPOSITION`) because a dotenv report becomes a CI variable verbatim |
 | `CI_MERGE_REQUEST_DIFF_BASE_SHA` | `validate-pr`, as the base commit |
