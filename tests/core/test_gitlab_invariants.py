@@ -11,7 +11,12 @@ only through `check_gitlab`.
 
 from __future__ import annotations
 
-from ocx_indexbot.core.gitlab_invariants import check_gitlab, job_block, job_names
+from ocx_indexbot.core.gitlab_invariants import (
+    check_gitlab,
+    job_block,
+    job_names,
+    top_level_section,
+)
 
 _DIGEST = "a" * 64
 
@@ -386,3 +391,252 @@ pages:
     findings = check_gitlab({".gitlab-ci.yml": text})
 
     assert [f.rule for f in findings] == ["GL-03"]
+
+
+# --- GL-03 evasions found against hand-written pipelines --------------------
+
+
+def test_gl03_flags_a_token_gated_only_by_a_top_level_workflow_rules() -> None:
+    """`workflow: rules:` gates the whole pipeline on `merge_request_event`
+    with no `rules:` on the job itself. `_MR_EVENT_RE` used to be searched
+    only inside a job's own `rules:` section, so this shape was invisible."""
+    text = f"""\
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+leak:
+  image: alpine@sha256:{_DIGEST}
+  script:
+    - curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://example.com
+"""
+    assert _rules(text) == ["GL-03"]
+
+
+def test_gl03_a_top_level_workflow_rules_not_gating_merge_requests_is_not_a_trigger() -> None:
+    text = f"""\
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+leak:
+  image: alpine@sha256:{_DIGEST}
+  script:
+    - curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://example.com
+"""
+    assert _rules(text) == []
+
+
+def test_gl03_flags_a_token_on_a_job_gated_by_legacy_only() -> None:
+    """`only:` is GitLab's pre-`rules:` trigger syntax — GL-03 used to read
+    `rules:` only."""
+    text = f"""\
+leak:
+  image: alpine@sha256:{_DIGEST}
+  only:
+    - merge_requests
+  script:
+    - curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://example.com
+"""
+    assert _rules(text) == ["GL-03"]
+
+
+def test_gl03_flags_a_token_on_a_job_gated_by_inline_only() -> None:
+    text = f"""\
+leak:
+  image: alpine@sha256:{_DIGEST}
+  only: [merge_requests]
+  script:
+    - curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://example.com
+"""
+    assert _rules(text) == ["GL-03"]
+
+
+def test_gl03_ignores_only_on_a_ref_other_than_merge_requests() -> None:
+    text = f"""\
+leak:
+  image: alpine@sha256:{_DIGEST}
+  only:
+    - master
+  script:
+    - curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://example.com
+"""
+    assert _rules(text) == []
+
+
+def test_gl03_flags_a_token_referenced_in_after_script() -> None:
+    """`after_script:` was missing from `_CREDENTIAL_SECTION_KEYS`."""
+    text = f"""\
+default:
+  image: python@sha256:{_DIGEST}
+
+indexbot-leaky:
+  after_script:
+    - curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://example.com
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - echo hi
+"""
+    assert _rules(text) == ["GL-03"]
+
+
+def test_gl03_flags_a_token_in_the_top_level_variables_block() -> None:
+    """A top-level `variables:` block is in scope for every job — `variables`
+    used to be in `_RESERVED_TOP_LEVEL` and nothing ever scanned it."""
+    text = f"""\
+variables:
+  HEADER: $DEPLOY_PASSWORD
+
+leak:
+  image: alpine@sha256:{_DIGEST}
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - echo hi
+"""
+    findings = check_gitlab({"x.yml": text})
+
+    assert [f.rule for f in findings] == ["GL-03"]
+    assert "DEPLOY_PASSWORD" in findings[0].message
+    assert "leak" in findings[0].message
+
+
+def test_gl03_ignores_top_level_variables_when_no_job_runs_on_merge_request_event() -> None:
+    text = f"""\
+variables:
+  HEADER: $DEPLOY_PASSWORD
+
+build:
+  image: alpine@sha256:{_DIGEST}
+  script:
+    - echo hi
+"""
+    assert _rules(text) == []
+
+
+def test_gl03_sees_a_job_whose_header_carries_a_yaml_anchor() -> None:
+    """`deploy: &deploy` did not match `_JOB_RE` at all — the job was
+    invisible to `job_names`, not merely under-checked."""
+    text = f"""\
+deploy: &deploy
+  image: alpine@sha256:{_DIGEST}
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://example.com
+"""
+    assert job_names(text) == ["deploy"]
+    assert _rules(text) == ["GL-03"]
+
+
+def test_gl03_flags_glpat_shaped_variable_name() -> None:
+    leaky = _CLEAN.replace(
+        "    - indexbot validate-pr",
+        '    - curl -H "PRIVATE-TOKEN: $GLPAT" https://example.com',
+    )
+    assert _rules(leaky) == ["GL-03"]
+
+
+def test_gl03_flags_a_deploy_key_shaped_variable_name() -> None:
+    leaky = _CLEAN.replace(
+        "    - indexbot validate-pr",
+        '    - ssh-add <(echo "$DEPLOY_KEY")',
+    )
+    assert _rules(leaky) == ["GL-03"]
+
+
+def test_gl03_flags_an_npm_auth_shaped_variable_name() -> None:
+    leaky = _CLEAN.replace(
+        "    - indexbot validate-pr",
+        "    - npm config set //registry.npmjs.org/:_authToken=$NPM_AUTH",
+    )
+    assert _rules(leaky) == ["GL-03"]
+
+
+def test_gl03_still_ignores_ci_project_path_after_widening_for_pat() -> None:
+    """The one real collision the widened `PAT` term would otherwise catch:
+    `$CI_PROJECT_PATH` is a GitLab predefined variable, not a credential."""
+    text = _CLEAN.replace("    - indexbot validate-pr", "    - echo $CI_PROJECT_PATH")
+    assert _rules(text) == []
+
+
+def test_gl03_ci_commit_author_is_exempt() -> None:
+    """`$CI_COMMIT_AUTHOR` is a name/email string GitLab fills in — the one
+    builtin the widened `AUTH` term newly reaches."""
+    text = _CLEAN.replace(
+        "    - indexbot validate-pr", '    - echo "committed by $CI_COMMIT_AUTHOR"'
+    )
+    assert _rules(text) == []
+
+
+def test_gl03_does_not_see_a_rules_block_reached_only_through_reference() -> None:
+    """Documented blind spot, the same class as `extends:`: `!reference`
+    pulls another key's value in verbatim, and following it needs the same
+    graph resolution this line-scan deliberately does not build."""
+    text = """\
+.mr:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+indexbot-leaky:
+  rules: !reference [.mr, rules]
+  script:
+    - curl -H "PRIVATE-TOKEN: $INDEXBOT_TOKEN" https://example.com
+"""
+    assert _rules(text) == []
+
+
+def test_top_level_section_is_not_ended_by_a_column_zero_comment() -> None:
+    text = "variables:\n  X: $A\n# a separator\nleak:\n  script:\n    - echo hi\n"
+    section = top_level_section(text, "variables")
+    assert "X: $A" in section
+    assert "leak" not in section
+
+
+# --- GL-01 false positives ---------------------------------------------------
+
+
+def test_gl01_allows_a_double_quoted_pinned_image() -> None:
+    text = f'default:\n  image: "python@sha256:{_DIGEST}"\n'
+    assert check_gitlab({"x.yml": text}) == ()
+
+
+def test_gl01_allows_a_single_quoted_pinned_image() -> None:
+    text = f"default:\n  image: 'python@sha256:{_DIGEST}'\n"
+    assert check_gitlab({"x.yml": text}) == ()
+
+
+def test_gl01_still_flags_a_quoted_floating_tag() -> None:
+    text = 'default:\n  image: "python:3.13"\n'
+    assert _rules(text) == ["GL-01"]
+
+
+def test_gl01_ignores_an_image_line_inside_a_block_scalar_script() -> None:
+    """A shell body that happens to emit a line shaped exactly like a YAML
+    `image:` key — a Dockerfile heredoc, a rendered manifest, a log line —
+    must not be read as a second, unpinned `image:` that nothing runs."""
+    text = f"""\
+default:
+  image: python@sha256:{_DIGEST}
+
+leak:
+  script: |
+    image: python:3.13
+"""
+    assert check_gitlab({"x.yml": text}) == ()
+
+
+def test_gl01_resumes_scanning_after_a_block_scalar_ends() -> None:
+    """The dedent that ends the block scalar is a real YAML key again — a
+    genuine `image:` override right after one must still be read."""
+    text = f"""\
+default:
+  image: python@sha256:{_DIGEST}
+
+leak:
+  script: |
+    image: python:3.13
+  image: oven/bun:1-alpine
+"""
+    assert _rules(text) == ["GL-01"]

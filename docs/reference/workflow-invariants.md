@@ -3,9 +3,16 @@
 `indexbot workflows-check` audits an index repository's hand-written CI tree
 for the structural properties that make the announce lane safe — GitHub's
 `.github/workflows/`, or GitLab's root `.gitlab-ci.yml` plus whatever it
-includes. Those properties belong to the *repository's YAML*, not to this
-package's code, so they cannot be asserted by a unit test — they are checked
-against the real tree, in the repository's own CI.
+`include:`s. On GitLab that now means what it says: every `local:` include is
+loaded and audited too, recursively, wherever in the checkout it points —
+not only files that happen to sit under `--dir`. An `include:` form this
+loader cannot follow (`remote:`, `project:`, `template:`) or a `local:` target
+that does not resolve to a real file fails the run outright, on the same
+principle as an empty directory below — a clean audit over a pipeline this
+loader never fully read would be worse than no audit at all. Those properties
+belong to the *repository's YAML*, not to this package's code, so they cannot
+be asserted by a unit test — they are checked against the real tree, in the
+repository's own CI.
 
 ```bash
 indexbot workflows-check --forge github --dir .github/workflows --owner <org>
@@ -48,8 +55,8 @@ no other gate.
 
 | Rule | Invariant | Why |
 |---|---|---|
-| **GL-01** | Every `image:` is pinned to a digest — `<host>/<path>@sha256:<64-hex>` | A GitLab job's `image:` is the exact analogue of a GitHub `uses:` ref (WF-02): the code running in a credentialed job must not change without a diff. A mutable tag (`oven/bun:1-alpine`, `python:3.13`, or no tag at all) means it does. Checked both as a scalar (`image: foo@sha256:…`) and as a mapping (`image:` / `  name: foo@sha256:…`), and file-wide — a per-job override is checked the same as `default.image`. |
-| **GL-03** | No job whose `rules:` reach `$CI_PIPELINE_SOURCE == "merge_request_event"` references a token-shaped variable in its `script:`, `before_script:` or `variables:` | A fork merge-request pipeline runs in the fork — the same trust boundary GitHub's plain `pull_request` gives — but only while the parent's credentials stay *protected* CI/CD variables. An operator who leaves `INDEXBOT_TOKEN` unprotected hands it to that fork pipeline, and no diff shows it: the exposure is a project setting, not a line of YAML. What IS visible in the YAML is the job shape that would matter if the variable were unprotected, so that is what is checked. `$CI_JOB_TOKEN` is exempt — GitLab's own per-job token, scoped to the project the pipeline runs in, which for a fork MR is the fork itself. |
+| **GL-01** | Every `image:` is pinned to a digest — `<host>/<path>@sha256:<64-hex>` | A GitLab job's `image:` is the exact analogue of a GitHub `uses:` ref (WF-02): the code running in a credentialed job must not change without a diff. A mutable tag (`oven/bun:1-alpine`, `python:3.13`, or no tag at all) means it does. Checked both as a scalar (`image: foo@sha256:…`) and as a mapping (`image:` / `  name: foo@sha256:…`), and file-wide — a per-job override is checked the same as `default.image`. A symmetric surrounding quote (`image: "foo@sha256:…"`) is stripped before the digest check, and a line that merely *looks* like `image: …` inside a `script:`/`before_script:`/`after_script:` block scalar body is skipped — neither changes what the pipeline actually runs. |
+| **GL-03** | No job that runs on `merge_request_event` references a token-shaped variable in its `script:`, `before_script:`, `after_script:` or `variables:`, or inherits one from the file's top-level `variables:` | A fork merge-request pipeline runs in the fork — the same trust boundary GitHub's plain `pull_request` gives — but only while the parent's credentials stay *protected* CI/CD variables. An operator who leaves `INDEXBOT_TOKEN` unprotected hands it to that fork pipeline, and no diff shows it: the exposure is a project setting, not a line of YAML. What IS visible in the YAML is the job shape that would matter if the variable were unprotected, so that is what is checked. A job "runs on `merge_request_event`" by any of three shapes: its own `rules:`, its legacy `only:` (`only: [merge_requests]` or the block form), or a pipeline-wide `workflow: rules:` gate that applies to every job in the file regardless of what the job itself declares. `$CI_JOB_TOKEN` and `$CI_COMMIT_AUTHOR` are exempt — GitLab's own per-job token and its own commit-author string, neither an operator secret. |
 
 **GL-02, GL-04 and GL-05 do not exist as `workflows-check` rules** — they are
 properties of the *generated* `.gitlab-ci/indexbot.yml` (upstream-guarded
@@ -59,9 +66,23 @@ static audit re-deriving them here would either duplicate that gate or drift
 from it; the numbering skips them rather than filling the gap with a rule that
 checks nothing a hand-edit could actually break.
 
+**The credential-name match is deliberately broad.** Beyond `TOKEN`, `SECRET`,
+`PASSWORD` and `CREDENTIAL`, GL-03 also flags `KEY`, `AUTH`, `PRIVATE`, and
+`PAT` (except where followed by `H`, to spare `$CI_PROJECT_PATH` and
+`$CI_PROJECT_PATH_SLUG` — real GitLab predefined variables, not credentials).
+Each of the first three will also flag an innocuous name that happens to
+contain it; that is accepted, on the same principle documented in
+`gitlab_invariants.py` for the `pages:` job name — the safe error here is the
+one that examines too much, because a false finding costs a reviewer one
+glance and a false clean costs nothing at all until a fork pipeline reads a
+parent's token.
+
 GL-03 is read off each job's own block, not through `extends:`: a job whose
 `merge_request_event` guard lives entirely on an extended template is not
-caught. The generated templates never split `rules:` out that way; a
+caught. The identical gap exists for `rules: !reference [.mr, rules]` —
+GitLab's custom tag for pulling another key's value in verbatim — for the same
+reason: following either needs graph resolution this line-scan deliberately
+does not build. The generated templates never split `rules:` out either way; a
 hand-written pipeline that does should keep the credential and the guard on
 the job it actually appears in.
 
@@ -230,7 +251,26 @@ where noted:
 
 Same discipline: line scans keyed on GitLab's zero-indent top-level job keys,
 standard library only. GL-01 and GL-03 are each read off one job's own block
-(`job_block`), never through `extends:` — see GL-03's entry above for the
-blind spot that leaves. A credential reaching a job indirectly (a `.gitlab-ci`
-variable inherited from a group/instance CI/CD setting, never written in this
-file at all) is invisible to a line scan the same way it is on GitHub.
+(`job_block`), never through `extends:` (or `!reference`) — see GL-03's entry
+above for the blind spot that leaves. A credential reaching a job indirectly
+(a `.gitlab-ci` variable inherited from a group/instance CI/CD setting, never
+written in this file at all) is invisible to a line scan the same way it is on
+GitHub.
+
+A job header may carry a trailing YAML anchor (`deploy: &deploy`) and/or a
+trailing comment; both are recognised, the same way a GitHub job header's
+trailing comment is (see the equivalent note under Assumptions (github)).
+
+**The `include:` loader.** Every form GitLab accepts — a bare scalar
+(`include: 'x.yml'`), a single mapping, or a list of mappings — is read, but
+only the `local:` key can be *followed*: `remote:`, `project:` and `template:`
+name something outside this checkout entirely, and rather than silently
+auditing a smaller tree than the pipeline actually has, the loader raises. The
+same is true of a `local:` value that does not resolve to a real file. A
+`local:` value's GitLab-optional leading `/` is stripped before the read (both
+spellings are project-root-relative — see GitLab's own docs), never treated as
+an OS-absolute path; a genuine `..`/absolute traversal attempt still fails,
+through the same `FilePort` path check every other read in this package uses.
+Included files are followed recursively — an included file may itself
+`include:` further ones — with cycle safety: a target already loaded is never
+re-queued, so two files including each other terminates instead of looping.
