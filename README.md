@@ -49,7 +49,7 @@ a reviewed pull request.
 | `stale` | Close abandoned pull requests, either forge, no third-party action |
 | `ci` | Render this index's pipeline files from its committed policy, or check them for drift |
 | `schema` | Print the shipped deployment-policy JSON Schema |
-| `workflows-check` | Assert the workflow security invariants over an index repo's `.github/workflows/` |
+| `workflows-check` | Assert the CI-tree security invariants over an index repo's hand-written workflows (GitHub) or pipeline (GitLab) |
 | `schema` | Print the JSON Schema for `.github/index-policy.json` |
 
 ## Development

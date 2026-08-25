@@ -1,13 +1,15 @@
 # Workflow invariants
 
-`indexbot workflows-check` audits an index repository's `.github/workflows/`
-tree for the structural properties that make the announce lane safe. Those
-properties belong to the *repository's YAML*, not to this package's code, so
-they cannot be asserted by a unit test — they are checked against the real
-tree, in the repository's own CI.
+`indexbot workflows-check` audits an index repository's hand-written CI tree
+for the structural properties that make the announce lane safe — GitHub's
+`.github/workflows/`, or GitLab's root `.gitlab-ci.yml` plus whatever it
+includes. Those properties belong to the *repository's YAML*, not to this
+package's code, so they cannot be asserted by a unit test — they are checked
+against the real tree, in the repository's own CI.
 
 ```bash
-indexbot workflows-check --dir .github/workflows --owner <org>
+indexbot workflows-check --forge github --dir .github/workflows --owner <org>
+indexbot workflows-check --forge gitlab --dir .gitlab-ci
 ```
 
 Exit `0` when every invariant holds, `1` when any does not; each finding is one
@@ -15,9 +17,10 @@ line on stderr naming the file and the rule. An empty directory is a failure,
 not a pass — a check that silently audits nothing is what a wrong `--dir` looks
 like.
 
-`--owner` enables WF-07 only. Omit it and that one rule is skipped.
+`--forge` defaults to `github`. `--owner` enables WF-07 only, and only on
+`github` — GitLab has no rule here that reads it (see below).
 
-## Rules
+## Rules (github)
 
 | Rule | Invariant | Why |
 |---|---|---|
@@ -29,6 +32,38 @@ like.
 | **WF-06** | A job holding `contents: write` under a privileged trigger sets `persist-credentials: false` on **every** checkout step, and hands no `${{ github.token }}` / `${{ secrets.* }}` to any `uses:` step | Two ways such a job leaks the token it was granted. A checkout taking the default `persist-credentials: true` writes it into `.git/config`, where every later step inherits it through plain `git` — dependency resolution and build backends included — with no `GITHUB_TOKEN` in sight to audit; the opt-out is read off each checkout's own `with:`, so a second checkout under a different `path:` cannot ride on the first one's hardening. Forwarding the credential into an action's inputs never touches `.git/config` at all and needs no checkout — it is the hazard the retired blanket `uses:` ban actually named. Other write scopes — `pull-requests`, `statuses`, `issues` — cannot move the base branch and are untouched. **This rule used to be stronger; see below.** |
 | **WF-07** | Every job a `schedule:` can reach is upstream-guarded, **by the job's own `if:`** | A fork inherits every cron and runs it off its own stale YAML. Satisfied by `if: github.repository_owner == '<owner>'`, by `if: github.event_name != 'schedule'`, or by `needs:` on a job that is guarded — inheritance is transitive, since a skipped dependency skips its dependents. Matched against the job-level `if:` expression, not searched for anywhere in the job: a *step*-level `if:` skips one step and leaves the job running with its token, and a guard deleted but kept as a comment is the most plausible way this rule ever goes quiet. |
 | **WF-08** | A job holding `contents: write` under `pull_request_target` runs no command that resolves the bot at job start | That job can move an unprotected base branch and squash-merge a pull request. `uvx ocx-indexbot` fetches whatever the index holds when the step starts — no version, no lockfile, no hash — so one malicious release executes with that token. Satisfied by a lockfile the command may not re-resolve (`--frozen`, `--locked`), by an exact version specifier, or by naming no resolver at all. **WF-02 does not cover this** — see below. |
+
+## Rules (gitlab)
+
+Only two, and deliberately not more. `indexbot ci --check` already gates
+`.gitlab-ci/indexbot.yml` — the file `indexbot ci` generates — byte-for-byte
+against the policy it renders from, so a property of *that* file (its
+schedules are upstream-guarded, it sets `GIT_STRATEGY: none`/`GIT_DEPTH: 0`
+where it must) is that drift gate's job, not this audit's; see
+[What GitLab's drift gate already covers](#what-gitlabs-drift-gate-already-covers)
+below. What has no gate at all is the root `.gitlab-ci.yml` an operator writes
+by hand and whatever it includes — the GitLab analogue of a hand-written
+GitHub workflow — and these two rules are the properties of *that* file with
+no other gate.
+
+| Rule | Invariant | Why |
+|---|---|---|
+| **GL-01** | Every `image:` is pinned to a digest — `<host>/<path>@sha256:<64-hex>` | A GitLab job's `image:` is the exact analogue of a GitHub `uses:` ref (WF-02): the code running in a credentialed job must not change without a diff. A mutable tag (`oven/bun:1-alpine`, `python:3.13`, or no tag at all) means it does. Checked both as a scalar (`image: foo@sha256:…`) and as a mapping (`image:` / `  name: foo@sha256:…`), and file-wide — a per-job override is checked the same as `default.image`. |
+| **GL-03** | No job whose `rules:` reach `$CI_PIPELINE_SOURCE == "merge_request_event"` references a token-shaped variable in its `script:`, `before_script:` or `variables:` | A fork merge-request pipeline runs in the fork — the same trust boundary GitHub's plain `pull_request` gives — but only while the parent's credentials stay *protected* CI/CD variables. An operator who leaves `INDEXBOT_TOKEN` unprotected hands it to that fork pipeline, and no diff shows it: the exposure is a project setting, not a line of YAML. What IS visible in the YAML is the job shape that would matter if the variable were unprotected, so that is what is checked. `$CI_JOB_TOKEN` is exempt — GitLab's own per-job token, scoped to the project the pipeline runs in, which for a fork MR is the fork itself. |
+
+**GL-02, GL-04 and GL-05 do not exist as `workflows-check` rules** — they are
+properties of the *generated* `.gitlab-ci/indexbot.yml` (upstream-guarded
+schedules, `GIT_STRATEGY: none`, `GIT_DEPTH: 0`), and `indexbot ci --check`
+already gates that file byte-for-byte against the policy it renders from. A
+static audit re-deriving them here would either duplicate that gate or drift
+from it; the numbering skips them rather than filling the gap with a rule that
+checks nothing a hand-edit could actually break.
+
+GL-03 is read off each job's own block, not through `extends:`: a job whose
+`merge_request_event` guard lives entirely on an extended template is not
+caught. The generated templates never split `rules:` out that way; a
+hand-written pipeline that does should keep the credential and the guard on
+the job it actually appears in.
 
 ## Where these came from
 
@@ -124,36 +159,35 @@ which means a command split across lines by `run: >-` reads as unpinned. The
 generated templates do not fold; a hand-written pipeline that does will see a
 finding it can clear by putting the command on one line.
 
-## GitLab deployments are not covered
+## What GitLab's drift gate already covers
 
-`workflows-check` reads `.github/workflows/` and nothing else. A `forge: gitlab`
-deployment renders one file — `.gitlab-ci/indexbot.yml` — and **no invariant in
-this table is checked against it**. There is no GitLab equivalent of WF-01 (a
-GitLab job's permissions are the token you hand it, not a declaration), and
-WF-02's counterpart — the `image:` a privileged job runs in — is not audited at
-all. `indexbot ci --check` still catches a hand-edit of the generated file, but
-that is a drift gate, not a structural one: it proves the file is what the
-policy renders, never that what the policy renders is safe.
-
-What that leaves a GitLab operator to check themselves, because nothing else
-will:
+`indexbot ci --check` gates `.gitlab-ci/indexbot.yml` — the file `indexbot ci`
+generates — byte-for-byte against the policy it renders from. `workflows-check
+--forge gitlab` never reads that file at all: a drift gate already proves it
+is exactly what the policy renders, which is a stronger guarantee for a
+generated file than a static audit could add. What the drift gate covers by
+construction, so GL-01/GL-03 do not need to:
 
 - **The `image:`.** `indexbot-governance-poll` holds `$GITLAB_TOKEN` (`api`
   scope) and executes whatever that image contains. The generated default is
-  digest-pinned for exactly this reason; a `ci.setup` of your own is your
-  responsibility to pin the same way.
+  digest-pinned; a `ci.setup` of your own is on you to pin the same way, which
+  is exactly what a hand-written `.gitlab-ci.yml` importing one is — GL-01's
+  scope.
 - **Every scheduled lane is upstream-only.** The generated rules carry
-  `$CI_PROJECT_NAMESPACE == "<owner>"`, WF-07's counterpart. A hand-written
-  lane needs its own.
+  `$CI_PROJECT_NAMESPACE == "<owner>"`, WF-07's counterpart (this package's
+  hardening plan calls it GL-02). A hand-written schedule needs its own guard,
+  and `workflows-check` does not check for one — add it yourself.
 - **No merge-request lane holds a token.** `GIT_STRATEGY: none` on every
-  privileged job, and no privileged job triggered by `merge_request_event`.
-  This is the split WF-05 enforces on GitHub, and on GitLab it is a convention
-  the generator follows rather than a rule anything asserts.
+  privileged job (GL-04), and no privileged job triggered by
+  `merge_request_event`. This is the split WF-05 enforces on GitHub; on GitLab
+  it is a convention the generator follows, and GL-03 is the part of it that
+  *is* checked for a hand-written file — the rest is not.
 - **"Run pipelines in the parent project for merge requests from forks" stays
   off.** It runs fork-authored `.gitlab-ci.yml` in the parent with the parent's
   token — see the generated file's own comment on the `label-failed-run` lane.
+  No rule here can see a project setting; this one stays a human's to check.
 
-## Assumptions
+## Assumptions (github)
 
 Line scans keyed on GitHub Actions' conventional 2-space indentation, standard
 library only — no YAML parser. The credentialed governance path must gain no
@@ -181,3 +215,12 @@ where noted:
 | `persist-credentials: 'false'` (quoted) | not the opt-out → WF-06 fires. |
 | A credential reaching an action indirectly — a job-level `env:` the action reads, or `${{ steps.*.outputs.token }}` from an App-token step | **not matched** (false clean). What WF-06 catches is the unremarkable `with: {token: …}` line; the indirect forms are visible in review. |
 | A *negated* cron guard (`if: ${{ !(github.repository_owner == '…') }}`) | **not matched** (false clean). WF-07 reads the guard as a substring of the job's `if:`; telling a negation apart needs an expression parser. A deliberate act, not an accidental edit. |
+
+## Assumptions (gitlab)
+
+Same discipline: line scans keyed on GitLab's zero-indent top-level job keys,
+standard library only. GL-01 and GL-03 are each read off one job's own block
+(`job_block`), never through `extends:` — see GL-03's entry above for the
+blind spot that leaves. A credential reaching a job indirectly (a `.gitlab-ci`
+variable inherited from a group/instance CI/CD setting, never written in this
+file at all) is invisible to a line scan the same way it is on GitHub.

@@ -435,12 +435,18 @@ reports what would change and writes nothing.
 
 ## `workflows-check`
 
-Audit an index repository's workflow tree. See
+Audit an index repository's hand-written CI tree. See
 [Workflow invariants](workflow-invariants.md) for the rules.
 
 ```bash
-indexbot workflows-check [--dir .github/workflows] [--owner ORG]
+indexbot workflows-check [--forge github|gitlab] [--dir DIR] [--owner ORG]
 ```
+
+| Flag | Meaning |
+|---|---|
+| `--forge` | Which forge's tree to audit. Defaults to `github` |
+| `--dir` | On `github`: the workflow directory (default `.github/workflows`). On `gitlab`: the directory holding included files, alongside the root `.gitlab-ci.yml` which is always read regardless of this flag (default `.gitlab-ci`) |
+| `--owner` | Enables WF-07, the cron upstream-guard check. `github` only — `gitlab` has no rule here that reads it |
 
 ## `schema`
 
