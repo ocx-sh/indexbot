@@ -159,6 +159,35 @@ def test_one_bad_merge_request_never_ends_the_sweep(
     assert "#2" in capsys.readouterr().err
 
 
+def test_a_forge_timeout_scores_the_merge_request_retryable_not_invalid(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The sweep's blanket `except Exception` is a blast-radius guard, and it
+    was also scoring every unclassified failure `VALIDATION_FAILURE`.
+
+    A read timeout to the forge is not a verdict on the merge request. Exit 1
+    says the branch is invalid; 75 says run me again — and only 75 makes the
+    next tick a retry rather than a re-report. Production hit exactly this:
+    `governance-poll: #10: ReadTimeout: The read operation timed out`, exit 1,
+    against an announce that was fine. The fix is in `adapters/_http.py`, so
+    what reaches here is already a `TransientError`; this test is the half
+    that says the sweep then scores it correctly.
+    """
+    github = _forge(1, 2)
+    original = github.get_pull_request_info
+
+    def _time_out(pr_number: int) -> PullRequestInfo:
+        if pr_number == 1:
+            raise TransientError("GitLab API ReadTimeout for GET /projects/42: timed out")
+        return original(pr_number)
+
+    github.get_pull_request_info = _time_out  # pyright: ignore[reportAttributeAccessIssue]
+
+    assert _run(github) is ExitCode.TRANSIENT
+    assert github.auto_merge_enabled == {2}, "the merge request after the timeout was still gated"
+    assert "ReadTimeout" in capsys.readouterr().err
+
+
 def test_the_worst_exit_code_wins(capsys: pytest.CaptureFixture[str]) -> None:
     """Ordering by the `ExitCode` values themselves carries no meaning beyond
     "not zero" — but a sweep that hit both a validation failure and a

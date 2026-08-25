@@ -24,6 +24,7 @@ import respx
 
 from ocx_indexbot.adapters.gitlab_api import GitLabApi
 from ocx_indexbot.errors import ForgeError, TransientError
+from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import CommitStatusState
 from ocx_indexbot.ports import ForgePort
 
@@ -1538,3 +1539,26 @@ def test_a_refusal_naming_a_different_state_still_raises() -> None:
             state="pending",
             description="awaiting review",
         )
+
+
+@respx.mock
+def test_a_read_timeout_is_transient_not_an_unhandled_exception() -> None:
+    """Exit 75, not a traceback.
+
+    A timeout is an exception rather than a status, so `check_transient` never
+    sees it. Before this it escaped every handler in the adapter *and*
+    `cli/main.py`'s `IndexBotError` branch, ending the run on a bare traceback
+    with exit 1 — the code that means "this merge request is invalid" — for a
+    network blip. Measured in production, not inferred:
+    `governance-poll: #10: ReadTimeout: The read operation timed out`, exit 1,
+    against a merge request that was perfectly valid.
+    """
+    respx.get(f"{_PROJECT}/repository/branches/main").mock(
+        side_effect=httpx.ReadTimeout("The read operation timed out")
+    )
+
+    with pytest.raises(TransientError) as caught:
+        _client().get_ref_sha("main")
+
+    assert caught.value.exit_code is ExitCode.TRANSIENT
+    assert "ReadTimeout" in str(caught.value), "which failure it was, for the operator"

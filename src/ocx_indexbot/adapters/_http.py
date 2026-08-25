@@ -31,10 +31,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
+import httpx
+
 from ocx_indexbot.errors import ForgeError, TransientError
 
 if TYPE_CHECKING:
-    import httpx
+    from collections.abc import Mapping
 
 MAX_PAGES = 100
 """Hard bound on a `Link: rel="next"` walk. Not `Final` — the test suite
@@ -178,3 +180,59 @@ def paginate(
         current_url = next_link
         current_params = None
     raise TransientError(f"{forge} API pagination exceeded {MAX_PAGES} pages: {url}")
+
+
+class _TransientTransport(httpx.BaseTransport):
+    """Turns a transport-level failure into `TransientError`, so it carries an
+    exit code instead of a traceback.
+
+    A timeout, connection reset or protocol error is an *exception*, never a
+    status, so `check_transient` never sees it. Without this, a read timeout
+    talking to the forge escapes every handler in the adapter, escapes
+    `cli/main.py`'s `IndexBotError` branch, and ends the run on a bare
+    traceback with exit `1` — the code that means "this pull request is
+    invalid" — for what is a network blip. `governance-poll` made it worse
+    still: its per-MR `except Exception` caught the timeout and scored that
+    merge request `VALIDATION_FAILURE`, so a green announce read as a failed
+    one and nothing retried it. Measured in production, not inferred:
+    `governance-poll: #10: ReadTimeout: The read operation timed out`, exit 1.
+
+    `adapters/registry_v2.py` has caught `httpx.TransportError` for exactly
+    this reason since it was written; the two forge adapters never did. It
+    lives at transport level rather than around each call because both
+    adapters make ~37 of them between them, and a rule that has to be
+    remembered at every call site is a rule that will be missed at one.
+
+    No retry here on purpose. `TransientError` is exit `75`, which is the
+    contract for "run me again": the poller's next tick and CI's own re-run
+    are the retry. `registry_v2` retries in-process because it is spending a
+    token whose acquisition it also owns; a forge call has no such budget to
+    manage.
+    """
+
+    def __init__(self, forge: str, inner: httpx.BaseTransport | None = None) -> None:
+        self._forge = forge
+        self._inner = httpx.HTTPTransport() if inner is None else inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return self._inner.handle_request(request)
+        except httpx.TransportError as exc:
+            raise TransientError(
+                f"{self._forge} API {type(exc).__name__} for {request.method} "
+                f"{request.url.path}: {exc}"
+            ) from exc
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def client(*, headers: Mapping[str, str], timeout: float, forge: str) -> httpx.Client:
+    """The one `httpx.Client` both forge adapters build.
+
+    Shared for the transport above, not to save the two lines: the mapping is
+    a policy every forge call must obey, which is the same reason
+    `check_transient` and `paginate` live here rather than being spelled out
+    per adapter.
+    """
+    return httpx.Client(headers=headers, timeout=timeout, transport=_TransientTransport(forge))

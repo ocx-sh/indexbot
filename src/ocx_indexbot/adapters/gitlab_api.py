@@ -53,6 +53,7 @@ from urllib.parse import quote
 
 import httpx
 
+from ocx_indexbot.adapters import _http
 from ocx_indexbot.adapters._http import (
     as_object,
     as_object_list,
@@ -722,7 +723,7 @@ class GitLabApi:
         return headers
 
     def _client(self) -> httpx.Client:
-        return httpx.Client(headers=self._headers(), timeout=self.timeout)
+        return _http.client(headers=self._headers(), timeout=self.timeout, forge=_FORGE)
 
     def _url(self, *segments: str) -> str:
         return f"{self.base_url}/" + "/".join(quote(segment, safe="") for segment in segments)

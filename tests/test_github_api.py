@@ -17,6 +17,7 @@ import respx
 
 from ocx_indexbot.adapters.github_api import GitHubApi, GraphQLError
 from ocx_indexbot.errors import ForgeError, TransientError
+from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import PullRequestHeadMatch, PullRequestInfo
 
 _TOKEN = "ghp_super-secret-token-value"  # noqa: S105 - test fixture, not a real credential
@@ -1375,3 +1376,25 @@ def test_a_list_endpoint_answering_with_scalars_is_refused() -> None:
 
     with pytest.raises(ForgeError, match="non-list body"):
         _client().create_or_update_issue(title="Anomaly: ns/pkg", body="details")
+
+
+@respx.mock
+def test_a_connect_error_is_transient_not_an_unhandled_exception() -> None:
+    """The GitHub half of the same rule.
+
+    `adapters/registry_v2.py` has caught `httpx.TransportError` since it was
+    written; neither forge adapter did, so a timeout or a reset talking to a
+    forge left the run with exit 1 and a traceback instead of the retryable
+    75. Both now build their client through `_http.client`, which is where the
+    mapping lives — one place, rather than a rule to remember at each of the
+    ~37 call sites between them.
+    """
+    respx.get("https://api.github.com/repos/ocx-sh/index/git/ref/heads/main").mock(
+        side_effect=httpx.ConnectError("connection reset by peer")
+    )
+
+    with pytest.raises(TransientError) as caught:
+        _client().get_ref_sha("main")
+
+    assert caught.value.exit_code is ExitCode.TRANSIENT
+    assert "ConnectError" in str(caught.value)
