@@ -53,6 +53,31 @@ def _body(route: respx.Route, index: int = 0) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(_request(route, index).content))
 
 
+_ARMED_HEAD = "c" * 40
+"""The revision the arm tests below gate and bind to. Not `_HEAD`: that name
+is already taken further down by the approvals section's own head."""
+
+
+def _armable_mr(head_sha: str | None = _ARMED_HEAD, *, fork: bool = False) -> respx.Route:
+    """The merge-request read `enable_auto_merge` makes before it arms.
+
+    Defaults to the case that needs nothing done: a same-project merge
+    request whose `head_pipeline` already names the revision being armed. Any
+    test that is not about `_ensure_head_pipeline` wants exactly that, so the
+    pipeline POST route stays unmocked and would fail loudly if it fired.
+    """
+    return respx.get(f"{_PROJECT}/merge_requests/7").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "source_project_id": 43 if fork else 42,
+                "target_project_id": 42,
+                "head_pipeline": None if head_sha is None else {"sha": head_sha},
+            },
+        )
+    )
+
+
 def test_gitlab_api_conforms_to_forge_port() -> None:
     """Structural conformance, asserted on the real adapter and not only on
     `tests/fakes`' stand-in — a method that drifted in signature would type-
@@ -509,6 +534,7 @@ def test_remove_label_is_a_delta_not_an_assignment() -> None:
 
 @respx.mock
 def test_enable_auto_merge_sets_merge_when_pipeline_succeeds() -> None:
+    _armable_mr()
     merge = respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
         return_value=httpx.Response(200, json={})
     )
@@ -516,6 +542,109 @@ def test_enable_auto_merge_sets_merge_when_pipeline_succeeds() -> None:
     _client().enable_auto_merge(7, head_sha="c" * 40)
 
     assert _body(merge) == {"merge_when_pipeline_succeeds": True, "sha": "c" * 40}
+
+
+@respx.mock
+def test_arming_creates_a_pipeline_when_the_head_has_none() -> None:
+    """The accumulated-announce stall. A publisher pushing with `CI_JOB_TOKEN`
+    triggers no pipeline, so the second announce on an open merge request
+    lands a head that has none: `merge_when_pipeline_succeeds` is accepted and
+    then waits on a condition GitLab can never satisfy, and the merge request
+    sits at `ci_must_pass` until a human creates a pipeline by hand.
+    """
+    _armable_mr("a" * 40)  # the pipeline from MR creation, one commit stale
+    pipelines = respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(201, json={"id": 77, "sha": _ARMED_HEAD})
+    )
+    merge = respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    _client().enable_auto_merge(7, head_sha=_ARMED_HEAD)
+
+    assert pipelines.called
+    assert _body(merge) == {"merge_when_pipeline_succeeds": True, "sha": _ARMED_HEAD}
+
+
+@respx.mock
+def test_arming_creates_a_pipeline_when_the_merge_request_reports_none_at_all() -> None:
+    _armable_mr(None)
+    pipelines = respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(201, json={"id": 77, "sha": _ARMED_HEAD})
+    )
+    respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(return_value=httpx.Response(200, json={}))
+
+    _client().enable_auto_merge(7, head_sha=_ARMED_HEAD)
+
+    assert pipelines.called
+
+
+@respx.mock
+def test_arming_creates_no_pipeline_when_the_head_already_has_one() -> None:
+    """The ordinary case — a human-lane merge request, or the first announce,
+    whose head pipeline GitLab created on its own. One read, no write."""
+    _armable_mr()
+    pipelines = respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    merge = respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    _client().enable_auto_merge(7, head_sha=_ARMED_HEAD)
+
+    assert not pipelines.called
+    assert merge.called
+
+
+@respx.mock
+def test_arming_a_fork_merge_request_never_creates_a_pipeline() -> None:
+    """The `POST` addresses the PARENT project, so on a project with "run
+    pipelines in the parent project for merge requests from forks" enabled it
+    would run the FORK's `.gitlab-ci.yml` there — with the parent's masked
+    `$GITLAB_TOKEN` — and GitLab's docs say the API route bypasses the
+    reviewer prompt that otherwise gates it. Pinned again as a named threat
+    test in `tests/security/test_threat_classes.py`; this is the adapter-level
+    half."""
+    _armable_mr(None, fork=True)
+    pipelines = respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    merge = respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    _client().enable_auto_merge(7, head_sha=_ARMED_HEAD)
+
+    assert not pipelines.called
+    assert merge.called
+
+
+@respx.mock
+def test_a_refused_pipeline_creation_still_arms_and_is_reported(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An index whose own pipeline has no `merge_request_event` lane answers
+    400, and a governance token below Developer answers 403. Neither is this
+    call's failure and neither makes the merge request *less* mergeable than
+    it already was, so the arm still happens — but silently swallowing it
+    would leave `cli/governance_poll.py` printing `refresh -> success` for a
+    merge request that cannot merge, which is the whole reason the arm's own
+    406 is reported too."""
+    _armable_mr(None)
+    respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(400, json={"message": "No stages / jobs for this pipeline."})
+    )
+    merge = respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    _client().enable_auto_merge(7, head_sha=_ARMED_HEAD)
+
+    assert merge.called
+    reported = capsys.readouterr().err
+    assert "!7" in reported
+    assert "No stages / jobs for this pipeline." in reported
 
 
 @respx.mock
@@ -1054,6 +1183,7 @@ def test_a_moved_head_does_not_fail_the_auto_merge_arm(status: int) -> None:
     pushed between the classification and this call, so the decision was about
     a revision that is no longer current — the next poll tick gates the new
     one. Raising here would take the whole sweep down over a race."""
+    _armable_mr()
     respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
         return_value=httpx.Response(status, json={"message": "SHA does not match HEAD of source"})
     )
@@ -1075,6 +1205,7 @@ def test_a_refused_auto_merge_arm_is_reported_not_silently_swallowed(
     GitLab's own message is the only thing that separates the four causes, so
     it is carried through to stderr where the sweep's own lines go.
     """
+    _armable_mr()
     respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
         return_value=httpx.Response(406, json={"message": "Branch cannot be merged"})
     )
@@ -1088,6 +1219,7 @@ def test_a_refused_auto_merge_arm_is_reported_not_silently_swallowed(
 
 @respx.mock
 def test_a_refused_auto_merge_arm_still_raises_for_any_other_reason() -> None:
+    _armable_mr()
     respx.put(f"{_PROJECT}/merge_requests/7/merge").mock(
         return_value=httpx.Response(403, json={"message": "insufficient permissions"})
     )

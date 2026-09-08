@@ -33,6 +33,14 @@ it. `cli/governance_check.py` recomputes the full list every run, so replace
 is the same outcome and is additionally idempotent — but an *empty* list
 would clear the reviewers a human had set, so an empty call is a no-op here.
 
+**A push does not always make a pipeline.** GitHub's auto-merge waits on
+whatever checks the branch protection names, and a check that never starts
+leaves the PR visibly pending. GitLab's `merge_when_pipeline_succeeds` waits
+on the pipeline whose sha *is* the merge request's diff head — and a push
+authenticated with `CI_JOB_TOKEN` creates no pipeline at all, so an
+accumulated announce lands a head that has none and never will. Arming there
+returns 200 and waits forever. `_ensure_head_pipeline` is what closes it.
+
 **MRs are created from the source project.** GitHub opens a cross-fork PR
 against the target repo with `head=owner:branch`; GitLab opens it against the
 *fork* with `target_project_id` pointing back. `head_repo` therefore carries
@@ -102,6 +110,17 @@ _TRANSITION_FROM_RE: Final[re.Pattern[str]] = re.compile(r"\bfrom :([a-z_]+)\b")
 internal event name and varies by target state, but the `from :<state>` half
 is always the state vocabulary the status API itself reports.
 """
+
+
+def _refusal_detail(response: httpx.Response) -> str:
+    """GitLab's own explanation for a refusal, bounded for a log line.
+
+    Both places that report a swallowed refusal need it, and both need the
+    same bound: the body is server-supplied text reaching stderr beside the
+    poll sweep's own per-merge-request lines.
+    """
+    return str(response.json().get("message", response.text))[:200]
+
 
 _STATUS_STATE: Final[dict[CommitStatusState, str]] = {
     "success": "success",
@@ -297,6 +316,7 @@ class GitLabApi:
         those lines, carrying GitLab's own explanation — which is the only
         thing that distinguishes the four causes.
         """
+        self._ensure_head_pipeline(pr_number, head_sha=head_sha)
         with self._client() as client:
             response = client.put(
                 self._project_url("merge_requests", str(pr_number), "merge"),
@@ -304,13 +324,64 @@ class GitLabApi:
             )
         self._check(response)
         if response.status_code in _HEAD_MOVED_STATUSES:
-            detail = str(response.json().get("message", response.text))[:200]
             print(
-                f"gitlab: auto-merge not armed for !{pr_number} ({response.status_code}): {detail}",
+                f"gitlab: auto-merge not armed for !{pr_number} "
+                f"({response.status_code}): {_refusal_detail(response)}",
                 file=sys.stderr,
             )
             return
         self._raise(response)
+
+    def _ensure_head_pipeline(self, pr_number: int, *, head_sha: str) -> None:
+        """Give `head_sha` a pipeline before `enable_auto_merge` binds to it,
+        when it has none and the merge request is not a fork's.
+
+        The bot's own `governance/review-required` status is not one. It is
+        posted on `refs/merge-requests/<iid>/head` (see `set_commit_status`),
+        which is not the source branch, so GitLab never promotes it to
+        `head_pipeline` — the field this reads, and the one GitLab's own
+        "pipelines must succeed" check resolves for the diff head. Listing
+        `.../pipelines` instead would see that external pipeline at the same
+        sha and conclude the head is covered when nothing runnable is.
+
+        **Never for a fork merge request, and that is a security boundary
+        rather than a scope choice.** `POST` here addresses the *parent*
+        project. With "run pipelines in the parent project for merge requests
+        from forks" enabled it runs the FORK's `.gitlab-ci.yml` in the
+        parent's context — every job holding the masked `$GITLAB_TOKEN` — and
+        GitLab's documented mitigation, a parent-project member pressing
+        start, is explicitly bypassed for the API route. That is exactly the
+        compromise `cli/governance_poll.py`'s schedule exists to avoid (ADR-6
+        FP-7). It also buys nothing: a fork merge request is gated by the
+        unresolved discussion thread, not by the pipeline (`ports.ForgePort.
+        set_commit_status`). A fork announce whose head has no pipeline stays
+        stalled, and that is the cheaper side of the trade.
+
+        Fails open on a refusal. A 400 ("No stages / jobs for this pipeline"
+        — an index whose own config has no `merge_request_event` lane) or a
+        403 (a governance token below Developer) is reported beside the
+        arm's own stderr line and the arm still happens: not creating a
+        pipeline leaves the merge request exactly as stalled as it already
+        was, which is the status quo and not an unsafe merge. Transient
+        classes still raise through `_check`, because the next tick is their
+        retry (ADR-4 BD-2).
+        """
+        payload = self._merge_request(pr_number)
+        if payload.get("source_project_id") != payload.get("target_project_id"):
+            return
+        head_pipeline: Mapping[str, Any] = payload.get("head_pipeline") or {}
+        if head_pipeline.get("sha") == head_sha:
+            return
+
+        with self._client() as client:
+            response = client.post(self._project_url("merge_requests", str(pr_number), "pipelines"))
+        self._check(response)
+        if response.is_error:
+            print(
+                f"gitlab: no pipeline created for !{pr_number} at {head_sha} "
+                f"({response.status_code}): {_refusal_detail(response)}",
+                file=sys.stderr,
+            )
 
     def withdraw_auto_merge(self, pr_number: int) -> None:
         """Read `merge_when_pipeline_succeeds` first; only call the cancel

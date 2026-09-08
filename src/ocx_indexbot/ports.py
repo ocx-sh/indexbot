@@ -236,9 +236,17 @@ class ForgePort(Protocol):
         mutation outright and the machine-lane PR would wait forever for an
         auto-merge nobody armed. An adapter must perform the equivalent merge
         itself in that case, bound to the same `head_sha` and with no
-        privilege the armed route would not have had. GitLab needs no special
+        privilege the armed route would not have had. GitLab needs no such
         case: `merge_when_pipeline_succeeds` on an already-succeeded pipeline
         merges immediately by construction.
+
+        **It has the opposite one.** GitLab waits on the pipeline whose sha
+        *is* the merge request's diff head, and a push made with
+        `CI_JOB_TOKEN` — the posture a publisher uses precisely so it stores
+        no token — creates none. The arm is then accepted and waits on a
+        condition nothing will ever satisfy. An adapter must make sure the
+        head it binds to has a pipeline; `adapters/gitlab_api.py` documents
+        why that must never extend to a fork merge request.
         """
         ...
 

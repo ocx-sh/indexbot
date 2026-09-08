@@ -18,8 +18,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 
+from ocx_indexbot.adapters.gitlab_api import GitLabApi
 from ocx_indexbot.adapters.local_files import LocalFiles
 from ocx_indexbot.cli import governance_check
 from ocx_indexbot.cli import validate as validate_cli
@@ -398,3 +401,39 @@ def test_threat_fork_pr_may_refresh_but_never_re_aim_a_reserved_root() -> None:
     assert _fork_pr_validate(repointed, base) == ExitCode.VALIDATION_FAILURE
     self_owned = _reserved_root(owners=(Owner(login="alice", id=1), Owner(login="mallory", id=999)))
     assert _fork_pr_validate(self_owned, base) == ExitCode.VALIDATION_FAILURE
+
+
+@respx.mock
+def test_threat_arming_a_fork_merge_request_never_starts_a_pipeline_in_the_parent() -> None:
+    """ADR-6 FP-7, GitLab spelling. `GitLabApi.enable_auto_merge` gives a
+    pipeline-less head a pipeline so an accumulated announce can merge — but
+    the endpoint that does it, `POST /projects/<parent>/merge_requests/<iid>/
+    pipelines`, addresses the PARENT project. With "run pipelines in the
+    parent project for merge requests from forks" enabled it runs the FORK's
+    `.gitlab-ci.yml` in the parent's context, where every job holds the masked
+    `$GITLAB_TOKEN` (`api` scope: label, comment, merge). GitLab's own
+    mitigation is a parent-project member pressing start, and its docs state
+    the API route bypasses that prompt.
+
+    So the privileged poller would be handing fork-authored config the
+    parent's write credential — precisely the compromise the schedule lane
+    exists to avoid. No pipeline route is mocked below: a POST would fail the
+    test loudly rather than pass silently.
+    """
+    # A fork merge request whose head has no pipeline at all — the one state
+    # the same-project path answers by creating one.
+    respx.get("https://gitlab.com/api/v4/projects/42/merge_requests/7").mock(
+        return_value=httpx.Response(
+            200,
+            json={"source_project_id": 43, "target_project_id": 42, "head_pipeline": None},
+        )
+    )
+    merge = respx.put("https://gitlab.com/api/v4/projects/42/merge_requests/7/merge").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    GitLabApi(project="42", token="not-a-real-token").enable_auto_merge(  # noqa: S106
+        7, head_sha="c" * 40
+    )
+
+    assert merge.called  # the arm itself is unchanged

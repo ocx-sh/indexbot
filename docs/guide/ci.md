@@ -416,6 +416,15 @@ it comes from settings the bot cannot set for you.
 === "GitLab"
 
     - **Pipelines must succeed** — makes the external commit status blocking.
+      It also means a head with no pipeline never merges, and a push made with
+      `CI_JOB_TOKEN` creates none — which is every announce that *accumulates*
+      onto an already-open merge request. The poll lane creates the missing
+      pipeline itself before arming, so the governance token needs at least
+      the **Developer** role and the project's own pipeline needs a
+      `merge_request_event` lane (the generated `indexbot-validate` is one).
+      It does not do this for a *fork* merge request — the endpoint addresses
+      the parent, so it would run fork-authored config there — and a fork
+      announce whose head has no pipeline therefore still needs a person.
     - **All threads must be resolved** — this is what holds a *fork* merge
       request, whose pipeline runs in the fork. The bot's review-required
       notice is a resolvable discussion for exactly this reason, not a note.
