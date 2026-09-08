@@ -6,13 +6,24 @@ client's `Tag::Canonical`. The shared verdict table is what keeps them
 together; a row removed or a verdict flipped without the implementation
 moving must fail here.
 
-`_CASES` mirrors the shape of `bot/tests/golden/tag_verdicts.json` (WP-B0a,
-not yet in this tree): `{tag, reserved, why}`, `why` documentation only,
-never asserted. When that fixture lands, this list is replaced by a
-`json.loads` of it and nothing else in this file changes.
+The shared table now lives in this tree at `tests/golden/tag_verdicts.json`
+(vendored into `ocx-sh/ocx:crates/ocx_lib/tests/fixtures/index_wire/` by
+`test/scripts/sync_index_conformance.sh`) and is asserted row by row against
+this predicate below — a row added on either side of the vendoring cannot
+ship unverified from here.
+
+`_CASES` stays a second, richer table rather than collapsing into a
+`json.loads` of that fixture: it carries upper-case hex, a bare `sha256`, and
+the 63-hex boundary, none of which the shared table has, and it is what
+`test_the_sweep_excludes_exactly_what_the_gate_rejects` drives `observe()`
+with. Both tables use `{tag, reserved, why}`; `why` is documentation only,
+never asserted.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +45,12 @@ _CASES: list[dict[str, object]] = [
     {"tag": "__ocx", "reserved": True, "why": "the prefix alone; no dot is required by D7"},
     {"tag": "__ocxfoo", "reserved": True, "why": "reserved by prefix, not by exact name"},
     {"tag": "__OCX.desc", "reserved": True, "why": "the prefix is case-insensitive"},
+    {
+        "tag": f"__ocx.keep.sha256-{_HEX_64}",
+        "reserved": True,
+        "why": "the GC-safety keep tag ocx writes; the `-` separator is not the `.` of "
+        "the canonical alias, so only the __ocx prefix reserves it",
+    },
     {"tag": "__oc", "reserved": False, "why": "boundary: shorter than the prefix"},
     {"tag": "x__ocx", "reserved": False, "why": "boundary: contains, does not start with"},
     {"tag": f"sha256.{_HEX_64}", "reserved": True, "why": "the canonical tag ocx push writes"},
@@ -66,8 +83,8 @@ _IDS = [str(case["tag"]) for case in _CASES]
 
 
 def test_the_case_table_is_the_frozen_shape() -> None:
-    assert len(_CASES) == 17
-    assert len(set(_IDS)) == 17
+    assert len(_CASES) == 18
+    assert len(set(_IDS)) == 18
     for case in _CASES:
         assert set(case) == {"tag", "reserved", "why"}
     for algorithm in ("sha256.", "sha384.", "sha512."):
@@ -78,6 +95,23 @@ def test_the_case_table_is_the_frozen_shape() -> None:
 
 @pytest.mark.parametrize("case", _CASES, ids=_IDS)
 def test_reserved_tag_predicate_matches_the_shared_fixture(case: dict[str, object]) -> None:
+    assert is_reserved_tag(str(case["tag"])) is case["reserved"], case["why"]
+
+
+_FIXTURE: list[dict[str, object]] = json.loads(
+    (Path(__file__).parents[1] / "golden" / "tag_verdicts.json").read_text(encoding="utf-8")
+)["cases"]
+_FIXTURE_IDS = [str(case["tag"]) for case in _FIXTURE]
+
+
+@pytest.mark.parametrize("case", _FIXTURE, ids=_FIXTURE_IDS)
+def test_reserved_tag_predicate_matches_the_vendored_fixture(case: dict[str, object]) -> None:
+    """The cross-repo drift gate, asserted from this side of the vendoring.
+
+    `tests/golden/tag_verdicts.json` is the table `ocx_lib`'s `Tag::is_reserved`
+    is held to as well; without this test it would be a write-only artifact
+    here and a bad row would reach the Rust side green.
+    """
     assert is_reserved_tag(str(case["tag"])) is case["reserved"], case["why"]
 
 
