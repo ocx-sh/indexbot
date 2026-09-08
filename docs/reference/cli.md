@@ -269,6 +269,15 @@ in the parent project and does not.
 
 Both project settings are Free-tier. Enable both.
 
+"Pipelines must succeed" waits on the pipeline whose sha *is* the merge
+request's head, and a push authenticated with `CI_JOB_TOKEN` triggers none —
+so an announce accumulating onto an already-open merge request lands a head
+with no pipeline, and arming auto-merge on it waits forever. The poll lane
+creates that pipeline before it arms (Developer role, and a
+`merge_request_event` lane in the project's own pipeline). Never for a fork
+merge request: that `POST` addresses the parent project, where it would run
+fork-authored config with the parent's token.
+
 Run it from a scheduled pipeline on the default branch. That is the only place
 on GitLab where parent-authored config runs with the parent's token — a fork's
 merge-request pipeline runs in the fork, and every feature that would put the
