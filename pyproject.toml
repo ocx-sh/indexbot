@@ -1,6 +1,6 @@
 [project]
 name = "ocx-indexbot"
-version = "0.6.0"
+version = "0.6.1"
 description = "Write path for an OCX package index — announce, reconcile, validate, render."
 readme = "README.md"
 license = "Apache-2.0"
@@ -105,6 +105,14 @@ typeCheckingMode = "strict"
 # instead of burning the job's wall clock (PY-TEST-06).
 addopts = "--cov=ocx_indexbot --cov-branch --cov-report=term-missing --strict-markers --timeout=60 --timeout-method=signal"
 testpaths = ["tests"]
+
+# Temp-dir retention: pytest keeps the last 3 runs and every test's tmp_path by
+# default, so disk use tracks total tests rather than concurrent failures.
+# "failed" reclaims a passing test's dir at teardown; count=1 drops the
+# cross-run multiplier. Keep a passing dir while debugging with
+# `-o tmp_path_retention_policy=all`.
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
 
 [tool.coverage.run]
 branch = true
