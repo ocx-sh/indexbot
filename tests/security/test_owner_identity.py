@@ -45,9 +45,13 @@ _GITLAB_PROJECT = "https://gitlab.com/api/v4/projects/42"
 
 def _root(*, owner_id: int, spelling: str) -> bytes:
     """One package root's wire bytes, written in the requested `owners[]`
-    spelling — `"new"` (0.5.0's `login`/`id`), `"legacy"` (the pre-0.5.0
-    `github`/`github_id`, what every index published before 0.5.0 carries) or
-    `"both"` (what this bot now emits).
+    spelling — `"new"` (the canonical `login`/`id`, what this bot emits since
+    0.6.2), `"legacy"` (the pre-0.5.0 `github`/`github_id`, what every index
+    published before 0.5.0 carries) or `"both"` (what 0.5.0 through 0.6.1 emitted, and
+    what every root written in that window still carries on disk).
+
+    All three must reach the same G-19 verdict: the ownership key is the
+    numeric id, whichever spelling carries it.
     """
     root = PackageRoot(
         name="ocx.sh/ns/pkg",
@@ -64,6 +68,10 @@ def _root(*, owner_id: int, spelling: str) -> bytes:
         payload["owners"] = [{"github": "alice", "github_id": owner_id}]
     elif spelling == "new":
         payload["owners"] = [{"login": "alice", "id": owner_id}]
+    elif spelling == "both":
+        payload["owners"] = [
+            {"login": "alice", "id": owner_id, "github": "alice", "github_id": owner_id}
+        ]
     return json.dumps(payload, indent=2).encode("utf-8") + b"\n"
 
 
@@ -192,14 +200,29 @@ def test_a_root_whose_ids_disagree_is_refused() -> None:
         parse_package_root(raw)
 
 
-def test_the_serializer_emits_both_spellings_and_they_are_derived() -> None:
-    """0.5.0's wire shape: four keys per owner, the legacy pair computed from
-    the canonical one at write time (`model.Owner` cannot express them
-    separately)."""
+def test_the_serializer_emits_the_canonical_pair_only() -> None:
+    """0.6.2's wire shape: two keys per owner. `ocx package claim` is the other
+    writer of these exact bytes and renders `login`/`id`, so emitting the
+    derived legacy pair beside them failed the byte-exact discipline on every
+    fresh claim (ocx `adr_index_claim_command.md` W-B, superseding
+    `adr_forge_neutral_owners.md` D2's emit-both).
+
+    The read side is untouched — the tests above still pass a legacy-only root
+    through this same gate.
+    """
     root = parse_package_root(_root(owner_id=_AUTHOR_ID, spelling="new"))
 
     emitted = json.loads(serialize_package_root(root))
 
-    assert emitted["owners"] == [
-        {"login": "alice", "id": _AUTHOR_ID, "github": "alice", "github_id": _AUTHOR_ID}
-    ]
+    assert emitted["owners"] == [{"login": "alice", "id": _AUTHOR_ID}]
+
+
+def test_a_legacy_only_root_re_serializes_to_the_canonical_pair() -> None:
+    """The migration path: nothing rewrites a published root, but the first
+    write that touches one normalizes it — and the id G-19 matches on survives
+    that normalization unchanged."""
+    root = parse_package_root(_root(owner_id=_AUTHOR_ID, spelling="legacy"))
+
+    emitted = json.loads(serialize_package_root(root))
+
+    assert emitted["owners"] == [{"login": "alice", "id": _AUTHOR_ID}]

@@ -521,21 +521,23 @@ def check_no_dangling_references(root: PackageRoot, cas_digests: frozenset[str])
 
 
 def _owner_to_dict(owner: Owner) -> dict[str, Any]:
-    """Both spellings, with the pre-0.5.0 pair DERIVED from the canonical one
-    (`adr_forge_neutral_owners.md` D2).
+    """The canonical pair only — `login`/`id` (ocx `adr_index_claim_command.md`
+    decision W-B, superseding `adr_forge_neutral_owners.md` D2's emit-both).
 
-    `github`/`github_id` are not independently settable — `model.Owner` does
-    not carry them — so a root this bot writes cannot express two identities
-    for one owner. The read side refuses the hand-authored case
-    (`_owner_from_dict`). Dropping the legacy pair is a breaking change gated
-    on `format_version`, not something a later release does quietly.
+    `ocx package claim` is the other writer of this exact byte form, and it
+    renders two keys. Emitting the derived pre-0.5.0 pair beside them made
+    every fresh claim fail the byte-exact discipline
+    (`cli/validate.py`), so the duplication ends on the write side.
+
+    No `format_version` bump: a client MUST treat an unrecognised higher
+    `format_version` as a hard error, so spending one on a governance field no
+    client parses would break every deployed ocx. D2's "gated on
+    `format_version`" clause is written for client-visible URL and semantic
+    shape; `owners[]` is neither — `IndexRoot` models no `owners` field at all.
+    The read side keeps the legacy pair (`_owner_from_dict`), which is what
+    makes this invisible to an index published before 0.5.0.
     """
-    return {
-        "login": owner.login,
-        "id": owner.id,
-        "github": owner.login,
-        "github_id": owner.id,
-    }
+    return {"login": owner.login, "id": owner.id}
 
 
 def _owner_from_dict(data: dict[str, Any]) -> Owner:

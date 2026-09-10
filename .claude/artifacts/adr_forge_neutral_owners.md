@@ -5,6 +5,8 @@
 - **Lands in:** `ocx-indexbot` 0.5.0
 - **Supersedes (partially):** ADR-1 D2's field names, ADR-6's
   `indexbot announce` reference implementation
+- **Superseded (partially):** D2's *emit* half, by ocx
+  `adr_index_claim_command.md` decision W-B — see Amendment A1 below
 - **One-way door:** yes for the wire field names — `p/<ns>/<pkg>.json` is a
   frozen URL shape whose *field semantics* are equally frozen (see
   `docs/reference/contracts.md` §5.6). This ADR is why the migration is
@@ -76,6 +78,10 @@ field at all, `#[serde]` default-tolerant) is unaffected. **Dropping** the
 legacy pair is the breaking step and is deliberately *not* taken here; it
 needs its own ADR and a `format_version` gate.
 
+> **Amendment A1 (0.6.2) — the emit half is superseded.** That ADR is ocx's
+> `adr_index_claim_command.md` W-B, and it declines the `format_version` gate
+> this paragraph anticipated. See below.
+
 ### D3 — delete `indexbot announce`, keep its core
 
 The `announce` subcommand, `cli/announce.py`, its wiring entry and its docs
@@ -111,3 +117,47 @@ for the contract.
 - Roots are ~2 fields per owner larger. With one or two owners per root this
   is noise against the `tags` map.
 - Removing a subcommand is breaking: 0.5.0, not a patch.
+
+---
+
+## Amendment A1 — emit `login`/`id` only
+
+- **Status:** Accepted
+- **Date:** 2026-09-10
+- **Lands in:** `ocx-indexbot` 0.6.2
+- **Supersedes:** D2's **emit** half only. Read-both and
+  refuse-disagreement stand unchanged.
+- **Upstream decision:** `ocx-sh/ocx` `adr_index_claim_command.md` Part 3,
+  Option W-B (`login`/`id` only, no `format_version` bump), chosen over W-A
+  (ocx dual-emits) and W-C (drop + bump).
+
+**Why now.** D2 wrote the derived pair on the assumption that indexbot was the
+only writer of these bytes. `ocx package claim` (ocx 0.6.1) is the second, it
+renders `login`/`id`, and CONTRACTS §14's byte-exact discipline compares the
+committed bytes against a re-derivation — so every fresh claim was rejected
+with "committed bytes are not the canonical root serialization"
+([indexbot#6](https://github.com/ocx-sh/indexbot/issues/6)). Two writers of one
+byte-exact form must agree; W-B settles which one moves.
+
+**Why no `format_version` gate**, despite D2 naming one. The index's wire
+contract requires a client to treat an unrecognised higher `format_version` as
+a hard error demanding an upgrade. A bump would therefore break every deployed
+ocx over a governance field no client parses — `IndexRoot` has no `owners`
+field, `ocx-mirror` passes it through, and the catalog's view-model already
+reads `login ?? github`. D2's gate clause is written for client-visible URL and
+semantic shape; `owners[]` is neither.
+
+**Blast radius.** Smaller than D1's, because nothing is rewritten:
+
+| Repo | Change |
+|---|---|
+| `ocx-sh/indexbot` | `_owner_to_dict`; 4 serializer goldens regenerated; CONTRACTS §14 |
+| `ocx-sh/index` | **none on disk.** ~1.8k roots keep their four-key bytes — `validate-pr` byte-checks only the roots a PR changed, and every other reader parses. Each normalizes on the next write that touches it |
+| `ocx-sh/ocx` | re-vendor `tests/fixtures/index_wire/root/` (`test/scripts/sync_index_conformance.sh`); no code change |
+
+**Cost accepted.** A third-party reader that copied the documented
+`{github, github_id}` shape breaks on roots written from 0.6.2 on, and
+`format_version` gives it no signal. W-B's matrix scored that against breaking
+every deployed ocx and took it. The schema has permitted a two-key owner since
+0.5.0 (`$defs/owner` is an `anyOf` over the two pairs), so nothing that
+validates against the published schema is surprised.

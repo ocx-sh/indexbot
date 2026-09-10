@@ -152,7 +152,7 @@ def test_parsing_a_root_that_predates_the_field_yields_an_empty_tuple() -> None:
             {
                 "name": "ocx.sh/astral-sh/python-build-standalone",
                 "repository": "oci://ghcr.io/ocx-contrib/python-build-standalone",
-                "owners": [{"login": "alice", "id": 1, "github": "alice", "github_id": 1}],
+                "owners": [{"login": "alice", "id": 1}],
                 "status": "active",
                 "deprecated_message": None,
                 "created": "2026-07-29",

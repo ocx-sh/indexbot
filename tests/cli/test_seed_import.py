@@ -131,9 +131,7 @@ def test_happy_path_writes_root_and_cas_objects() -> None:
 
     assert root["name"] == "ocx.sh/kitware/cmake"
     assert root["repository"] == _REPO
-    assert root["owners"] == [
-        {"login": "alice", "id": 123456, "github": "alice", "github_id": 123456}
-    ]
+    assert root["owners"] == [{"login": "alice", "id": 123456}]
     assert root["status"] == "active"
     assert root["deprecated_message"] is None
     assert root["created"] == "2026-07-17"
@@ -236,7 +234,7 @@ def test_owner_id_coerced_from_string() -> None:
     run(_args(owner_id="123456"), registry=_registry(), files=files, clock=FixedClock())
     root = json.loads(files.read_bytes("p/kitware/cmake.json") or b"{}")
     assert root["owners"][0]["id"] == 123456
-    assert root["owners"][0]["github_id"] == 123456
+    assert "github_id" not in root["owners"][0]
 
 
 def test_derives_namespace_and_package_from_catalog_md_path() -> None:

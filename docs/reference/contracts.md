@@ -1063,20 +1063,29 @@ form, never digested itself):**
   (`owners[]`, `desc`, `tags[*]`, `tags[*].yanked`) use their own dataclass's
   declared field order the same way — see `validate_entry.py`'s
   `_*_to_dict` helpers for the exact per-type key list.
-- `owners[]` carries **four** keys per entry, in this order: `login`, `id`,
-  `github`, `github_id` (`adr_forge_neutral_owners.md` D1/D2). `login`/`id`
-  are canonical and forge-neutral — `login` is a forge **username**, never a
-  display name, because `ForgePort.request_reviewers` hands it straight to
-  the forge (GitLab's `name` is a different field and resolves to nobody);
-  `id` is the numeric forge user id and is the ownership key G-19 matches
-  on. `github`/`github_id` are the pre-0.5.0 spelling, emitted **derived**
-  from the canonical pair — `model.Owner` cannot express them separately.
-  The read side takes `login`/`id` when present and falls back to
-  `github`/`github_id`, so every root published before 0.5.0 parses
-  unchanged, and refuses a root carrying both spellings in disagreement:
-  that would show one identity to a human reviewer and hand another to the
-  auto-merge gate. Dropping the legacy pair is a breaking change gated on
-  `format_version`, not a later quiet cleanup.
+- `owners[]` carries exactly **two** keys per entry, in this order: `login`,
+  `id` (`adr_forge_neutral_owners.md` D1, amended; ocx
+  `adr_index_claim_command.md` W-B). Both are forge-neutral — `login` is a
+  forge **username**, never a display name, because
+  `ForgePort.request_reviewers` hands it straight to the forge (GitLab's
+  `name` is a different field and resolves to nobody); `id` is the numeric
+  forge user id and is the ownership key G-19 matches on.
+  **Writers emit nothing else here.** `ocx package claim` is the other
+  implementation of these exact bytes and renders the same two keys; 0.5.0
+  through 0.6.1 additionally emitted the pre-0.5.0 `github`/`github_id`
+  derived from the canonical pair, which made every fresh claim fail this
+  section's byte gate. Since 0.6.2 it does not.
+- The **read** side is wider than the write side, and stays that way: it takes
+  `login`/`id` when present and falls back to `github`/`github_id`, so every
+  root published before 0.5.0 — and every root written in the 0.5.0–0.6.1
+  window, which carries all four — parses unchanged. It refuses a root
+  carrying both spellings in disagreement: that would show one identity to a
+  human reviewer and hand another to the auto-merge gate. Nothing rewrites a
+  published root; the first write that touches one normalizes it to the
+  two-key form. There is **no `format_version` move** for this — a client MUST
+  treat an unrecognised higher `format_version` as a hard error, and `owners[]`
+  is governance surface no client parses (`IndexRoot` models no `owners` field
+  at all), so a bump would break every deployed client to signal nothing.
 - `desc: None` serializes as the JSON literal `null` (the key itself is
   **never** omitted — this is the one field whose absence-vs-null semantics
   differ from `upstream`/`superseded_by` above).

@@ -693,6 +693,48 @@ def test_parse_package_root_round_trips_minimal_root_no_upstream_null_desc() -> 
     assert validate_entry.parse_package_root(raw) == root
 
 
+def _root_payload_with_owners(owners: list[dict[str, object]]) -> bytes:
+    """A root in this module's exact canonical form except for `owners[]`,
+    which is written in the requested spelling — isolates the owner codec from
+    every other serializer concern."""
+    return (
+        json.dumps(
+            {
+                "name": "ocx.sh/kitware/cmake",
+                "repository": "oci://ghcr.io/ocx-contrib/cmake",
+                "owners": owners,
+                "status": "active",
+                "deprecated_message": None,
+                "created": "2026-07-17",
+                "desc": None,
+                "tags": {},
+            },
+            indent=2,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def test_a_two_key_owner_root_round_trips_byte_identically() -> None:
+    """The bytes `ocx package claim` writes. Before 0.6.2 this round-trip grew
+    the two derived legacy keys and the byte-exact discipline
+    (`cli/validate.py`) rejected every fresh claim."""
+    raw = _root_payload_with_owners([{"login": "alice", "id": 1}])
+
+    assert validate_entry.serialize_package_root(validate_entry.parse_package_root(raw)) == raw
+
+
+def test_a_legacy_only_owner_root_re_serializes_to_the_canonical_pair() -> None:
+    """A root published before 0.5.0 still parses; the first write that touches
+    it normalizes it to `login`/`id`, carrying the numeric id across
+    unchanged."""
+    raw = _root_payload_with_owners([{"github": "alice", "github_id": 1}])
+
+    emitted = validate_entry.serialize_package_root(validate_entry.parse_package_root(raw))
+
+    assert emitted == _root_payload_with_owners([{"login": "alice", "id": 1}])
+
+
 def test_parse_package_root_superseded_by_absent_key_defaults_to_none() -> None:
     # Older wire payload predating this field entirely -- `.get` fallback,
     # not just the round-trip of this module's own serializer output.
