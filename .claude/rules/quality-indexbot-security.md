@@ -33,12 +33,14 @@ check`, which an index repo runs against its `.github/workflows/`.
   (verify-claims). Any workflow edit that adds a PR-head checkout (`ref:` at
   `pull_request.head`) to a credentialed job breaks the entire safety argument
   (FP-7, G-16). The security suite asserts absence of ANY `ref:` in that job.
-- **Authorization is `owners[].github_id` from the BASE ref only.** A PR author
-  is an owner iff their numeric `github_id` is in the *committed* root's
-  `owners[]` on the base branch (FP-5, G-19). Never read authorization from
-  PR-head content — a PR editing its own `owners[]` is itself a G-05 human-lane
-  change, and must not self-authorize. Bind on `github_id` (rename- and
-  login-recycling-proof), never `login`.
+- **Authorization is `owners[].id` from the BASE ref only.** A PR author is an
+  owner iff their numeric forge id is in the *committed* root's `owners[]` on
+  the base branch (FP-5, G-19). Never read authorization from PR-head content —
+  a PR editing its own `owners[]` is itself a G-05 human-lane change, and must
+  not self-authorize. Bind on the numeric id (rename- and
+  login-recycling-proof), never `login`. Roots published before 0.5.0 spell it
+  `github_id`; `_owner_from_dict` reads either and the gate matches the number,
+  so the read side stays wider than the write side — never narrow it.
 - **SSRF/host-allowlist runs before the first registry call.** `repository`
   hosts arriving in root data are allowlist-checked (`check_repository_allowlisted`)
   before any `RegistryPort` request (BD-1 ordering, G-03). Keep the guard first;

@@ -166,8 +166,9 @@ indexbot governance-check --pr-number N
 
 Writes `disposition` as a job output, publishes a commit status, and
 assigns reviewers from `.github/maintainers.yml`. Authorization is the base
-ref's committed `owners[].github_id` — a numeric id, because a login can be
-renamed and recycled.
+ref's committed `owners[].id` — a numeric id, because a login can be
+renamed and recycled. A root published before 0.5.0 spells that field
+`github_id`; the parser reads either, and matches on the number.
 
 `governance.auto_merge` in [deployment policy](policy.md) moves the line
 between the two lanes and nothing else:
