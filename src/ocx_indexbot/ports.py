@@ -52,8 +52,9 @@ class RegistryPort(Protocol):
         `repository`.
 
         `reference` is a tag name or an OCI-style `sha256:<hex>` digest
-        string. Raises `KeyError` if `reference` does not exist on
-        `repository` (a 404 response) — used both by `core/observe.py`'s
+        string. Raises `ocx_indexbot.errors.ManifestNotFound` (a `KeyError`
+        carrying the registry's OCI error code) if `reference` does not
+        exist on `repository` (a 404 response) — used both by `core/observe.py`'s
         per-tag manifest walk and `core/validate_entry.py`'s digest-scope
         check (does a claimed content digest actually resolve on the
         physical repo).

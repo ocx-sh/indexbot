@@ -171,3 +171,21 @@ def test_regenerate_rederives_source_never_carries_it_over() -> None:
         first, (_observation("3.28.1", _DIGEST_A, None),), None, FixedClock(fixed="T2")
     )
     assert second.source is None
+
+
+def test_regenerate_keeps_the_ephemeral_marker_on_unchanged_and_moved_tags() -> None:
+    current = _root(
+        {
+            "snap-1": TagEntry(content=_DIGEST_A, observed="T0", ephemeral=True),
+            "snap-2": TagEntry(content=_DIGEST_A, observed="T0", ephemeral=True),
+        }
+    )
+    observations = (_observation("snap-1", _DIGEST_A), _observation("snap-2", _DIGEST_B))
+    result = regenerate(current, observations, None, FixedClock(fixed="T1"))
+    assert result.tags["snap-1"] == current.tags["snap-1"]
+    assert result.tags["snap-2"] == TagEntry(content=_DIGEST_B, observed="T1", ephemeral=True)
+
+
+def test_regenerate_new_tag_is_durable() -> None:
+    result = regenerate(_root({}), (_observation("1.0.0", _DIGEST_A),), None, FixedClock())
+    assert result.tags["1.0.0"].ephemeral is False

@@ -67,7 +67,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, Final, cast
 
-from ocx_indexbot.cli.classify_pr import classify_pull_request
+from ocx_indexbot.cli.classify_pr import classify_pull_request, tag_change_summary
 from ocx_indexbot.core.diff import ChangeClass
 from ocx_indexbot.core.maintainers import parse_maintainers
 from ocx_indexbot.core.policy import AutoMerge, IndexPolicy
@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     import argparse
 
     from ocx_indexbot.model import CommitStatusState, Owner, PullRequestInfo
-    from ocx_indexbot.ports import ForgePort
+    from ocx_indexbot.ports import ForgePort, RegistryPort
 
 _STATUS_CONTEXT: Final[str] = "governance/review-required"
 _MAINTAINERS_PATH: Final[str] = ".github/maintainers.yml"
@@ -240,18 +240,22 @@ def _approver(github: ForgePort, info: PullRequestInfo) -> str | None:
     return next((eligible[user_id] for user_id in approvals if user_id in eligible), None)
 
 
-def _assign_reviewers_and_comment(github: ForgePort, info: PullRequestInfo, *, reason: str) -> None:
+def _assign_reviewers_and_comment(
+    github: ForgePort, info: PullRequestInfo, *, reason: str, policy: IndexPolicy
+) -> None:
     """G-20: reviewers from committed `.github/maintainers.yml` (base ref),
     minus the PR author (self-review carve-out), plus one idempotent
-    comment explaining why review is needed."""
+    comment explaining why review is needed and listing the tag changes —
+    removals and `ephemeral` marker changes included — it is asked to judge.
+    The list is PR-head content, so it goes in a fenced block."""
     logins = _reviewer_logins(github, info)
     if logins:
         github.request_reviewers(info.number, logins)
-    github.create_comment(
-        info.number,
-        f"{_COMMENT_MARKER}\nThis PR requires human review: {reason}.",
-        marker=_COMMENT_MARKER,
-    )
+    body = f"{_COMMENT_MARKER}\nThis PR requires human review: {reason}."
+    summary = tag_change_summary(info, github, policy=policy)
+    if summary:
+        body += f"\n\nTag changes:\n\n```text\n{summary}\n```"
+    github.create_comment(info.number, body, marker=_COMMENT_MARKER)
 
 
 def gate_pull_request(
@@ -295,7 +299,7 @@ def gate_pull_request(
     # `adapters/gitlab_api.py` treats as the no-op it is. So the abort this
     # ordering protects against is the unexpected refusal, not a routine one.
     if state != "success":
-        _assign_reviewers_and_comment(github, info, reason=description)
+        _assign_reviewers_and_comment(github, info, reason=description, policy=policy)
     github.set_commit_status(
         info.head_sha,
         context=_STATUS_CONTEXT,
@@ -311,12 +315,18 @@ def gate_pull_request(
     return state
 
 
-def run(args: argparse.Namespace, *, github: ForgePort, policy: IndexPolicy) -> ExitCode:
+def run(
+    args: argparse.Namespace,
+    *,
+    github: ForgePort,
+    policy: IndexPolicy,
+    registry: RegistryPort | None = None,
+) -> ExitCode:
     """`indexbot governance-check --pr-number <n>` entry point. See module
     docstring for the pipeline."""
     pr_number = cast(int, args.pr_number)
     info = github.get_pull_request_info(pr_number)
-    change_class = classify_pull_request(info, github, policy=policy)
+    change_class = classify_pull_request(info, github, policy=policy, registry=registry)
     state = gate_pull_request(info, change_class, github, policy=policy)
     write_ci_output("disposition", state)
     return ExitCode.OK

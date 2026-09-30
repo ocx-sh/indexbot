@@ -276,6 +276,65 @@ def test_threat_yank_marker_survives_and_human_gated() -> None:
     assert classify_change(before, after) == "human-review-required"
 
 
+# --- ephemeral tag removals (snapshot lifecycle ADR § Threats) --------------
+
+
+def _removal_github(base: PackageRoot, head: PackageRoot) -> FakeGitHub:
+    """A PR by the package's own owner (id 1) — the identity a stolen forge
+    token carries — that changes one root from `base` to `head`."""
+    files = {
+        (_ROOT_PATH, "base-sha"): serialize_package_root(base),
+        (_ROOT_PATH, "head-sha"): serialize_package_root(head),
+        (".github/maintainers.yml", "base-sha"): _MAINTAINERS,
+    }
+    info = PullRequestInfo(
+        number=1,
+        base_sha="base-sha",
+        head_sha="head-sha",
+        changed_paths=(_ROOT_PATH,),
+        author_login="alice",
+        author_id=1,
+    )
+    return FakeGitHub(files=files, pull_request_info={1: info})
+
+
+def test_threat_mark_and_remove_in_one_request(_github_output: Path) -> None:
+    """A request that marks a durable row ephemeral and removes it in one go
+    is a durable removal: the marker is read from the BASE only, so the
+    head's marker is inert and the registry's `MANIFEST_UNKNOWN` does not
+    matter. Human lane."""
+    base = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
+    github = _removal_github(base, _root(tags={}))
+
+    governance_check.run(
+        argparse.Namespace(pr_number=1),
+        github=github,
+        policy=make_policy(),
+        registry=FakeRegistry(),  # confirms MANIFEST_UNKNOWN for every tag
+    )
+
+    _context, state, _description = github.statuses["head-sha"][0]
+    assert state == "pending"
+    assert github.requested_reviewers[1] == ["carol"]
+
+
+def test_threat_stolen_token_removes_ephemeral_rows_of_live_tags(_github_output: Path) -> None:
+    """Ruling C: an owner-authored removal of an ephemeral row still needs the
+    canonical registry to answer `MANIFEST_UNKNOWN`. A tag that still
+    resolves keeps the request in the human lane."""
+    snap = TagEntry(content=_DIGEST_A, observed=_TS, ephemeral=True)
+    github = _removal_github(_root(tags={"snap-1": snap}), _root(tags={}))
+    live = FakeRegistry(manifests={("oci://ghcr.io/ocx-contrib/cmake", "snap-1"): {}})
+
+    governance_check.run(
+        argparse.Namespace(pr_number=1), github=github, policy=make_policy(), registry=live
+    )
+
+    _context, state, _description = github.statuses["head-sha"][0]
+    assert state == "pending"
+    assert github.requested_reviewers[1] == ["carol"]
+
+
 # --- an empty (byte-identical) diff produces no merge content --------------
 
 

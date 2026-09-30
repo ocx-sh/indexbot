@@ -389,6 +389,22 @@ def test_yanked_vanished_tag_does_not_escalate() -> None:
     assert result == ExitCode.OK
 
 
+def test_ephemeral_vanished_tag_does_not_escalate() -> None:
+    # An ephemeral tag is meant to vanish; `ocx package announce` removes its
+    # row, so reconcile reports nothing for it.
+    files = InMemoryFiles()
+    committed_digest = "sha256:" + "a" * 64
+    entry = TagEntry(content=committed_digest, observed="T0", ephemeral=True)
+    _put_root(files, "kitware", "cmake", _root(tags={"snap-1": entry}))
+    _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
+    github = FakeGitHub()
+
+    result = _run(_args(), files=files, registry=FakeRegistry(), github=github)
+
+    assert result == ExitCode.OK
+    assert not github.issues
+
+
 def test_non_yanked_vanished_tag_escalates_to_anomaly() -> None:
     # ADR-6 FP-2/FP-3: everything else vanished-upstream is an anomaly, not
     # a silent drop.

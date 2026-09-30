@@ -60,9 +60,10 @@ def regenerate(
     keeps that entry's `observed` timestamp **unchanged** — no gratuitous
     timestamp churn on a no-op re-observe, which is what makes "run twice,
     second diff empty" hold. A new or changed-content tag gets
-    `observed = clock.now_iso8601()`. An existing `yanked` marker survives
-    untouched (human-governed, G-05) even if that tag's content also
-    changed this run. A tag present in `current.tags` but absent from
+    `observed = clock.now_iso8601()`. An existing `yanked` or `ephemeral`
+    marker survives untouched (human-governed, G-05; the marker is
+    immutable) even if that tag's content also changed this run. A new tag
+    is durable: this writer has no `--ephemeral`. A tag present in `current.tags` but absent from
     `observations` (removed upstream) is dropped.
 
     `source`: re-derived from `observations`, never carried over from
@@ -94,6 +95,7 @@ def regenerate(
             content=observation.content_digest,
             observed=clock.now_iso8601(),
             yanked=existing.yanked if existing is not None else None,
+            ephemeral=existing.ephemeral if existing is not None else False,
         )
     return PackageRoot(
         name=current.name,

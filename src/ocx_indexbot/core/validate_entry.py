@@ -617,13 +617,26 @@ def _tag_entry_to_dict(entry: TagEntry) -> dict[str, Any]:
     data: dict[str, Any] = {"content": entry.content, "observed": entry.observed}
     if entry.yanked is not None:
         data["yanked"] = _yank_to_dict(entry.yanked)
+    if entry.ephemeral:
+        data["ephemeral"] = True
     return data
 
 
 def _tag_entry_from_dict(data: dict[str, Any]) -> TagEntry:
     yanked_raw = data.get("yanked")
     yanked = None if yanked_raw is None else _yank_from_dict(yanked_raw)
-    return TagEntry(content=data["content"], observed=data["observed"], yanked=yanked)
+    # One spelling (schema `const: true`): a `false` or `"true"` would parse
+    # as durable here and still read as a marker to a human reviewer.
+    if data.get("ephemeral", True) is not True:
+        raise ValidationError(
+            f"tag entry `ephemeral` must be JSON true when present, got {data['ephemeral']!r}"
+        )
+    return TagEntry(
+        content=data["content"],
+        observed=data["observed"],
+        yanked=yanked,
+        ephemeral="ephemeral" in data,
+    )
 
 
 def serialize_package_root(root: PackageRoot) -> bytes:

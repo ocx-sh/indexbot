@@ -200,6 +200,10 @@ _G05_MUTATIONS: list[tuple[str, Callable[[PackageRoot], PackageRoot]]] = [
             },
         ),
     ),
+    (
+        "ephemeral",
+        lambda r: replace(r, tags={"1.0.0": replace(r.tags["1.0.0"], ephemeral=True)}),
+    ),
 ]
 
 
@@ -209,7 +213,8 @@ def test_g05_governance_key_change_is_human_review(
 ) -> None:
     """G-05 (Amendment A1 corrected key set): mutating any of
     `{repository, owners, status, deprecated_message, superseded_by, yanked}`
-    forces `human-review-required`."""
+    forces `human-review-required` — plus `ephemeral`, immutable once
+    committed (snapshot lifecycle ADR)."""
     base = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
     assert classify_change(base, mutate(base)) == "human-review-required", key
 

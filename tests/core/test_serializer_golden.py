@@ -78,7 +78,7 @@ def test_required_fixture_inventory() -> None:
     unlisted file nor a missing one slips past the CAS check above.
     """
     root_names = {p.name for p in _ROOT_FIXTURES}
-    assert {"minimal.json", "full-fields.json"} <= root_names, (
+    assert {"minimal.json", "full-fields.json", "with-ephemeral.json"} <= root_names, (
         f"missing required root fixtures; found {sorted(root_names)}"
     )
 

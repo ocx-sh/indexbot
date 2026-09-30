@@ -156,6 +156,25 @@ indexbot classify-pr --pr-number N
 Writes `classification` as a job output. Reads the PR through the API —
 never a checkout.
 
+A removed tag row is machine-lane only when the row carries
+`"ephemeral": true` **at the base** and a manifest GET against the
+canonical registry answers `MANIFEST_UNKNOWN`:
+
+| Change | Lane |
+|---|---|
+| Ephemeral-at-base row removed, registry answers `MANIFEST_UNKNOWN` | refresh (then G-19 as usual) |
+| Ephemeral-at-base row removed, tag still resolves or any other answer | human review |
+| Durable row removed | human review, under every `governance.auto_merge` |
+| `ephemeral` added to or removed from an existing row | human review |
+| New row, with or without the marker | unchanged |
+
+A marker added in the same request is ignored, so marking and removing a
+row at once is a durable removal. The registry is the one the base-ref
+policy configures for the host; a host whose declared `credentials_env` is
+unset in the job cannot confirm anything, and its removals go to human
+review. The human-review comment lists each root's tag changes, removals
+and marker changes included.
+
 ## `governance-check`
 
 The privileged gate: ownership, review requirements, auto-merge disposition.

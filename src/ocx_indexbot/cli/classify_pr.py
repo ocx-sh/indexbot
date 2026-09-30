@@ -22,10 +22,11 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Final, cast, get_args
 
-from ocx_indexbot.core.diff import ChangeClass, classify_change
+from ocx_indexbot.core.diff import ChangeClass, classify_change, tag_diff_summary
 from ocx_indexbot.core.grammar import package_id_max_length
 from ocx_indexbot.core.policy import IndexPolicy
-from ocx_indexbot.core.validate_entry import parse_package_root
+from ocx_indexbot.core.registry_checks import check_tag_gone
+from ocx_indexbot.core.validate_entry import check_repository_allowlisted, parse_package_root
 from ocx_indexbot.exit_codes import ExitCode
 
 from ._common import write_ci_output
@@ -33,8 +34,8 @@ from ._common import write_ci_output
 if TYPE_CHECKING:
     import argparse
 
-    from ocx_indexbot.model import PullRequestInfo
-    from ocx_indexbot.ports import ForgePort
+    from ocx_indexbot.model import PackageRoot, PullRequestInfo
+    from ocx_indexbot.ports import ForgePort, RegistryPort
 
 _SEVERITY: Final[dict[ChangeClass, int]] = {
     "refresh": 0,
@@ -137,7 +138,41 @@ def _every_path_in_refresh_scope(
     )
 
 
-def _classify_one_root(github: ForgePort, path: str, info: PullRequestInfo) -> ChangeClass:
+def _removal_class(
+    before: PackageRoot,
+    after: PackageRoot,
+    registry: RegistryPort | None,
+    *,
+    policy: IndexPolicy,
+) -> ChangeClass:
+    """Whether the rows `after` drops may merge unreviewed.
+
+    Only a row marked `ephemeral` **at the base** may, and only once the
+    canonical registry confirms the tag is gone (ruling C). The marker is read
+    from `before` alone, so a request that marks and removes a row in one go
+    removes a durable row. A durable removal is human review on every dial;
+    `registry is None` (no network checks) confirms nothing.
+    """
+    for tag, entry in before.tags.items():
+        if tag in after.tags:
+            continue
+        if not entry.ephemeral or registry is None:
+            return "human-review-required"
+        # SSRF ordering (G-03, ADR-4 BD-1): before the first registry call.
+        check_repository_allowlisted(before.repository, policy.registry_hosts)
+        if not check_tag_gone(before.repository, tag, registry):
+            return "human-review-required"
+    return "refresh"
+
+
+def _classify_one_root(
+    github: ForgePort,
+    path: str,
+    info: PullRequestInfo,
+    registry: RegistryPort | None,
+    *,
+    policy: IndexPolicy,
+) -> ChangeClass:
     base_raw = github.get_file_contents(path, info.base_sha)
     head_raw = github.get_file_contents(path, info.head_sha)
     if head_raw is None:
@@ -148,11 +183,33 @@ def _classify_one_root(github: ForgePort, path: str, info: PullRequestInfo) -> C
         return "human-review-required"
     before = parse_package_root(base_raw) if base_raw is not None else None
     after = parse_package_root(head_raw)
-    return classify_change(before, after)
+    change_class = classify_change(before, after)
+    if change_class == "refresh" and before is not None:
+        return _removal_class(before, after, registry, policy=policy)
+    return change_class
+
+
+def tag_change_summary(info: PullRequestInfo, github: ForgePort, *, policy: IndexPolicy) -> str:
+    """One `<root>: <tag diff>` line per root present on both sides — the
+    removals and marker changes a reviewer is being asked to judge."""
+    lines: list[str] = []
+    for path in info.changed_paths:
+        if not _is_package_root_path(path, name_segments=policy.name_segments):
+            continue
+        base_raw = github.get_file_contents(path, info.base_sha)
+        head_raw = github.get_file_contents(path, info.head_sha)
+        if base_raw is not None and head_raw is not None:
+            before, after = parse_package_root(base_raw), parse_package_root(head_raw)
+            lines.append(f"{path}: {tag_diff_summary(before, after)}")
+    return "\n".join(lines)
 
 
 def classify_pull_request(
-    info: PullRequestInfo, github: ForgePort, *, policy: IndexPolicy
+    info: PullRequestInfo,
+    github: ForgePort,
+    *,
+    policy: IndexPolicy,
+    registry: RegistryPort | None = None,
 ) -> ChangeClass:
     """Worst-classification-wins aggregate across every
     `p/<namespace>/<package>.json` root in `info.changed_paths`
@@ -171,6 +228,9 @@ def classify_pull_request(
     package refreshes. Ignoring the rest of the diff instead would let an
     owner of one package attach arbitrary repository content to a
     refresh-classified PR and ride `governance.yml`'s `gh pr merge --auto`.
+
+    `registry` confirms ephemeral removals (`_removal_class`); without one,
+    every removal is `"human-review-required"`.
     """
     root_paths = [
         path
@@ -185,19 +245,25 @@ def classify_pull_request(
         return "human-review-required"
     worst: ChangeClass = "refresh"
     for path in root_paths:
-        change_class = _classify_one_root(github, path, info)
+        change_class = _classify_one_root(github, path, info, registry, policy=policy)
         if _SEVERITY[change_class] > _SEVERITY[worst]:
             worst = change_class
     return worst
 
 
-def run(args: argparse.Namespace, *, github: ForgePort, policy: IndexPolicy) -> ExitCode:
+def run(
+    args: argparse.Namespace,
+    *,
+    github: ForgePort,
+    policy: IndexPolicy,
+    registry: RegistryPort | None = None,
+) -> ExitCode:
     """`indexbot classify-pr --pr-number <n>` entry point. See module
     docstring for the pipeline; `classify_pull_request` is this module's
-    reusable core, `cli/governance_check.py`'s only import from here."""
+    reusable core."""
     pr_number = cast(int, args.pr_number)
     info = github.get_pull_request_info(pr_number)
-    classification = classify_pull_request(info, github, policy=policy)
+    classification = classify_pull_request(info, github, policy=policy, registry=registry)
 
     apply_change_class(info, classification, github)
     write_ci_output("classification", classification)

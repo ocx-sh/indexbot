@@ -19,8 +19,8 @@ keeps every subcommand's environment requirements independent of the others.
 The same call-time rule governs this deployment's registry-host policy
 (`.github/index-policy.json`, `core/policy.py`): the four subcommands that
 resolve a `repository` load and check it here, at wiring time, before any
-work; `render`/`classify-pr`/`governance-check` never touch a registry host
-and are deliberately left able to run without a policy file at all.
+work; `render` never touches a registry host. The governance lanes touch one
+only to confirm an ephemeral tag removal (`_confirmation_registry`).
 """
 
 from __future__ import annotations
@@ -174,6 +174,25 @@ def _anonymous_registry(policy: IndexPolicy) -> RoutedRegistry:
     `validate-pr` — which builds its registry from the *base-ref* policy it
     reads mid-run, not from the one this module can see."""
     return _registry(policy, credentialed=False)
+
+
+def _confirmation_registry(policy: IndexPolicy) -> RoutedRegistry:
+    """The governance lanes' registry, for ruling C's "is this ephemeral tag
+    really gone" GET — built from the BASE-ref policy, so credentialed.
+
+    A host whose declared credential is unset gets no client at all rather
+    than an anonymous one: `RoutedRegistry` then refuses it, and
+    `core/registry_checks.check_tag_gone` reads that refusal as "not
+    confirmed", so the removal goes to human review. An anonymous 404 from a
+    private registry would otherwise prove nothing and still auto-merge.
+    """
+    return RoutedRegistry(
+        {
+            host: _registry_client(config, os.environ)
+            for host, config in policy.registries.items()
+            if not config.credentials_env or os.environ.get(config.credentials_env)
+        }
+    )
 
 
 def _require_registry_credentials(policy: IndexPolicy) -> None:
@@ -462,19 +481,28 @@ def _base_ref_policy(github: ForgePort) -> IndexPolicy:
 
 def _run_classify_pr(args: argparse.Namespace) -> ExitCode:
     github = _forge_api()
-    return classify_pr.run(args, github=github, policy=_base_ref_policy(github))
+    policy = _base_ref_policy(github)
+    return classify_pr.run(
+        args, github=github, policy=policy, registry=_confirmation_registry(policy)
+    )
 
 
 def _run_governance_check(args: argparse.Namespace) -> ExitCode:
     github = _forge_api()
-    return governance_check.run(args, github=github, policy=_base_ref_policy(github))
+    policy = _base_ref_policy(github)
+    return governance_check.run(
+        args, github=github, policy=policy, registry=_confirmation_registry(policy)
+    )
 
 
 def _run_governance_poll(args: argparse.Namespace) -> ExitCode:
     """Same port set and same base-ref policy read as `governance-check` —
     the poll lane differs in *when* it runs, never in what it may see."""
     github = _forge_api()
-    return governance_poll.run(args, github=github, policy=_base_ref_policy(github))
+    policy = _base_ref_policy(github)
+    return governance_poll.run(
+        args, github=github, policy=policy, registry=_confirmation_registry(policy)
+    )
 
 
 def _run_governance_gate(args: argparse.Namespace) -> ExitCode:
@@ -492,7 +520,10 @@ def _run_governance_gate(args: argparse.Namespace) -> ExitCode:
     if cast(bool, args.arm_only):
         return governance_gate.run_arm_only(args, github=_forge_api())
     github = _forge_api()
-    return governance_gate.run(args, github=github, policy=_base_ref_policy(github))
+    policy = _base_ref_policy(github)
+    return governance_gate.run(
+        args, github=github, policy=policy, registry=_confirmation_registry(policy)
+    )
 
 
 def _run_label_failed_run(args: argparse.Namespace) -> ExitCode:
@@ -536,7 +567,9 @@ call site, since every port construction already happens inside each
 `classify-pr`/`governance-check`/`governance-gate`/`governance-poll` all
 reuse `_forge_api()`, which exposes only `GITHUB_TOKEN`/`GITHUB_REPOSITORY`
 (no write-scoped `RegistryPort`/`FilePort` credential; none of these
-subcommands needs one, CONTRACTS.md §12). What that token must be *allowed*
+subcommands needs one, CONTRACTS.md §12). Their `RegistryPort` is read-only
+and serves one question — whether a removed ephemeral tag is gone
+(`_confirmation_registry`). What that token must be *allowed*
 to do differs by invocation, and only that: `governance-gate` arms or
 withdraws auto-merge unless `--no-arm` is given, and arming is a deferred
 write to the base branch. The generated GitHub lane keeps that scope in its

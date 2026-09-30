@@ -68,3 +68,19 @@ class ForgeError(IndexBotError):
     """
 
     _exit_code = ExitCode.VALIDATION_FAILURE
+
+
+class ManifestNotFound(KeyError):
+    """`RegistryPort.get_manifest`'s 404, carrying the registry's OCI error
+    `code` (`MANIFEST_UNKNOWN`, `NAME_UNKNOWN`, …) or `None` when the body
+    named none.
+
+    A `KeyError`, not an `IndexBotError`: a missing manifest is an answer
+    every existing caller already handles as `KeyError`. The code exists for
+    the one caller that must tell "this tag is gone" apart from every other
+    404 before auto-merging a removal (`core/registry_checks.check_tag_gone`).
+    """
+
+    def __init__(self, message: str, *, code: str | None) -> None:
+        super().__init__(message)
+        self.code = code

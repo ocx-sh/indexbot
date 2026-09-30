@@ -82,7 +82,7 @@ if TYPE_CHECKING:
     from ocx_indexbot.core.diff import ChangeClass
     from ocx_indexbot.core.policy import IndexPolicy
     from ocx_indexbot.model import CommitStatusState
-    from ocx_indexbot.ports import ForgePort
+    from ocx_indexbot.ports import ForgePort, RegistryPort
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -142,7 +142,12 @@ def sync_auto_merge(number: int, github: ForgePort, *, disposition: str, head_sh
 
 
 def gate_pull_request_and_sync_auto_merge(
-    number: int, github: ForgePort, *, policy: IndexPolicy, arm: bool = True
+    number: int,
+    github: ForgePort,
+    *,
+    policy: IndexPolicy,
+    arm: bool = True,
+    registry: RegistryPort | None = None,
 ) -> tuple[ChangeClass, CommitStatusState]:
     """Classify, label, gate, and arm/withdraw auto-merge for one pull
     request — the whole per-PR governance lane as a single call.
@@ -153,9 +158,12 @@ def gate_pull_request_and_sync_auto_merge(
     `arm=False` is `--no-arm`: everything except the auto-merge write, for the
     caller that holds the merge scope in a separate job and replays the
     decision there through `sync_auto_merge`.
+
+    `registry` confirms ephemeral tag removals (ruling C); `None` sends every
+    removal to human review.
     """
     info = github.get_pull_request_info(number)
-    change_class = classify_pull_request(info, github, policy=policy)
+    change_class = classify_pull_request(info, github, policy=policy, registry=registry)
     apply_change_class(info, change_class, github)
     state = gate_pull_request(info, change_class, github, policy=policy)
     if arm:
@@ -180,13 +188,23 @@ def run_arm_only(args: argparse.Namespace, *, github: ForgePort) -> ExitCode:
     return ExitCode.OK
 
 
-def run(args: argparse.Namespace, *, github: ForgePort, policy: IndexPolicy) -> ExitCode:
+def run(
+    args: argparse.Namespace,
+    *,
+    github: ForgePort,
+    policy: IndexPolicy,
+    registry: RegistryPort | None = None,
+) -> ExitCode:
     """`indexbot governance-gate --pr <n> [--no-arm]` entry point.
 
     `--arm-only` never reaches here — see `run_arm_only`.
     """
     _change_class, state = gate_pull_request_and_sync_auto_merge(
-        cast(int, args.pr), github, policy=policy, arm=not cast(bool, args.no_arm)
+        cast(int, args.pr),
+        github,
+        policy=policy,
+        arm=not cast(bool, args.no_arm),
+        registry=registry,
     )
     write_ci_output("disposition", state)
     return ExitCode.OK

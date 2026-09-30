@@ -67,21 +67,31 @@ if TYPE_CHECKING:
     import argparse
 
     from ocx_indexbot.core.policy import IndexPolicy
-    from ocx_indexbot.ports import ForgePort
+    from ocx_indexbot.ports import ForgePort, RegistryPort
 
 
-def _gate_one(number: int, github: ForgePort, *, policy: IndexPolicy) -> str:
+def _gate_one(
+    number: int, github: ForgePort, *, policy: IndexPolicy, registry: RegistryPort | None
+) -> str:
     """One merge request's outcome line — via the exact same body
     `cli/governance_gate.py`'s single-PR gate runs. See that module for what
     "gate" includes (classify, label, set the commit status, assign review,
     arm or withdraw auto-merge); this wrapper only formats the sweep's
     per-MR stderr line.
     """
-    change_class, state = gate_pull_request_and_sync_auto_merge(number, github, policy=policy)
+    change_class, state = gate_pull_request_and_sync_auto_merge(
+        number, github, policy=policy, registry=registry
+    )
     return f"{change_class} -> {state}"
 
 
-def run(args: argparse.Namespace, *, github: ForgePort, policy: IndexPolicy) -> ExitCode:
+def run(
+    args: argparse.Namespace,
+    *,
+    github: ForgePort,
+    policy: IndexPolicy,
+    registry: RegistryPort | None = None,
+) -> ExitCode:
     """`indexbot governance-poll` entry point — takes no arguments.
 
     The exit code is the worst one any single merge request produced, ordered
@@ -95,7 +105,7 @@ def run(args: argparse.Namespace, *, github: ForgePort, policy: IndexPolicy) -> 
     print(f"governance-poll: {len(numbers)} open merge request(s)", file=sys.stderr)
     for number in numbers:
         try:
-            outcome = _gate_one(number, github, policy=policy)
+            outcome = _gate_one(number, github, policy=policy, registry=registry)
         except IndexBotError as exc:
             print(f"governance-poll: #{number}: {exc}", file=sys.stderr)
             worst = max(worst, exc.exit_code)

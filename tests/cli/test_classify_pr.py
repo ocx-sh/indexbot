@@ -7,8 +7,9 @@ import pytest
 
 from ocx_indexbot.cli import classify_pr
 from ocx_indexbot.core.validate_entry import serialize_package_root
+from ocx_indexbot.errors import ManifestNotFound, TransientError, ValidationError
 from ocx_indexbot.model import Owner, PackageRoot, PullRequestInfo, TagEntry, Yank
-from tests.fakes import FakeGitHub, make_policy
+from tests.fakes import FakeGitHub, FakeRegistry, make_policy
 
 _OWNER = Owner(login="alice", id=1)
 _OTHER_OWNER = Owner(login="bob", id=2)
@@ -170,6 +171,103 @@ def test_cas_object_path_is_excluded_from_root_shape() -> None:
     assert (
         classify_pr.classify_pull_request(info, github, policy=make_policy())
         == "human-review-required"
+    )
+
+
+# --- tag removals and the ephemeral marker (ADR snapshot lifecycle) ---------
+
+_REPO = "oci://ghcr.io/kitware/cmake"
+_KEPT = TagEntry(content="sha256:" + "a" * 64, observed="T0")
+_SNAP = TagEntry(content="sha256:" + "b" * 64, observed="T0", ephemeral=True)
+_DURABLE = TagEntry(content="sha256:" + "b" * 64, observed="T0")
+
+
+def _classify(
+    before: dict[str, TagEntry],
+    after: dict[str, TagEntry],
+    registry: FakeRegistry | None,
+) -> str:
+    github = _github(
+        changed_paths=(_ROOT_PATH,),
+        base_files={_ROOT_PATH: _root(tags=before)},
+        head_files={_ROOT_PATH: _root(tags=after)},
+    )
+    info = github.get_pull_request_info(1)
+    return classify_pr.classify_pull_request(info, github, policy=make_policy(), registry=registry)
+
+
+def test_ephemeral_removal_confirmed_manifest_unknown_is_refresh() -> None:
+    assert _classify({"1.0": _KEPT, "snap": _SNAP}, {"1.0": _KEPT}, FakeRegistry()) == "refresh"
+
+
+def test_ephemeral_removal_of_a_live_tag_is_human_review() -> None:
+    registry = FakeRegistry(manifests={(_REPO, "snap"): {"schemaVersion": 2}})
+    assert _classify({"snap": _SNAP}, {}, registry) == "human-review-required"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ManifestNotFound("repository gone", code="NAME_UNKNOWN"),
+        ManifestNotFound("bare 404", code=None),
+        TransientError("backoff exhausted"),
+        ValidationError("no registry client for host 'ghcr.io'"),
+    ],
+    ids=["name-unknown", "bare-404", "transient", "missing-credential"],
+)
+def test_ephemeral_removal_without_confirmation_is_human_review(error: Exception) -> None:
+    registry = FakeRegistry(manifest_errors={(_REPO, "snap"): error})
+    assert _classify({"snap": _SNAP}, {}, registry) == "human-review-required"
+
+
+def test_ephemeral_removal_with_network_checks_disabled_is_human_review() -> None:
+    assert _classify({"snap": _SNAP}, {}, None) == "human-review-required"
+
+
+def test_durable_removal_is_human_review_even_when_the_registry_confirms() -> None:
+    assert _classify({"1.0": _DURABLE}, {}, FakeRegistry()) == "human-review-required"
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(_DURABLE, _SNAP), (_SNAP, _DURABLE)],
+    ids=["marker-added", "marker-removed"],
+)
+def test_marker_change_on_an_existing_row_is_human_review(
+    before: TagEntry, after: TagEntry
+) -> None:
+    assert _classify({"1.0": before}, {"1.0": after}, FakeRegistry()) == "human-review-required"
+
+
+@pytest.mark.parametrize("entry", [_DURABLE, _SNAP], ids=["durable", "ephemeral"])
+def test_new_row_keeps_existing_governance(entry: TagEntry) -> None:
+    assert _classify({}, {"new": entry}, None) == "refresh"
+
+
+def test_ephemeral_removal_checks_the_allowlist_before_the_registry() -> None:
+    """SSRF ordering (G-03): a base root whose host left the policy never
+    reaches the registry."""
+    registry = FakeRegistry()
+    github = _github(
+        changed_paths=(_ROOT_PATH,),
+        base_files={_ROOT_PATH: _root(repository="oci://evil.example/x", tags={"snap": _SNAP})},
+        head_files={_ROOT_PATH: _root(repository="oci://evil.example/x", tags={})},
+    )
+    info = github.get_pull_request_info(1)
+    with pytest.raises(ValidationError, match=r"evil\.example"):
+        classify_pr.classify_pull_request(info, github, policy=make_policy(), registry=registry)
+
+
+def test_tag_change_summary_lists_roots_present_on_both_sides() -> None:
+    github = _github(
+        changed_paths=(_ROOT_PATH, _OTHER_ROOT_PATH, ".github/x.yml"),
+        base_files={_ROOT_PATH: _root(tags={"snap": _SNAP}), _OTHER_ROOT_PATH: None},
+        head_files={_ROOT_PATH: _root(tags={}), _OTHER_ROOT_PATH: _root()},
+    )
+    info = github.get_pull_request_info(1)
+    assert (
+        classify_pr.tag_change_summary(info, github, policy=make_policy())
+        == f"{_ROOT_PATH}: -snap (ephemeral)"
     )
 
 

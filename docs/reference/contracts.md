@@ -556,6 +556,7 @@ def regenerate(
   absent from `observations` (removed upstream) is **dropped**.
 - `yanked`: an existing `TagEntry.yanked` marker survives untouched
   (human-governed, G-05) even if that tag's content also changed this run.
+  So does `ephemeral` (immutable once committed); a new tag is durable.
 
   **Open question** (neither ADR states this explicitly): does a
   re-published digest under a yanked tag name clear the yank? This
@@ -606,8 +607,9 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
     Concretely: `repository`, `owners`, `status`, `deprecated_message`,
     `created`, `upstream`, or `superseded_by` differing -> `"human-review-required"`,
     OR any tag present in both `before.tags` and `after.tags` has a
-    different `yanked` value (G-05's expanded key set, ADR-4 disposition
-    table) — else `"refresh"`. `name` is not checked here (pinned by
+    different `yanked` or `ephemeral` value (G-05's expanded key set, ADR-4
+    disposition table) — else `"refresh"`. A removed row stays `"refresh"`
+    here; `cli/classify_pr.py` decides it against the registry. `name` is not checked here (pinned by
     `check_name_matches_path` instead — a structural invariant, not a
     governance-vs-machine distinction); `desc` is not checked here either
     (bot-derived from the registry's `__ocx.desc` tag, `core/desc.py` — not
@@ -881,7 +883,7 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   escalate (ADR-6 FP-2/FP-3 — a decided rule, no longer an open question)
   *unless* the committed `TagEntry.yanked is not None` for that tag: yank is
   grace, an explicit owner-authorized exemption from the registry-existence
-  check — `_PackageReport` carries the committed root's yanked-tag names
+  check (an `ephemeral` row is exempt too — its tag is meant to vanish) — `_PackageReport` carries the committed root's yanked-tag names
   precisely so `_escalating_findings` can tell a yanked-and-vanished tag
   apart from a plain silent drop. A non-empty escalating-finding set
   opens/updates one anomaly issue via `ForgePort.create_or_update_issue`
@@ -961,7 +963,11 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   `diff.classify_change` -> the **worst** classification across all changed
   roots wins (`"human-review-required"` > `"new-package"` > `"refresh"` —
   a PR touching two packages where one is a refresh and one needs human
-  review is human-review-required overall) -> `add_labels`.
+  review is human-review-required overall) -> `add_labels`. A `refresh` root
+  that removes rows is downgraded to `"human-review-required"` unless every
+  removed row is `ephemeral` at the base and `RegistryPort.get_manifest`
+  raises `ManifestNotFound` with code `MANIFEST_UNKNOWN` for it
+  (`core/registry_checks.check_tag_gone`, after the G-03 allowlist check).
 - **`cli/governance_check.py`** (extended, fork-PR announce revamp — G-19/
   G-20): re-derives the classification via
   `classify_pr.classify_pull_request` (unchanged single-source-of-truth

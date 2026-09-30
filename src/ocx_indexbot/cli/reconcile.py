@@ -37,7 +37,8 @@ None` for that tag: yank is grace, an explicit owner-authorized exemption
 from the registry-existence check; a tag vanishing from the registry with
 no yank marker at all is an anomaly, not a silent drop (`_PackageReport`
 carries the committed root's yanked-tag names so `_escalating_findings` can
-tell the two apart).
+tell the two apart). An `ephemeral` row gets the same exemption: its tag is
+meant to vanish, and `ocx package announce` is what removes the row.
 
 `tag-unrecordable` takes that same grace, and for the same reason: both ask
 what the registry currently serves for a tag the index may already have
@@ -141,6 +142,11 @@ class _PackageReport:
     """Committed tag names with a non-`None` `TagEntry.yanked` marker — the
     grace exemption `_escalating_findings` checks a `"tag-missing-upstream"`
     finding's tag name against (ADR-6 FP-2/FP-3)."""
+
+    ephemeral_tags: frozenset[str]
+    """Committed tag names marked `ephemeral` — also exempt from
+    `"tag-missing-upstream"`: announce removes such a row once its tag is
+    gone, so a missing tag there is expected, not an anomaly."""
 
     unrecordable_tags: tuple[str, ...]
     """`"<tag>: <reason>"` for every *live* committed tag whose current
@@ -258,17 +264,18 @@ def _verify_one(
         pinned_mutations=pinned_mutations,
         claim_findings=claim_findings,
         yanked_tags=yanked_tags,
+        ephemeral_tags=frozenset(tag for tag, entry in root.tags.items() if entry.ephemeral),
         unrecordable_tags=tuple(unrecordable),
     )
 
 
-def _escalates(finding: ClaimFinding, *, yanked_tags: frozenset[str]) -> bool:
+def _escalates(finding: ClaimFinding, *, grace_tags: frozenset[str]) -> bool:
     """ADR-6 FP-2/FP-3: `"tag-missing-upstream"` escalates unless the
     claimed tag is yanked (yank = grace, an explicit exemption from the
-    registry-existence check) — every other escalating kind is
+    registry-existence check) or ephemeral — every other escalating kind is
     unconditional."""
     if finding.kind == "tag-missing-upstream":
-        return finding.detail not in yanked_tags
+        return finding.detail not in grace_tags
     return finding.kind in _ESCALATING_CLAIM_KINDS
 
 
@@ -284,7 +291,7 @@ def _escalating_findings(report: _PackageReport) -> tuple[str, ...]:
     lines.extend(
         f"{report.package_id} {finding.kind}: {finding.detail}"
         for finding in report.claim_findings
-        if _escalates(finding, yanked_tags=report.yanked_tags)
+        if _escalates(finding, grace_tags=report.yanked_tags | report.ephemeral_tags)
     )
     return tuple(lines)
 
