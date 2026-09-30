@@ -61,4 +61,7 @@ set is chosen to make that falsifiable — a bare `slim` rolling tag (not a
 version, contributes nothing on its own), a prerelease-bearing
 `musl-3.13.1-rc1` (which the narrower `_VERSION_RE` would reject, dropping
 `musl`), and an unprefixed `3.13.1`/`latest` pair (the default variant, which
-has no name and must not appear).
+has no name and must not appear). `with-ephemeral.json` carries the
+`ephemeral` tag-row marker, alone and after a `yanked` object — the
+`content, observed, yanked, ephemeral` key order `ocx package announce`
+writes too.

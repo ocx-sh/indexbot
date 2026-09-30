@@ -644,6 +644,51 @@ def test_serialize_package_root_tag_omits_yanked_when_absent_and_includes_when_p
     assert parsed["tags"]["3.27.0"]["yanked"] == {"reason": "cve", "at": "2026-07-18T00:00:00Z"}
 
 
+def test_serialize_package_root_tag_emits_ephemeral_only_when_set_after_yanked() -> None:
+    """Key order is byte-visible and shared with `ocx package announce`'s
+    writer: `content, observed, yanked, ephemeral`."""
+    yank = Yank(reason="cve", at="2026-07-18T00:00:00Z")
+    durable = TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z")
+    marked = TagEntry(
+        content="sha256:" + "b" * 64, observed="2026-07-17T00:00:00Z", yanked=yank, ephemeral=True
+    )
+    root = _minimal_root(tags={"3.28.1": durable, "snap-1": marked})
+    parsed = json.loads(validate_entry.serialize_package_root(root))
+    assert list(parsed["tags"]["3.28.1"]) == ["content", "observed"]
+    assert list(parsed["tags"]["snap-1"]) == ["content", "observed", "yanked", "ephemeral"]
+    assert parsed["tags"]["snap-1"]["ephemeral"] is True
+
+
+def test_parse_package_root_round_trips_ephemeral_marker() -> None:
+    tags = {
+        "1.0.0": TagEntry(content="sha256:" + "a" * 64, observed="2026-07-17T00:00:00Z"),
+        "snap-1": TagEntry(
+            content="sha256:" + "b" * 64, observed="2026-07-17T00:00:00Z", ephemeral=True
+        ),
+    }
+    raw = validate_entry.serialize_package_root(_minimal_root(tags=tags))
+    parsed = validate_entry.parse_package_root(raw)
+    assert parsed.tags["snap-1"].ephemeral is True
+    assert parsed.tags["1.0.0"].ephemeral is False
+    assert validate_entry.serialize_package_root(parsed) == raw
+
+
+@pytest.mark.parametrize("value", [False, None, "true", 1, 0, {}, [True]])
+def test_parse_package_root_rejects_a_non_true_ephemeral_value(value: object) -> None:
+    """Schema `const: true`: one spelling. `1` is checked because Python's
+    `1 == True` would let an `==` comparison through."""
+    raw = json.loads(validate_entry.serialize_package_root(_minimal_root()))
+    raw["tags"] = {
+        "1.0.0": {
+            "content": "sha256:" + "a" * 64,
+            "observed": "2026-07-17T00:00:00Z",
+            "ephemeral": value,
+        }
+    }
+    with pytest.raises(ValidationError, match="ephemeral"):
+        validate_entry.parse_package_root(json.dumps(raw).encode())
+
+
 def test_serialize_package_root_upstream_repository_url_omitted_when_none() -> None:
     root = _minimal_root(upstream=Upstream(org="OCX"))
     parsed = json.loads(validate_entry.serialize_package_root(root))

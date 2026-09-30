@@ -7,8 +7,12 @@ from __future__ import annotations
 import pytest
 from fakes import FakeRegistry
 
-from ocx_indexbot.core.registry_checks import check_digest_in_scope, check_ownership
-from ocx_indexbot.errors import ValidationError
+from ocx_indexbot.core.registry_checks import (
+    check_digest_in_scope,
+    check_ownership,
+    check_tag_gone,
+)
+from ocx_indexbot.errors import ManifestNotFound, TransientError, ValidationError
 
 
 def test_check_digest_in_scope_ok_when_manifest_exists_on_own_repository() -> None:
@@ -56,3 +60,30 @@ def test_check_ownership_unconfirmed_is_the_loud_default_never_a_silent_pass() -
     registry = FakeRegistry()
     result = check_ownership("ghcr.io/ocx-contrib/cmake", "ocx.sh/kitware/cmake", registry)
     assert result == "unconfirmed"
+
+
+_REPO = "oci://ghcr.io/ocx-contrib/cmake"
+
+
+def test_check_tag_gone_true_only_on_manifest_unknown() -> None:
+    assert check_tag_gone(_REPO, "snap-1", FakeRegistry()) is True
+
+
+def test_check_tag_gone_false_while_the_tag_still_resolves() -> None:
+    registry = FakeRegistry(manifests={(_REPO, "snap-1"): {"schemaVersion": 2}})
+    assert check_tag_gone(_REPO, "snap-1", registry) is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ManifestNotFound("gone repo", code="NAME_UNKNOWN"),
+        ManifestNotFound("bare 404", code=None),
+        TransientError("backoff exhausted"),
+        ValidationError("403 denied"),
+    ],
+    ids=["name-unknown", "bare-404", "transient", "denied"],
+)
+def test_check_tag_gone_false_on_every_other_answer(error: Exception) -> None:
+    registry = FakeRegistry(manifest_errors={(_REPO, "snap-1"): error})
+    assert check_tag_gone(_REPO, "snap-1", registry) is False

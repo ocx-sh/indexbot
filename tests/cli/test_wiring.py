@@ -417,6 +417,24 @@ def test_the_fork_lane_registry_holds_no_credential_even_when_one_is_exported(
     assert not fork.by_host["artifactory.corp"].credentials
 
 
+def test_confirmation_registry_drops_a_host_whose_credential_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ruling C: an anonymous 404 from a private registry proves nothing, so
+    a host missing its declared credential gets no client — the governance
+    lane then cannot confirm a removal and sends it to human review."""
+    monkeypatch.setenv("OCX_REGISTRY_SET", "svc:secret")
+    monkeypatch.delenv("OCX_REGISTRY_UNSET", raising=False)
+    policy = _wiring._index_policy(  # pyright: ignore[reportPrivateUsage]
+        b'{"name": "acme.corp", "name_segments": 2, "registry_hosts": ["ghcr.io", '
+        b'{"host": "set.corp", "credentials_env": "OCX_REGISTRY_SET"}, '
+        b'{"host": "unset.corp", "credentials_env": "OCX_REGISTRY_UNSET"}]}'
+    )
+    registry = _wiring._confirmation_registry(policy)  # pyright: ignore[reportPrivateUsage]
+    assert set(registry.by_host) == {"ghcr.io", "set.corp"}
+    assert registry.by_host["set.corp"].credentials == "svc:secret"
+
+
 def test_require_registry_credentials_refuses_a_lane_missing_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

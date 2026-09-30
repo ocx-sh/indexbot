@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ocx_indexbot.core.diff import classify_change, diff
+from ocx_indexbot.core.diff import classify_change, diff, tag_diff_summary
 from ocx_indexbot.core.observe import Observation
 from ocx_indexbot.model import (
     Owner,
@@ -192,3 +192,50 @@ def test_classify_change_new_tag_only_is_refresh() -> None:
     before = _root({})
     after = _root({"3.28.1": TagEntry(content=_DIGEST_A, observed="T0")})
     assert classify_change(before, after) == "refresh"
+
+
+def test_classify_change_ephemeral_marker_added_is_human_review() -> None:
+    before = _root({"3.28.1": TagEntry(content=_DIGEST_A, observed="T0")})
+    after = _root({"3.28.1": TagEntry(content=_DIGEST_A, observed="T0", ephemeral=True)})
+    assert classify_change(before, after) == "human-review-required"
+
+
+def test_classify_change_ephemeral_marker_removed_is_human_review() -> None:
+    before = _root({"3.28.1": TagEntry(content=_DIGEST_A, observed="T0", ephemeral=True)})
+    after = _root({"3.28.1": TagEntry(content=_DIGEST_A, observed="T0")})
+    assert classify_change(before, after) == "human-review-required"
+
+
+def test_classify_change_leaves_a_removal_to_the_registry_aware_caller() -> None:
+    """A removed row is `refresh` here: `cli/classify_pr.py` decides whether
+    it may merge unreviewed, because that needs the registry."""
+    before = _root({"3.28.1": TagEntry(content=_DIGEST_A, observed="T0")})
+    assert classify_change(before, _root({})) == "refresh"
+
+
+def test_classify_change_new_ephemeral_tag_is_refresh() -> None:
+    after = _root({"snap-1": TagEntry(content=_DIGEST_A, observed="T0", ephemeral=True)})
+    assert classify_change(_root({}), after) == "refresh"
+
+
+def test_tag_diff_summary_names_removals_and_marker_changes() -> None:
+    before = _root(
+        {
+            "1.0.0": TagEntry(content=_DIGEST_A, observed="T0"),
+            "2.0.0": TagEntry(content=_DIGEST_A, observed="T0"),
+            "snap-1": TagEntry(content=_DIGEST_A, observed="T0", ephemeral=True),
+            "snap-2": TagEntry(content=_DIGEST_A, observed="T0", ephemeral=True),
+        }
+    )
+    after = _root(
+        {
+            "2.0.0": TagEntry(content=_DIGEST_A, observed="T0", ephemeral=True),
+            "snap-2": TagEntry(content=_DIGEST_B, observed="T1"),
+            "snap-3": TagEntry(content=_DIGEST_B, observed="T1", ephemeral=True),
+        }
+    )
+    assert tag_diff_summary(before, after) == (
+        "2.0.0: ephemeral marker added, "
+        f"~snap-2 -> sha256:{'b' * 12}, snap-2: ephemeral marker removed, "
+        "+snap-3 (ephemeral), -1.0.0, -snap-1 (ephemeral)"
+    )

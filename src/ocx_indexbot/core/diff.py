@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from ocx_indexbot.model import PackageId, PackageRoot
+from ocx_indexbot.model import PackageId, PackageRoot, TagEntry
 
 if TYPE_CHECKING:
     from ocx_indexbot.core.observe import Observation
@@ -23,17 +23,28 @@ class Patch:
     summary: str  # one-line PR-body fragment, e.g. "+3.29.0, ~latest -> sha256:bbbb"
 
 
-def _tag_diff_summary(current: PackageRoot, target: PackageRoot) -> str:
+def tag_diff_summary(current: PackageRoot, target: PackageRoot) -> str:
+    """Added, moved and removed tags, plus every `ephemeral` marker change —
+    the PR-body fragment and the human-review comment's tag line."""
+
+    def label(tag: str, entry: TagEntry) -> str:
+        return f"{tag} (ephemeral)" if entry.ephemeral else tag
+
     parts: list[str] = []
     for tag in sorted(target.tags):
-        if tag not in current.tags:
-            parts.append(f"+{tag}")
-        elif current.tags[tag].content != target.tags[tag].content:
-            short = target.tags[tag].content.removeprefix("sha256:")[:12]
+        entry = target.tags[tag]
+        existing = current.tags.get(tag)
+        if existing is None:
+            parts.append(f"+{label(tag, entry)}")
+            continue
+        if existing.content != entry.content:
+            short = entry.content.removeprefix("sha256:")[:12]
             parts.append(f"~{tag} -> sha256:{short}")
+        if existing.ephemeral != entry.ephemeral:
+            parts.append(f"{tag}: ephemeral marker {'added' if entry.ephemeral else 'removed'}")
     for tag in sorted(current.tags):
         if tag not in target.tags:
-            parts.append(f"-{tag}")
+            parts.append(f"-{label(tag, current.tags[tag])}")
     return ", ".join(parts) if parts else "metadata updated"
 
 
@@ -79,7 +90,7 @@ def diff(
         package_id=package_id,
         root=target,
         new_objects=new_objects,
-        summary=_tag_diff_summary(current, target),
+        summary=tag_diff_summary(current, target),
     )
 
 
@@ -96,8 +107,11 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
     through auto-merge. Concretely: `repository`, `owners`, `status`,
     `deprecated_message`, `created`, `upstream`, or `superseded_by` differing
     -> `"human-review-required"`, OR any tag present in both `before.tags`
-    and `after.tags` has a different `yanked` value (G-05's expanded key set,
-    ADR-4 disposition table) — else `"refresh"`. `name` is deliberately not
+    and `after.tags` has a different `yanked` or `ephemeral` value (G-05's
+    expanded key set, ADR-4 disposition table; the marker is immutable) —
+    else `"refresh"`. A removed row is still `"refresh"` here: whether its
+    removal may merge unreviewed needs the registry, so
+    `cli/classify_pr.py` decides it, not this pure function. `name` is deliberately not
     checked here — it's pinned by `check_name_matches_path` instead, a
     structural invariant, not a governance-vs-machine distinction. `desc` is
     deliberately not checked here either — it's bot-derived from the
@@ -123,6 +137,9 @@ def classify_change(before: PackageRoot | None, after: PackageRoot) -> ChangeCla
         return "human-review-required"
     for tag, before_entry in before.tags.items():
         after_entry = after.tags.get(tag)
-        if after_entry is not None and after_entry.yanked != before_entry.yanked:
+        if after_entry is not None and (
+            after_entry.yanked != before_entry.yanked
+            or after_entry.ephemeral != before_entry.ephemeral
+        ):
             return "human-review-required"
     return "refresh"

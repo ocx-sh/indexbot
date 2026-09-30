@@ -9,7 +9,7 @@ from ocx_indexbot.cli import governance_check
 from ocx_indexbot.core.validate_entry import serialize_package_root
 from ocx_indexbot.errors import ForgeError
 from ocx_indexbot.model import Owner, PackageRoot, PullRequestInfo, TagEntry
-from tests.fakes import FakeGitHub, make_policy
+from tests.fakes import FakeGitHub, FakeRegistry, make_policy
 
 _OWNER = Owner(login="alice", id=1)
 _OTHER_OWNER = Owner(login="bob", id=2)
@@ -140,6 +140,35 @@ def test_refresh_but_author_not_owner_falls_back_to_pending_with_reviewers(
     assert _COMMENT_MARKER in github.comments[1][_COMMENT_MARKER]
     # Not machine-lane -> auto-merge must not be armed.
     assert "pending" in _github_output.read_text(encoding="utf-8")
+
+
+# --- tag removals (ADR snapshot lifecycle, ruling C) -------------------------
+
+
+def test_confirmed_ephemeral_removal_by_the_owner_sets_success() -> None:
+    snap = TagEntry(content="sha256:" + "a" * 64, observed="T0", ephemeral=True)
+    github = _github(pr_number=1, base=_root(tags={"snap": snap}), head=_root(tags={}))
+
+    governance_check.run(
+        _args(pr_number=1), github=github, policy=make_policy(), registry=FakeRegistry()
+    )
+
+    assert github.statuses[_HEAD][0][1] == "success"
+    assert github.comments == {}
+
+
+def test_durable_removal_pends_and_the_comment_lists_the_tag_changes() -> None:
+    durable = TagEntry(content="sha256:" + "a" * 64, observed="T0")
+    github = _github(pr_number=1, base=_root(tags={"1.0.0": durable}), head=_root(tags={}))
+
+    governance_check.run(
+        _args(pr_number=1), github=github, policy=make_policy(), registry=FakeRegistry()
+    )
+
+    _context, state, description = github.statuses[_HEAD][0]
+    assert (state, description) == ("pending", "human-review-required: awaiting human review")
+    comment = github.comments[1][_COMMENT_MARKER]
+    assert comment.endswith(f"Tag changes:\n\n```text\n{_ROOT_PATH}: -1.0.0\n```")
 
 
 def test_refresh_author_owns_one_of_two_touched_packages_falls_back_to_pending() -> None:

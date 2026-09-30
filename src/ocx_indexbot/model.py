@@ -126,11 +126,16 @@ class TagEntry:
     served by the physical registry; those exact bytes are stored at
     `p/<ns>/<pkg>/o/sha256/<hex>.json`. One digest namespace: the registry
     computed it over the same bytes this index commits.
+
+    `ephemeral` is the `--ephemeral` announce marker: the row may be removed
+    without review once the registry confirms the tag is gone
+    (`cli/classify_pr.py`). Absent means durable. Immutable once committed.
     """
 
     content: str
     observed: str
     yanked: Yank | None = None
+    ephemeral: bool = False
 
 
 @dataclass(frozen=True, slots=True)

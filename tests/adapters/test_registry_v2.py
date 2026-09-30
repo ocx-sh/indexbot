@@ -22,7 +22,7 @@ import respx
 
 from ocx_indexbot.adapters import registry_v2
 from ocx_indexbot.adapters.registry_v2 import RegistryV2, RoutedRegistry
-from ocx_indexbot.errors import AnomalyError, TransientError, ValidationError
+from ocx_indexbot.errors import AnomalyError, ManifestNotFound, TransientError, ValidationError
 from ocx_indexbot.ports import RegistryPort
 
 _BASE = "https://ghcr.io"
@@ -234,6 +234,42 @@ def test_get_manifest_404_raises_keyerror() -> None:
     registry = RegistryV2()
     with pytest.raises(KeyError):
         registry.get_manifest(_REPOSITORY, "missing")
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [
+        (
+            b'{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}',
+            "MANIFEST_UNKNOWN",
+        ),
+        (b'{"errors":[{"code":"NAME_UNKNOWN"}]}', "NAME_UNKNOWN"),
+        (b"", None),
+        (b"<html>not found</html>", None),
+        (b'{"errors":[]}', None),
+        (b'{"errors":"MANIFEST_UNKNOWN"}', None),
+        (b'{"errors":[{"code":7}]}', None),
+    ],
+    ids=[
+        "manifest-unknown",
+        "name-unknown",
+        "empty",
+        "html",
+        "no-errors",
+        "wrong-shape",
+        "int-code",
+    ],
+)
+def test_get_manifest_404_surfaces_the_oci_error_code(body: bytes, code: str | None) -> None:
+    """Ruling C auto-merges an ephemeral removal only on the registry's own
+    `MANIFEST_UNKNOWN`; a proxy's bare or HTML 404 must carry no code."""
+    respx.get(f"{_BASE}/v2/{_REPO_PATH}/manifests/snap-1").mock(
+        return_value=httpx.Response(404, content=body)
+    )
+    with pytest.raises(ManifestNotFound) as excinfo:
+        RegistryV2().get_manifest(_REPOSITORY, "snap-1")
+    assert excinfo.value.code == code
 
 
 @respx.mock

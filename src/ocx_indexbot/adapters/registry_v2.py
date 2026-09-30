@@ -70,7 +70,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from ocx_indexbot.core.backoff import BackoffPolicy, delay_seconds, is_retryable_status
-from ocx_indexbot.errors import AnomalyError, TransientError, ValidationError
+from ocx_indexbot.errors import AnomalyError, ManifestNotFound, TransientError, ValidationError
 from ocx_indexbot.model import ManifestFetch
 
 if TYPE_CHECKING:
@@ -328,6 +328,17 @@ def _embedded_identifier(manifest: dict[str, object]) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _oci_error_code(response: httpx.Response) -> str | None:
+    """The first `errors[].code` of an OCI distribution-spec error body, or
+    `None` when the body is not one — a bare 404 from a proxy or CDN names no
+    code, and must not read as the registry's own `MANIFEST_UNKNOWN`."""
+    try:
+        code = response.json()["errors"][0]["code"]
+    except (ValueError, LookupError, TypeError):
+        return None
+    return code if isinstance(code, str) else None
+
+
 @dataclass(slots=True)
 class RegistryV2:
     """`RegistryPort` over one Registry v2 host (defaults to `ghcr.io`). One
@@ -411,7 +422,9 @@ class RegistryV2:
         )
         response = self._send("GET", url, repo_path=repo_path, headers={"Accept": _MANIFEST_ACCEPT})
         if response.status_code == 404:
-            raise KeyError(f"no manifest for {repository}@{reference}")
+            raise ManifestNotFound(
+                f"no manifest for {repository}@{reference}", code=_oci_error_code(response)
+            )
         response.raise_for_status()
         raw = response.content
         computed_digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"

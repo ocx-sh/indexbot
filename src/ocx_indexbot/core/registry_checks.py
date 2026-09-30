@@ -17,7 +17,7 @@ pass, per G-15's carry-forward table.
 
 from __future__ import annotations
 
-from ocx_indexbot.errors import ValidationError
+from ocx_indexbot.errors import IndexBotError, ManifestNotFound, ValidationError
 from ocx_indexbot.model import OwnershipProbeResult
 from ocx_indexbot.ports import RegistryPort
 
@@ -59,3 +59,23 @@ def check_ownership(
     §5's explicit split of "probe" from "decide".
     """
     return registry.probe_ownership(repository, expected_name)
+
+
+def check_tag_gone(repository: str, tag: str, registry: RegistryPort) -> bool:
+    """Ruling C: `True` only when a canonical manifest GET for `tag` answers
+    the OCI error code `MANIFEST_UNKNOWN` — the one answer that proves the
+    registry itself no longer holds the tag.
+
+    Everything else is `False`, and the caller sends the removal to human
+    review: the tag still resolving (a stolen forge token removing a live
+    ephemeral row), any other 404 code or a bare 404, a refused credential,
+    exhausted backoff. Never raises for those — a registry that cannot answer
+    is not a reason to fail the gate, only a reason not to auto-merge.
+    """
+    try:
+        registry.get_manifest(repository, tag)
+    except ManifestNotFound as exc:
+        return exc.code == "MANIFEST_UNKNOWN"
+    except IndexBotError:
+        return False
+    return False

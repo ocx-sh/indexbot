@@ -30,7 +30,7 @@ from ocx_indexbot.core.policy import (
     IndexPolicy,
     RegistryConfig,
 )
-from ocx_indexbot.errors import TransientError, ValidationError
+from ocx_indexbot.errors import ManifestNotFound, TransientError, ValidationError
 from ocx_indexbot.model import (
     CommitStatusState,
     ManifestFetch,
@@ -84,6 +84,11 @@ class FakeRegistry:
     ownership: dict[str, OwnershipProbeResult] = field(
         default_factory=dict[str, OwnershipProbeResult]
     )
+    manifest_errors: dict[tuple[str, str], Exception] = field(
+        default_factory=dict[tuple[str, str], Exception]
+    )
+    """Raised by `get_manifest` for that `(repository, reference)` instead of
+    the default answer — another 404 code, a refused credential, backoff."""
 
     def list_tags(self, repository: str) -> list[str]:
         return list(self.tags.get(repository, []))
@@ -104,10 +109,14 @@ class FakeRegistry:
         assertion written against this fake into a tautology
         (`test_fake_registry_manifest_bytes_are_not_canonical_json` guards it).
         """
+        if (repository, reference) in self.manifest_errors:
+            raise self.manifest_errors[(repository, reference)]
         try:
             manifest = self.manifests[(repository, reference)]
         except KeyError:
-            raise KeyError(f"no manifest for {repository}@{reference}") from None
+            raise ManifestNotFound(
+                f"no manifest for {repository}@{reference}", code="MANIFEST_UNKNOWN"
+            ) from None
         raw = json.dumps(manifest, indent=2, ensure_ascii=True).encode("utf-8")
         digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
         return ManifestFetch(raw=raw, digest=digest, parsed=manifest)
