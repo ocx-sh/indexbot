@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-09-30
+
+### Added
+
+- Accept the ephemeral tag marker; auto-merge a removal only once the registry confirms the tag is gone *(governance)*
+
 ## [0.6.2] - 2026-09-10
 
 ### Fixed
@@ -166,6 +172,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump locked pip to 26.2.1 for PYSEC-2026-3721 (#718)
 - Apply index-side review findings (round 1) (#720)
 - Wheel:check failed because its search succeeded *(ci)*
+[0.6.3]: https://github.com/ocx-sh/indexbot/compare/v0.6.2..v0.6.3
 [0.6.2]: https://github.com/ocx-sh/indexbot/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/ocx-sh/indexbot/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/ocx-sh/indexbot/compare/v0.5.1..v0.6.0
