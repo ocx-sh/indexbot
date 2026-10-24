@@ -73,7 +73,13 @@ from ocx_indexbot.cli.classify_pr import classify_pull_request, tag_change_summa
 from ocx_indexbot.core.diff import ChangeClass
 from ocx_indexbot.core.maintainers import parse_maintainers
 from ocx_indexbot.core.policy import AutoMerge, IndexPolicy
-from ocx_indexbot.core.validate_entry import parse_package_root
+from ocx_indexbot.core.validate_entry import (
+    cas_relpath,
+    closure_counts,
+    parse_digest,
+    parse_package_id,
+    parse_package_root,
+)
 from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 
@@ -82,7 +88,13 @@ from ._common import write_ci_output
 if TYPE_CHECKING:
     import argparse
 
-    from ocx_indexbot.model import CommitStatusState, Owner, PullRequestInfo
+    from ocx_indexbot.model import (
+        CommitStatusState,
+        Owner,
+        PackageId,
+        PackageRoot,
+        PullRequestInfo,
+    )
     from ocx_indexbot.ports import ForgePort, RegistryPort
 
 _STATUS_CONTEXT: Final[str] = "governance/review-required"
@@ -252,18 +264,77 @@ def _approver(github: ForgePort, info: PullRequestInfo) -> str | None:
     return next((eligible[user_id] for user_id in approvals if user_id in eligible), None)
 
 
+def _cas_at_head(
+    github: ForgePort, info: PullRequestInfo, package_id: PackageId, root: PackageRoot
+) -> dict[str, bytes]:
+    """Every object `root` references that exists in the PR head's CAS tree,
+    read through `ForgePort.get_file_contents`. A digest that is not
+    well-formed is never turned into a path: it is simply absent."""
+    candidates = [(entry.content, ("json",)) for entry in root.tags.values()]
+    if root.desc is not None:
+        candidates += [(root.desc.readme, ("md",)), (root.desc.logo, ("svg", "png"))]
+    cas: dict[str, bytes] = {}
+    for digest, extensions in candidates:
+        if digest is None:
+            continue
+        try:
+            parse_digest(digest)
+        except ValidationError:
+            continue
+        for ext in extensions:
+            raw = github.get_file_contents(cas_relpath(package_id, digest, ext), info.head_sha)
+            if raw is not None:
+                cas[digest] = raw
+                break
+    return cas
+
+
+def _closure_summary(info: PullRequestInfo, github: ForgePort, *, policy: IndexPolicy) -> str:
+    """One `` `<root>`: N referenced, M missing, K bad`` line per touched root
+    that exists at the head and parses. The path is untrusted, so it is only
+    printed once it has been through `parse_package_id`."""
+    lines: list[str] = []
+    for path in info.changed_paths:
+        if not _is_package_root_path(path, name_segments=policy.name_segments):
+            continue
+        head_raw = github.get_file_contents(path, info.head_sha)
+        if head_raw is None:
+            continue
+        try:
+            package_id = parse_package_id(
+                path.removeprefix("p/").removesuffix(".json"), name_segments=policy.name_segments
+            )
+            root = parse_package_root(head_raw)
+        except ValidationError:
+            continue
+        counts = closure_counts(root, _cas_at_head(github, info, package_id, root))
+        lines.append(
+            f"`{path}`: {counts.referenced} referenced, {counts.missing} missing, {counts.bad} bad"
+        )
+    return "\n".join(lines)
+
+
 def _assign_reviewers_and_comment(
     github: ForgePort, info: PullRequestInfo, *, reason: str, policy: IndexPolicy
 ) -> None:
     """G-20: reviewers from committed `.github/maintainers.yml` (base ref),
     minus the PR author (self-review carve-out), plus one idempotent
     comment explaining why review is needed and listing the tag changes —
-    removals and `ephemeral` marker changes included — it is asked to judge.
-    The list is PR-head content, so it goes in a fenced block."""
+    removals and `ephemeral` marker changes included — it is asked to judge,
+    who can release the merge request, and how complete each touched root's
+    CAS closure is at the head. The tag list is PR-head content, so it goes in
+    a fenced block."""
     logins = _reviewer_logins(github, info)
     if logins:
         github.request_reviewers(info.number, logins)
-    body = f"{_COMMENT_MARKER}\nThis PR requires human review: {reason}."
+    body = (
+        f"{_COMMENT_MARKER}\nThis PR requires human review: {reason}."
+        "\n\nRelease: a committed maintainer other than the author approves "
+        f"at head {info.head_sha[:12]}."
+    )
+    closure = _closure_summary(info, github, policy=policy)
+    if closure:
+        body += f"\n\n{closure}"
     summary = tag_change_summary(info, github, policy=policy)
     if summary:
         body += f"\n\nTag changes:\n\n```text\n{summary}\n```"

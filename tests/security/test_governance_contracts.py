@@ -798,3 +798,8 @@ def test_g20_human_lane_assigns_maintainers_reviewers(_github_output: Path) -> N
     assert list(github.comments[1]) == [
         "<!-- indexbot:governance -->"
     ]  # one marker, updated in place
+    body = github.comments[1]["<!-- indexbot:governance -->"]
+    assert (
+        "Release: a committed maintainer other than the author approves at head head-sha." in body
+    )
+    assert f"`{root_path}`: 0 referenced, 0 missing, 0 bad" in body

@@ -239,6 +239,13 @@ stalled merge request but a permanently unmergeable one. On GitHub it changes
 nothing about who may merge — `governance/review-required` is deliberately not
 a required check there — it only makes the status say what already happened.
 
+The human-review comment says so in a sentence (`Release: a committed
+maintainer other than the author approves at head <sha>.`) and adds one line
+per touched root, `` `p/<id>.json`: N referenced, M missing, K bad ``: how many
+distinct CAS objects the root at the pull request's head points at, how many of
+those are absent from the head, and how many are present but do not hash to
+their digest. A re-run edits that comment in place.
+
 GitHub records the commit each review was left on, so a stale approval does
 not count. GitLab's approvals carry no commit, and its documented remedy —
 **Remove all approvals when commits are added** — is Premium: on Free the

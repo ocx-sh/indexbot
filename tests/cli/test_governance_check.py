@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,7 +10,7 @@ import pytest
 from ocx_indexbot.cli import governance_check
 from ocx_indexbot.core.validate_entry import serialize_package_root
 from ocx_indexbot.errors import ForgeError
-from ocx_indexbot.model import Owner, PackageRoot, PullRequestInfo, TagEntry
+from ocx_indexbot.model import Desc, Owner, PackageRoot, PullRequestInfo, TagEntry
 from tests.fakes import FakeGitHub, FakeRegistry, make_policy
 
 _OWNER = Owner(login="alice", id=1)
@@ -294,6 +296,89 @@ def test_comment_is_idempotent_across_repeated_runs() -> None:
 
     # One marker key, updated in place — never a second, distinct comment.
     assert list(github.comments[1]) == [_COMMENT_MARKER]
+
+
+def _digest_of(raw: bytes) -> str:
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _cas_path(digest: str, ext: str, *, root_path: str = _ROOT_PATH) -> str:
+    return f"{root_path.removesuffix('.json')}/o/sha256/{digest.removeprefix('sha256:')}.{ext}"
+
+
+def _comment(github: FakeGitHub) -> str:
+    return github.comments[1][_COMMENT_MARKER]
+
+
+def test_comment_says_who_releases_and_counts_the_closure_read_at_head() -> None:
+    good_raw, bad_raw, readme_raw, logo_raw = b"good", b"bad", b"# readme", b"\x89PNG"
+    good, bad = _digest_of(good_raw), "sha256:" + "c" * 64
+    missing, readme, logo = "sha256:" + "d" * 64, _digest_of(readme_raw), _digest_of(logo_raw)
+    head = _root(
+        owners=(_OTHER_OWNER,),
+        tags={
+            "1.0": TagEntry(content=good, observed="T0"),
+            "2.0": TagEntry(content=bad, observed="T0"),
+            "3.0": TagEntry(content=missing, observed="T0"),
+        },
+    )
+    head = replace(
+        head, desc=Desc(digest="d", title="t", description="x", readme=readme, logo=logo)
+    )
+    github = _github(pr_number=1, base=_root(), head=head)
+    github.files[(_cas_path(good, "json"), _HEAD)] = good_raw
+    github.files[(_cas_path(bad, "json"), _HEAD)] = bad_raw
+    github.files[(_cas_path(readme, "md"), _HEAD)] = readme_raw
+    github.files[(_cas_path(logo, "png"), _HEAD)] = logo_raw
+    # A base-only object proves the census reads at head, not base.
+    github.files[(_cas_path(missing, "json"), _BASE)] = b"whatever"
+
+    governance_check.run(_args(), github=github, policy=make_policy())
+    first = _comment(github)
+    governance_check.run(_args(), github=github, policy=make_policy())
+
+    assert (
+        f"Release: a committed maintainer other than the author approves at head {_HEAD[:12]}."
+        in first
+    )
+    assert f"`{_ROOT_PATH}`: 5 referenced, 1 missing, 1 bad" in first
+    assert _comment(github) == first
+    assert list(github.comments[1]) == [_COMMENT_MARKER]
+
+
+def test_closure_line_treats_a_malformed_digest_as_missing_without_fetching() -> None:
+    head = _root(
+        owners=(_OTHER_OWNER,),
+        tags={"1.0": TagEntry(content="../../etc/passwd", observed="T0")},
+    )
+    # A desc with neither readme nor logo references nothing extra.
+    head = replace(head, desc=Desc(digest="d", title="t", description="x"))
+    github = _github(pr_number=1, base=_root(), head=head)
+
+    governance_check.run(_args(), github=github, policy=make_policy())
+
+    assert f"`{_ROOT_PATH}`: 1 referenced, 1 missing, 0 bad" in _comment(github)
+
+
+def test_closure_census_skips_roots_it_cannot_read() -> None:
+    # A deleted root, a path that is not a valid package id, and a head root
+    # that does not parse (reachable behind an out-of-scope path, which sends
+    # the PR to the human lane before any root is parsed) get no line.
+    deleted, bad_id, unparsable = "p/kitware/gone.json", "p/Bad_Id/cmake.json", "p/kitware/x.json"
+    github = _github(
+        pr_number=1,
+        base=_root(),
+        head=_root(owners=(_OTHER_OWNER,)),
+        changed_paths=(_ROOT_PATH, deleted, bad_id, unparsable, "README.md"),
+    )
+    github.files[(bad_id, _HEAD)] = serialize_package_root(_root())
+    github.files[(unparsable, _HEAD)] = b"not json"
+
+    governance_check.run(_args(), github=github, policy=make_policy())
+
+    body = _comment(github)
+    assert f"`{_ROOT_PATH}`: 0 referenced, 0 missing, 0 bad" in body
+    assert body.count(": 0 referenced") == 1
 
 
 def test_run_missing_pull_request_propagates_key_error() -> None:
