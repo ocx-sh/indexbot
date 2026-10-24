@@ -453,6 +453,12 @@ it comes from settings the bot cannot set for you.
     blocking status checks, which an author cannot lift, are Premium and
     Ultimate.
 
+    On Free the human lane rests on "all threads resolved" plus the pipeline.
+    An author who also has merge rights can resolve the thread and merge
+    before the poller re-opens it. Give merge rights on the index project
+    only to maintainers, or protect the target branch so only maintainers
+    can merge.
+
 ## Environment contract
 
 Every subcommand builds its own ports at call time, so a job needs only what
