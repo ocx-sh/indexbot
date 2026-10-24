@@ -110,7 +110,7 @@ def _package_roots(
     exactly `name_segments` path segments under the `p/` prefix ending in
     `.json`, which
     excludes every CAS subtree file (`p/<ns>/<pkg>/o/sha256/**`, always
-    3+ segments). Mirrors `cli/reconcile.py`'s `_discover_package_ids`
+    3+ segments). Mirrors `cli/reconcile.py`'s `discover_package_ids`
     predicate verbatim -- see `open_questions` re: extracting a shared
     helper, out of this work package's scope to do unilaterally."""
     prefix = _p_prefix(index_dir)

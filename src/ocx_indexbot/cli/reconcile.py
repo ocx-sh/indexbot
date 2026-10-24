@@ -183,7 +183,7 @@ def _root_path(package_id: PackageId) -> str:
     return f"{_ROOT_PREFIX}{package_id}.json"
 
 
-def _discover_package_ids(
+def discover_package_ids(
     files: FilePort, *, scope: PackageId | None, name_segments: int
 ) -> tuple[PackageId, ...]:
     """Every `p/<namespace>/<package>.json` root, excluding CAS subtrees.
@@ -391,7 +391,7 @@ def run(
     the real adapters; tests supply `tests/fakes`.
     """
     scope = _resolve_scope(args, name_segments=policy.name_segments)
-    package_ids = _discover_package_ids(files, scope=scope, name_segments=policy.name_segments)
+    package_ids = discover_package_ids(files, scope=scope, name_segments=policy.name_segments)
 
     findings: list[str] = []
     checked = 0

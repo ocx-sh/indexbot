@@ -62,7 +62,7 @@ def _is_package_root_path(path: str, *, name_segments: int) -> bool:
     excludes CAS objects (`p/<ns>/<pkg>/o/sha256/<hex>.json`, one level
     deeper) and anything outside `p/` entirely. Mirrors the shape check
     `cli/validate.py`'s `_package_id_from_root_path` and
-    `cli/reconcile.py`'s `_discover_package_ids` each already hand-roll for
+    `cli/reconcile.py`'s `discover_package_ids` each already hand-roll for
     their own call site (CONTRACTS.md's established per-module convention,
     not extracted into a shared helper here either)."""
     parts = path.split("/")

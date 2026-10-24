@@ -42,11 +42,13 @@ express.
 
 ```bash
 indexbot validate [--offline] [--allow-reserved-namespace] [--base-dir DIR] <path>...
+indexbot validate [--offline] --all
 ```
 
 | Flag | Meaning |
 |---|---|
-| `paths` | The changed `p/<ns>/<pkg>.json` roots to validate |
+| `paths` | The changed `p/<ns>/<pkg>.json` roots to validate; exactly one of `paths` or `--all` |
+| `--all` | Validate every committed root, found the way `reconcile` finds them. Zero roots is a pass, and a root under a reserved segment is admitted because it is already on the base ref; control-path segments stay blocked. Every root is reported, the run exits on the worst outcome |
 | `--offline` | Skip the network checks (digest-in-scope, ownership probe) |
 | `--allow-reserved-namespace` | Admit the operator's own brand segments only; control-path segments stay blocked |
 | `--base-dir` | Directory holding each root's base-ref copy, so an announce-shaped update to a root already committed under a reserved segment is not read as a fresh claim |
@@ -58,8 +60,11 @@ from an empty environment, and a root on a credentialed registry is
 shape-checked with a WARN naming the variable, then verified for real by
 `reconcile`.
 
-Takes an explicit file set, which a caller has to compute. `validate-pr` below
-computes it and is what a pipeline should run.
+Takes an explicit file set, which a caller has to compute, or `--all` for a
+sweep of a branch that is already merged (the mainline invocation). `--all` is
+for the committed tree only: a pull request names its files, so a reserved
+segment it adds is still a claim. `validate-pr` below computes the file set and
+is what a pipeline should run.
 
 ## `validate-pr`
 
