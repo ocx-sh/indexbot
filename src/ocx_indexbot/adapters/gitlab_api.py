@@ -39,7 +39,7 @@ leaves the PR visibly pending. GitLab's `merge_when_pipeline_succeeds` waits
 on the pipeline whose sha *is* the merge request's diff head — and a push
 authenticated with `CI_JOB_TOKEN` creates no pipeline at all, so an
 accumulated announce lands a head that has none and never will. Arming there
-returns 200 and waits forever. `_ensure_head_pipeline` is what closes it.
+returns 200 and waits forever. `ensure_head_pipeline` is what closes it.
 
 **MRs are created from the source project.** GitHub opens a cross-fork PR
 against the target repo with `head=owner:branch`; GitLab opens it against the
@@ -316,7 +316,7 @@ class GitLabApi:
         those lines, carrying GitLab's own explanation — which is the only
         thing that distinguishes the four causes.
         """
-        self._ensure_head_pipeline(pr_number, head_sha=head_sha)
+        self.ensure_head_pipeline(pr_number, head_sha=head_sha)
         with self._client() as client:
             response = client.put(
                 self._project_url("merge_requests", str(pr_number), "merge"),
@@ -332,7 +332,7 @@ class GitLabApi:
             return
         self._raise(response)
 
-    def _ensure_head_pipeline(self, pr_number: int, *, head_sha: str) -> None:
+    def ensure_head_pipeline(self, pr_number: int, *, head_sha: str) -> None:
         """Give `head_sha` a pipeline before `enable_auto_merge` binds to it,
         when it has none and the merge request is not a fork's.
 
@@ -357,6 +357,11 @@ class GitLabApi:
         set_commit_status`). A fork announce whose head has no pipeline stays
         stalled, and that is the cheaper side of the trade.
 
+        **Never for a head that is no longer the one the gate judged.** The
+        merge request's own `sha` is re-read here, and a pipeline created for
+        a branch that has moved would run unreviewed content with the
+        project's variables; the next tick judges the new head.
+
         Fails open on a refusal. A 400 ("No stages / jobs for this pipeline"
         — an index whose own config has no `merge_request_event` lane) or a
         403 (a governance token below Developer) is reported beside the
@@ -368,6 +373,8 @@ class GitLabApi:
         """
         payload = self._merge_request(pr_number)
         if payload.get("source_project_id") != payload.get("target_project_id"):
+            return
+        if payload.get("sha") != head_sha:
             return
         head_pipeline: Mapping[str, Any] = payload.get("head_pipeline") or {}
         if head_pipeline.get("sha") == head_sha:

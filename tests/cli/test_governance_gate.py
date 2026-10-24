@@ -12,6 +12,7 @@ the entire reason the two share one implementation rather than two.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -198,6 +199,64 @@ def test_the_poll_lane_and_the_single_pr_gate_reach_the_same_disposition() -> No
     assert via_gate.statuses[_HEAD] == via_poll.statuses[_HEAD]
     assert via_gate.auto_merge_enabled == via_poll.auto_merge_enabled == {1}
     assert via_gate.auto_merge_head_sha == via_poll.auto_merge_head_sha
+
+
+# --- human-lane head pipeline ------------------------------------------------
+
+
+def _with_changed_paths(github: FakeGitHub, *paths: str) -> None:
+    github.pull_request_info[1] = replace(github.pull_request_info[1], changed_paths=paths)
+
+
+def test_a_human_lane_pr_confined_to_the_package_tree_gets_a_head_pipeline() -> None:
+    """A job-token push creates no pipeline, so a human-lane head would sit
+    unvalidated under "pipelines must succeed"; the gate asks for one — bound
+    to the head it classified — when the diff is only `p/**`."""
+    github = _github(base=None, head=_root())
+
+    assert _run(github) is ExitCode.OK
+
+    assert github.auto_merge_enabled == set()
+    assert github.head_pipelines_ensured == [(1, _HEAD)]
+
+
+def test_a_human_lane_pr_touching_a_path_outside_the_package_tree_gets_no_pipeline() -> None:
+    """The pipeline runs the merge request's own CI config, so a diff that can
+    edit it must not be handed a pipeline holding the project's variables."""
+    github = _github(base=None, head=_root())
+    _with_changed_paths(github, _ROOT_PATH, ".gitlab-ci.yml")
+
+    _run(github)
+
+    assert github.head_pipelines_ensured == []
+
+
+def test_a_human_lane_pr_with_no_changed_paths_gets_no_pipeline() -> None:
+    github = _github(base=None, head=_root())
+    _with_changed_paths(github)
+
+    _run(github)
+
+    assert github.head_pipelines_ensured == []
+
+
+def test_a_success_disposition_never_asks_for_a_head_pipeline_here() -> None:
+    """The arm path already ensures one inside `enable_auto_merge`."""
+    github = _github(base=_root(tag_digest="a"), head=_root(tag_digest="b"))
+
+    _run(github)
+
+    assert github.auto_merge_enabled == {1}
+    assert github.head_pipelines_ensured == []
+
+
+def test_no_arm_never_asks_for_a_head_pipeline() -> None:
+    """`--no-arm` is the job without write scope; creating a pipeline is a write."""
+    github = _github(base=None, head=_root())
+
+    _run(github, no_arm=True)
+
+    assert github.head_pipelines_ensured == []
 
 
 # --- --no-arm / --arm-only: the two-job split GitHub's lane renders ----------

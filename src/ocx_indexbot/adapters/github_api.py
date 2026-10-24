@@ -334,6 +334,10 @@ class GitHubApi:
             return
         self._raise(response)
 
+    def ensure_head_pipeline(self, pr_number: int, *, head_sha: str) -> None:
+        """No-op: GitHub starts the required checks on its own."""
+        del pr_number, head_sha
+
     def withdraw_auto_merge(self, pr_number: int) -> None:
         with self._client() as client:
             pr_response = client.get(self._repo_url("pulls", str(pr_number)))

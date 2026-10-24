@@ -310,10 +310,12 @@ Both project settings are Free-tier. Enable both.
 request's head, and a push authenticated with `CI_JOB_TOKEN` triggers none —
 so an announce accumulating onto an already-open merge request lands a head
 with no pipeline, and arming auto-merge on it waits forever. The poll lane
-creates that pipeline before it arms (Developer role, and a
+creates that pipeline before it arms, and for a human-review merge request
+whose changed paths are all under `p/` (Developer role, and a
 `merge_request_event` lane in the project's own pipeline). Never for a fork
 merge request: that `POST` addresses the parent project, where it would run
-fork-authored config with the parent's token.
+fork-authored config with the parent's token. Never for a merge request that
+changes a path outside `p/`, which could edit the config that pipeline runs.
 
 Run it from a scheduled pipeline on the default branch. That is the only place
 on GitLab where parent-authored config runs with the parent's token — a fork's

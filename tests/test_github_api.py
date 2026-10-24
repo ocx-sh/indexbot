@@ -553,6 +553,17 @@ def test_the_fallback_merge_still_raises_when_the_pull_request_is_not_mergeable(
         _client().enable_auto_merge(7, head_sha="c" * 40)
 
 
+# ---- ensure_head_pipeline ------------------------------------------------------
+
+
+@respx.mock
+def test_ensure_head_pipeline_is_a_noop() -> None:
+    """GitHub's checks start on their own for any push that is not made with
+    the workflow token's own credentials. No route is mocked, so any request
+    here would fail loudly."""
+    _client().ensure_head_pipeline(7, head_sha="c" * 40)
+
+
 # ---- withdraw_auto_merge -------------------------------------------------------
 
 

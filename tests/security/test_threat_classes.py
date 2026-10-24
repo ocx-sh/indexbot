@@ -492,9 +492,10 @@ def test_threat_arming_a_fork_merge_request_never_starts_a_pipeline_in_the_paren
         return_value=httpx.Response(200, json={})
     )
 
-    GitLabApi(project="42", token="not-a-real-token").enable_auto_merge(  # noqa: S106
-        7, head_sha="c" * 40
-    )
+    api = GitLabApi(project="42", token="not-a-real-token")  # noqa: S106
+    api.enable_auto_merge(7, head_sha="c" * 40)
+    # The human-lane route into the same endpoint has the same boundary.
+    api.ensure_head_pipeline(7, head_sha="c" * 40)
 
     assert merge.called  # the arm itself is unchanged
 

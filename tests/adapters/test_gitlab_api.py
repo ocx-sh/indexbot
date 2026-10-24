@@ -58,12 +58,14 @@ _ARMED_HEAD = "c" * 40
 is already taken further down by the approvals section's own head."""
 
 
-def _armable_mr(head_sha: str | None = _ARMED_HEAD, *, fork: bool = False) -> respx.Route:
+def _armable_mr(
+    head_sha: str | None = _ARMED_HEAD, *, fork: bool = False, mr_sha: str = _ARMED_HEAD
+) -> respx.Route:
     """The merge-request read `enable_auto_merge` makes before it arms.
 
     Defaults to the case that needs nothing done: a same-project merge
     request whose `head_pipeline` already names the revision being armed. Any
-    test that is not about `_ensure_head_pipeline` wants exactly that, so the
+    test that is not about `ensure_head_pipeline` wants exactly that, so the
     pipeline POST route stays unmocked and would fail loudly if it fired.
     """
     return respx.get(f"{_PROJECT}/merge_requests/7").mock(
@@ -72,6 +74,7 @@ def _armable_mr(head_sha: str | None = _ARMED_HEAD, *, fork: bool = False) -> re
             json={
                 "source_project_id": 43 if fork else 42,
                 "target_project_id": 42,
+                "sha": mr_sha,
                 "head_pipeline": None if head_sha is None else {"sha": head_sha},
             },
         )
@@ -618,6 +621,61 @@ def test_arming_a_fork_merge_request_never_creates_a_pipeline() -> None:
 
     assert not pipelines.called
     assert merge.called
+
+
+@respx.mock
+def test_ensure_head_pipeline_creates_one_without_arming() -> None:
+    """The human lane's call: the same-project head with no pipeline gets one,
+    and nothing is armed — no merge route is mocked, so a PUT would fail."""
+    _armable_mr(None)
+    pipelines = respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(201, json={"id": 77, "sha": _ARMED_HEAD})
+    )
+
+    _client().ensure_head_pipeline(7, head_sha=_ARMED_HEAD)
+
+    assert pipelines.called
+
+
+@pytest.mark.parametrize("mr_sha", ["moved-" + "d" * 34, ""], ids=["head-moved", "no-sha"])
+@respx.mock
+def test_ensure_head_pipeline_creates_none_when_the_head_is_not_the_one_judged(
+    mr_sha: str,
+) -> None:
+    """The gate judged `head_sha`; a pipeline created now would run whatever
+    the branch has become, with the project's variables."""
+    _armable_mr(None, mr_sha=mr_sha)
+    pipelines = respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(201, json={})
+    )
+
+    _client().ensure_head_pipeline(7, head_sha=_ARMED_HEAD)
+
+    assert not pipelines.called
+
+
+@respx.mock
+def test_ensure_head_pipeline_leaves_a_head_that_has_one() -> None:
+    _armable_mr()
+    pipelines = respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(201, json={})
+    )
+
+    _client().ensure_head_pipeline(7, head_sha=_ARMED_HEAD)
+
+    assert not pipelines.called
+
+
+@respx.mock
+def test_ensure_head_pipeline_never_creates_one_for_a_fork_merge_request() -> None:
+    _armable_mr(None, fork=True)
+    pipelines = respx.post(f"{_PROJECT}/merge_requests/7/pipelines").mock(
+        return_value=httpx.Response(201, json={})
+    )
+
+    _client().ensure_head_pipeline(7, head_sha=_ARMED_HEAD)
+
+    assert not pipelines.called
 
 
 @respx.mock

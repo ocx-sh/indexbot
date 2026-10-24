@@ -155,6 +155,8 @@ class FakeGitHub:
     """The revision each auto-merge arm was bound to — both real adapters pass
     it to the forge as an optimistic-concurrency guard, so a caller that arms
     against a stale head is a bug the fake has to be able to show."""
+    head_pipelines_ensured: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
+    """Every `ensure_head_pipeline(number, head_sha=...)` call, in order."""
     statuses: dict[str, list[tuple[str, CommitStatusState, str]]] = field(
         default_factory=dict[str, list[tuple[str, CommitStatusState, str]]]
     )
@@ -268,6 +270,9 @@ class FakeGitHub:
     def enable_auto_merge(self, pr_number: int, *, head_sha: str) -> None:
         self.auto_merge_enabled.add(pr_number)
         self.auto_merge_head_sha[pr_number] = head_sha
+
+    def ensure_head_pipeline(self, pr_number: int, *, head_sha: str) -> None:
+        self.head_pipelines_ensured.append((pr_number, head_sha))
 
     def withdraw_auto_merge(self, pr_number: int) -> None:
         """`discard`/`pop(..., None)`, not `remove`/`del` — withdrawing must

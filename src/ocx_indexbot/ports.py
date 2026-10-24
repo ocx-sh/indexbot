@@ -251,6 +251,19 @@ class ForgePort(Protocol):
         """
         ...
 
+    def ensure_head_pipeline(self, pr_number: int, *, head_sha: str) -> None:
+        """Make sure `head_sha` has a pipeline, so a head pushed with
+        `CI_JOB_TOKEN` (which creates none) is still validated by "pipelines
+        must succeed".
+
+        `enable_auto_merge` does this on the arm path; this is the same step
+        for the human lane, which never arms. The caller decides whether the
+        diff is safe to run a pipeline for; the adapter still refuses a fork
+        merge request, and a head that is no longer `head_sha`. A forge whose
+        checks start on their own does nothing.
+        """
+        ...
+
     def withdraw_auto_merge(self, pr_number: int) -> None:
         """Idempotently take back whatever `enable_auto_merge` armed for
         `pr_number`, if anything.

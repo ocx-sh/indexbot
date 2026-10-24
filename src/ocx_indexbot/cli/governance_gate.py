@@ -25,7 +25,13 @@ points, so the two lanes cannot silently diverge on what "gated" means.
 - anything else: `ForgePort.withdraw_auto_merge`, idempotently — a PR that
   was never armed (the ordinary human-lane case) costs one no-op read; a PR
   that regressed from machine- to human-lane (a later push added a file the
-  author does not own) has whatever an earlier run armed taken back.
+  author does not own) has whatever an earlier run armed taken back. A
+  human-lane head also gets a pipeline of its own
+  (`ForgePort.ensure_head_pipeline`) when the diff is confined to `p/` — a
+  job-token push creates none, and the merge request would otherwise sit
+  under "pipelines must succeed" unvalidated. A diff reaching outside `p/` can
+  edit the CI config that pipeline runs, so it gets none; the adapter
+  additionally refuses a fork merge request.
 
 ## `--no-arm` / `--arm-only`: one decision, two jobs
 
@@ -141,6 +147,11 @@ def sync_auto_merge(number: int, github: ForgePort, *, disposition: str, head_sh
     github.withdraw_auto_merge(number)
 
 
+def _confined_to_package_tree(changed_paths: tuple[str, ...]) -> bool:
+    """True when the diff is non-empty and every path is under `p/`."""
+    return bool(changed_paths) and all(path.startswith("p/") for path in changed_paths)
+
+
 def gate_pull_request_and_sync_auto_merge(
     number: int,
     github: ForgePort,
@@ -168,6 +179,8 @@ def gate_pull_request_and_sync_auto_merge(
     state = gate_pull_request(info, change_class, github, policy=policy)
     if arm:
         sync_auto_merge(number, github, disposition=state, head_sha=info.head_sha)
+        if state != "success" and _confined_to_package_tree(info.changed_paths):
+            github.ensure_head_pipeline(number, head_sha=info.head_sha)
     return change_class, state
 
 
