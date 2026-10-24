@@ -410,14 +410,18 @@ Re-derives every *claimed* tag/desc-blob digest in `root` individually from
 `registry.list_tags()` (an owner's curated `tags` map may legitimately be a
 subset of what the registry carries; that is the entire point of owner
 curation — decision-set item 2, "announce is the only add/remove
-authority"). Per tag: `observe_one_tag(root.repository, tag, registry)`
+authority"). Per tag, the committed CAS object is checked **first** — the
+claimed digest missing from/not hashing to `cas_object_bytes` ->
+`"cas-object-missing"`/`"cas-object-hash-mismatch"`, returned before the
+registry is asked, so a moved, vanished, yanked or ephemeral row whose object
+is gone reports the missing object rather than the registry-derived finding
+the nightly sweep treats as drift or grace. Only then (and not for a
+carried-over claim, below): `observe_one_tag(root.repository, tag, registry)`
 returning `None` -> `"tag-missing-upstream"`; a different `content_digest`
 -> `"digest-mismatch"`; `observe_one_tag` *raising* `ValidationError` (the
 tag now resolves to a bare image manifest, or to bytes over
 `_MAX_INDEX_BYTES`) -> `"digest-mismatch"` as well, since the claim that
-this tag resolves to the committed index is exactly what stopped being true;
-the claimed digest missing from/not hashing to
-`cas_object_bytes` -> `"cas-object-missing"`/`"cas-object-hash-mismatch"`.
+this tag resolves to the committed index is exactly what stopped being true.
 `root.desc.readme`/`.logo`, when set, get the identical CAS-hash check
 (missing/mismatch -> `"desc-blob-missing"`/`"desc-blob-hash-mismatch"`) —
 closing the gap where only tag digests were ever byte-verified (byte-exact

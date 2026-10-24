@@ -94,7 +94,11 @@ def _bare_manifest() -> dict[str, object]:
 
 _EMPTY_INDEX = b'{"schemaVersion":2,"manifests":[]}'
 """Filler CAS bytes for tests that commit a digest deliberately unrelated to
-what the registry serves — never expected to hash to its own claim."""
+what the registry serves."""
+
+_EMPTY_INDEX_DIGEST = f"sha256:{hashlib.sha256(_EMPTY_INDEX).hexdigest()}"
+"""The digest `_EMPTY_INDEX` really hashes to, so a row committed under it has
+a CAS object that passes the integrity check."""
 
 
 def _put_root(files: InMemoryFiles, namespace: str, package: str, root: PackageRoot) -> None:
@@ -283,7 +287,7 @@ def test_ghost_root_vanished_between_list_and_read_is_skipped() -> None:
 def test_pinned_tag_mutation_escalates_to_anomaly() -> None:
     files = InMemoryFiles()
     registry = FakeRegistry()
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     _put_root(
         files,
         "kitware",
@@ -315,7 +319,7 @@ def test_anomaly_ok_stays_green_and_files_the_same_issue(
     replaces the shell's hand-rolled `::warning`."""
     files = InMemoryFiles()
     registry = FakeRegistry()
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     _put_root(
         files,
         "kitware",
@@ -374,7 +378,7 @@ def test_floating_tag_drift_does_not_escalate() -> None:
     # anomaly.
     files = InMemoryFiles()
     registry = FakeRegistry()
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     _put_root(
         files,
         "kitware",
@@ -396,7 +400,7 @@ def test_yanked_vanished_tag_does_not_escalate() -> None:
     # is not itself an anomaly.
     files = InMemoryFiles()
     registry = FakeRegistry()  # no tags registered at all -> tag no longer resolves
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     yanked_entry = TagEntry(
         content=committed_digest, observed="T0", yanked=Yank(reason="cve", at="T0")
     )
@@ -412,7 +416,7 @@ def test_ephemeral_vanished_tag_does_not_escalate() -> None:
     # An ephemeral tag is meant to vanish; `ocx package announce` removes its
     # row, so reconcile reports nothing for it.
     files = InMemoryFiles()
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     entry = TagEntry(content=committed_digest, observed="T0", ephemeral=True)
     _put_root(files, "kitware", "cmake", _root(tags={"snap-1": entry}))
     _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
@@ -429,7 +433,7 @@ def test_non_yanked_vanished_tag_escalates_to_anomaly() -> None:
     # a silent drop.
     files = InMemoryFiles()
     registry = FakeRegistry()  # no tags registered at all -> tag no longer resolves
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     _put_root(
         files,
         "kitware",
@@ -455,6 +459,29 @@ def test_dangling_cas_reference_escalates() -> None:
 
     with pytest.raises(AnomalyError, match="cas-object-missing"):
         _run(_args(), files=files, registry=registry, github=github)
+
+
+@pytest.mark.parametrize("row_kind", ["moved", "vanished", "yanked", "ephemeral"])
+def test_a_missing_cas_object_escalates_whatever_the_tag_did_upstream(row_kind: str) -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    entry, _object_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    if row_kind == "moved":
+        registry.manifests[(_CMAKE_REPO, "3.28.1")] = _image_index(architecture="arm64")
+    else:
+        registry.tags.clear()
+        registry.manifests.clear()
+    if row_kind == "yanked":
+        entry = TagEntry(content=entry.content, observed=entry.observed, yanked=Yank("cve", "T0"))
+    if row_kind == "ephemeral":
+        entry = TagEntry(content=entry.content, observed=entry.observed, ephemeral=True)
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": entry}))
+    # No CAS file written for entry.content.
+
+    with pytest.raises(AnomalyError) as excinfo:
+        _run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+    assert "kitware/cmake cas-object-missing: 3.28.1" in str(excinfo.value)
 
 
 def test_tampered_cas_object_escalates() -> None:
