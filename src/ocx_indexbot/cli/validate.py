@@ -77,6 +77,10 @@ class FileReport:
     exit_code: ExitCode
     error: str | None = None
     warnings: tuple[str, ...] = ()
+    registry_checks_skipped: bool = False
+    """True when the G-15 registry checks did not run for this root (`--offline`,
+    or a registry whose credential this lane does not hold). An `OK` report with
+    this set is a pass that never asked the registry. Set only on `OK` reports."""
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -220,6 +224,7 @@ def _validate_one(
     not caught here — it propagates out of `run` uncaught.
     """
     warnings: list[str] = []
+    registry_checks_skipped = False
     base_root = _base_root(path, base_files)
     try:
         raw = files.read_bytes(path)
@@ -331,8 +336,10 @@ def _validate_one(
         # construction in `cli/_wiring.py`, and this says so per root.
         credential_env = "" if offline else registry_credential_env(policy, root.repository)
         if offline:
+            registry_checks_skipped = True
             warnings.append("G-15 registry checks skipped (--offline)")
         elif credential_env:
+            registry_checks_skipped = True
             # The fork lane, against a private registry. A pull request's own
             # pipeline holds no secret — that is the point of the split, not
             # an oversight — so the claims that need registry truth are left
@@ -403,7 +410,12 @@ def _validate_one(
             error=str(exc),
             warnings=tuple(warnings),
         )
-    return FileReport(path=path, exit_code=ExitCode.OK, warnings=tuple(warnings))
+    return FileReport(
+        path=path,
+        exit_code=ExitCode.OK,
+        warnings=tuple(warnings),
+        registry_checks_skipped=registry_checks_skipped,
+    )
 
 
 def print_report(report: FileReport) -> None:

@@ -465,7 +465,9 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
             {"platform": {"architecture": "amd64", "os": "linux"}, "digest": "sha256:" + "1" * 64}
         ],
     }
-    registry = FakeRegistry(manifests={(repository, "1.0.0"): manifest})
+    registry = FakeRegistry(
+        manifests={(repository, "1.0.0"): manifest, (repository, "sha256:" + "1" * 64): {}}
+    )
     observation = observe_one_tag(repository, "1.0.0", registry)
     assert observation is not None
     content = observation.content_digest
@@ -565,6 +567,32 @@ def test_g15_ownership_probe_dispositions() -> None:
         check_ownership("oci://ghcr.io/ocx-contrib/confirmed", "ocx.sh/x/c", registry)
         == "confirmed"
     )
+
+    # The privileged sweep is the only lane that can ask a credentialed
+    # registry: its disposition is the same three-way split, and only
+    # `mismatch` escalates.
+    repository = "oci://ghcr.io/ocx-contrib/mismatch"
+    files = InMemoryFiles()
+    files.write_bytes(
+        "p/ocx-contrib/mismatch.json",
+        serialize_package_root(_root(name="ocx.sh/ocx-contrib/mismatch", repository=repository)),
+    )
+    github = FakeGitHub()
+
+    def sweep() -> ExitCode:
+        return reconcile.run(
+            argparse.Namespace(package=None),
+            files=files,
+            registry=registry,
+            github=github,
+            policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
+        )
+
+    registry.ownership[repository] = "unconfirmed"
+    assert sweep() == ExitCode.OK
+    registry.ownership[repository] = "mismatch"
+    with pytest.raises(AnomalyError, match="ownership-mismatch"):
+        sweep()
 
 
 # --- G-16 ------------------------------------------------------------------

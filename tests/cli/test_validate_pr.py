@@ -718,20 +718,87 @@ def test_a_failure_emits_an_annotation_and_a_fenced_summary_block(
     assert "```\np/kitware/cmake.json: VALIDATION_FAILURE" in body
 
 
-def test_a_pass_writes_no_annotation_and_no_summary(
+def test_a_pass_that_checked_everything_writes_no_annotation_and_no_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A green run is silent on both surfaces — an annotation on every run is
-    an annotation nobody reads."""
+    """A green run that skipped nothing is silent on both surfaces - an
+    annotation on every run is an annotation nobody reads."""
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     files = InMemoryFiles(files={"p/kitware/cmake.json": _root_bytes("ocx.sh/kitware/cmake")})
     git = ScriptedGit(changed=("p/kitware/cmake.json",))
 
-    assert _run(_args(), git=git, files=files) == ExitCode.OK
+    assert _run(_args(offline=False), git=git, files=files) == ExitCode.OK
     assert capsys.readouterr().out == ""
     assert not summary.exists()
+
+
+def test_a_pass_that_skipped_the_registry_checks_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A green check must never read as "the registry agreed" when the registry
+    was not asked: one notice names every root whose G-15 check was skipped,
+    sorted, and a pass still writes no job summary."""
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    files = InMemoryFiles(
+        files={
+            "p/kitware/cmake.json": _root_bytes("ocx.sh/kitware/cmake"),
+            "p/acme/tool.json": _root_bytes("ocx.sh/acme/tool"),
+        }
+    )
+    git = ScriptedGit(changed=("p/kitware/cmake.json", "p/acme/tool.json"))
+
+    assert _run(_args(offline=True), git=git, files=files) == ExitCode.OK
+    assert capsys.readouterr().out == (
+        "::notice title=indexbot validate-pr::registry checks skipped: "
+        "p/acme/tool.json, p/kitware/cmake.json\n"
+    )
+    assert not summary.exists()
+
+
+def test_a_credentialed_registry_is_named_in_the_skipped_notice(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fork lane holds no registry secret, so a root on a credentialed
+    registry is skipped online as well - and says so."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    files = InMemoryFiles(files={"p/kitware/cmake.json": _root_bytes("ocx.sh/kitware/cmake")})
+    credentialed_policy = _POLICY_BYTES.replace(
+        b'"registry_hosts":["ghcr.io"]',
+        b'"registry_hosts":[{"host":"ghcr.io","credentials_env":"OCX_REGISTRY_ART"}]',
+    )
+    git = ScriptedGit(
+        changed=("p/kitware/cmake.json",), at_base={INDEX_POLICY_PATH: credentialed_policy}
+    )
+    files.files[INDEX_POLICY_PATH] = credentialed_policy
+
+    assert (
+        validate_pr.run(
+            _args(offline=False),
+            git=git,
+            files=files,
+            registry_for=lambda _policy: FakeRegistry(),
+            base_files=InMemoryFiles(),
+        )
+        == ExitCode.OK
+    )
+    assert "registry checks skipped: p/kitware/cmake.json" in capsys.readouterr().out
+
+
+def test_a_failing_run_does_not_list_a_failed_root_as_skipped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only a root that passed is named: a failed root's path is not yet known to
+    be well-formed, and its own failure is already the annotation."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    files = InMemoryFiles(files={"p/kitware/cmake.json": b"not json"})
+    git = ScriptedGit(changed=("p/kitware/cmake.json",))
+
+    assert _run(_args(offline=True), git=git, files=files) == ExitCode.VALIDATION_FAILURE
+    assert "registry checks skipped" not in capsys.readouterr().out
 
 
 def test_the_worst_exit_code_across_every_changed_root_wins() -> None:

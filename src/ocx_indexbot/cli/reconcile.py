@@ -23,6 +23,12 @@ digest-mismatch, on a *pinned* tag, is already caught by the reused
 `check_tag_mutations` check above, so this avoids double-flagging one
 underlying phenomenon through two different finding shapes.
 
+`core/registry_checks.py`'s G-15 checks run here too, because a credentialed
+registry is skipped by `validate-pr` (its lane holds no secret): an
+`ownership-mismatch`, or a tag whose listed platform manifests the repository
+does not hold (`digest-not-in-scope`), escalates. A yanked or ephemeral tag is
+exempt from the scope check, as from `tag-missing-upstream`.
+
 A committed tag `observe_one_tag` now *refuses* — repointed at a bare image
 manifest, or grown past the index size ceiling — escalates as
 `tag-unrecordable`. The sweep catches that refusal per tag rather than letting
@@ -80,9 +86,12 @@ from typing import TYPE_CHECKING, Final, cast
 from ocx_indexbot.core.anomaly import check_tag_mutations
 from ocx_indexbot.core.observe import observe_one_tag
 from ocx_indexbot.core.policy import IndexPolicy
+from ocx_indexbot.core.registry_checks import check_digest_in_scope, check_ownership
 from ocx_indexbot.core.validate_entry import (
     check_repository_allowlisted,
     check_repository_shape,
+    parse_digest,
+    parse_image_index_digests,
     parse_package_id,
     parse_package_root,
 )
@@ -95,10 +104,12 @@ from ._common import write_ci_summary
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Mapping
 
     from ocx_indexbot.core.anomaly import AnomalyFinding
     from ocx_indexbot.core.observe import Observation
     from ocx_indexbot.core.verify_claims import ClaimFinding
+    from ocx_indexbot.model import PackageRoot
     from ocx_indexbot.ports import FilePort, ForgePort, RegistryPort
 
 _ROOT_PREFIX: Final[str] = "p/"
@@ -162,6 +173,11 @@ class _PackageReport:
     """`"<path>: <reason>"` when the committed root does not parse — every
     other field is then empty, and the sweep moves on to the next package."""
 
+    registry_findings: tuple[str, ...] = ()
+    """`"<kind>: <detail>"` for each G-15 check the registry failed: an
+    `ownership-mismatch`, or a `digest-not-in-scope` for a tag whose platform
+    manifests the repository does not hold. All escalate."""
+
 
 def _root_path(package_id: PackageId) -> str:
     return f"{_ROOT_PREFIX}{package_id}.json"
@@ -216,6 +232,45 @@ def _cas_bytes_by_digest(
         for digest, path in paths_by_digest.items()
         if digest in wanted_digests
     }
+
+
+def _registry_findings(
+    root: PackageRoot,
+    cas_bytes: Mapping[str, bytes],
+    registry: RegistryPort,
+    *,
+    grace_tags: frozenset[str],
+) -> tuple[str, ...]:
+    """G-15 against the registry: ownership, and that every platform manifest a
+    committed tag lists exists in the root's own repository.
+
+    `validate-pr` skips both for a credentialed registry (its lane holds no
+    secret), so this sweep, which refuses to start without every credential, is
+    where they run. `unconfirmed` ownership is a WARN there and is not a
+    finding here either. A yanked or ephemeral tag is exempt from the scope
+    check, as it is from `tag-missing-upstream`. A CAS object missing or not an
+    image index is reported by `verify_claims` or here respectively, never
+    skipped silently.
+    """
+    findings: list[str] = []
+    if check_ownership(root.repository, root.name, registry) == "mismatch":
+        findings.append(f"ownership-mismatch: {root.repository} is not {root.name}")
+    checked: set[str] = set()
+    for tag, entry in sorted(root.tags.items()):
+        object_bytes = cas_bytes.get(entry.content)
+        if tag in grace_tags or object_bytes is None:
+            continue
+        try:
+            for manifest_digest in parse_image_index_digests(object_bytes):
+                # Tags of one package mostly share platform manifests; a digest
+                # missing from the repository is reported under the first tag.
+                if manifest_digest in checked:
+                    continue
+                checked.add(manifest_digest)
+                check_digest_in_scope(root.repository, parse_digest(manifest_digest), registry)
+        except ValidationError as error:
+            findings.append(f"digest-not-in-scope: {tag}: {error}")
+    return tuple(findings)
 
 
 def _verify_one(
@@ -274,13 +329,18 @@ def _verify_one(
     )
     cas_bytes = _cas_bytes_by_digest(files, package_id, wanted_digests)
     claim_findings = verify_claims(package_id, root, cas_bytes, registry)
+    ephemeral_tags = frozenset(tag for tag, entry in root.tags.items() if entry.ephemeral)
+    registry_findings = _registry_findings(
+        root, cas_bytes, registry, grace_tags=yanked_tags | ephemeral_tags
+    )
     return _PackageReport(
         package_id=package_id,
         pinned_mutations=pinned_mutations,
         claim_findings=claim_findings,
         yanked_tags=yanked_tags,
-        ephemeral_tags=frozenset(tag for tag, entry in root.tags.items() if entry.ephemeral),
+        ephemeral_tags=ephemeral_tags,
         unrecordable_tags=tuple(unrecordable),
+        registry_findings=registry_findings,
     )
 
 
@@ -305,6 +365,7 @@ def _escalating_findings(report: _PackageReport) -> tuple[str, ...]:
     lines.extend(
         f"{report.package_id} tag-unrecordable: {entry}" for entry in report.unrecordable_tags
     )
+    lines.extend(f"{report.package_id} {entry}" for entry in report.registry_findings)
     lines.extend(
         f"{report.package_id} {finding.kind}: {finding.detail}"
         for finding in report.claim_findings

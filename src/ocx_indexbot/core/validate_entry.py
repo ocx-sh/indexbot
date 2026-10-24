@@ -798,7 +798,7 @@ def parse_image_index_digests(raw: bytes) -> tuple[str, ...]:
     """
     try:
         parsed: Any = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValidationError(f"malformed CAS object JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValidationError("CAS object JSON must be a JSON object")

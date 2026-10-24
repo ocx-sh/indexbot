@@ -117,6 +117,12 @@ deployment's `name_segments`, which selects package roots and never the CAS
 objects under them. Deletes are excluded; every other status, symlink swaps
 included, is validated.
 
+A root whose registry checks did not run — under `--offline`, or because its
+registry needs a credential this unprivileged job does not hold (`reconcile`
+runs those instead) — is named in one `registry checks skipped: <root>, <root>`
+notice, roots sorted, on a pass as well as a failure. A pass with nothing
+skipped writes no annotation and no job summary.
+
 Each changed root's base-ref bytes are written to a temporary directory outside
 the checkout, because the PR-head tree is what `validate` byte-compares against
 its own canonical serialization. A root absent at the base ref is not written,
@@ -393,6 +399,13 @@ Verify committed state against registry truth.
 ```bash
 indexbot reconcile [--package <ns>/<pkg>] [--anomaly-ok]
 ```
+
+Besides re-deriving every claimed tag and blob, it runs the registry-side
+checks `validate-pr` cannot run against a credentialed registry: a repository
+whose ownership probe answers `mismatch`, or a tag whose image index lists a
+platform manifest the repository does not hold, is an anomaly. An `unconfirmed`
+ownership probe is not, and a yanked or ephemeral tag is exempt from the
+manifest check.
 
 **Verify-only.** It never writes a correction: a divergence is filed as an
 issue and exits `65`. Backoff exhaustion exits `75` — a transient failure is

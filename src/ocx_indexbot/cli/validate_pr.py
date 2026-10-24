@@ -434,6 +434,16 @@ def run(
     for report in reports:
         validate.print_report(report)
 
+    # A green check must never read as "the registry agreed" when it was not
+    # asked. `registry_checks_skipped` is set only on a report that passed, so
+    # every path named here has been through `parse_package_id` and is safe in
+    # an annotation (ADR-4 BD-4); a failed root is the failure annotation's.
+    skipped = sorted(report.path for report in reports if report.registry_checks_skipped)
+    if skipped:
+        write_ci_annotation(
+            "notice", "indexbot validate-pr", f"registry checks skipped: {', '.join(skipped)}"
+        )
+
     exit_code = validate.worst_exit_code(reports)
     if exit_code != ExitCode.OK:
         # The CLI's own structured stderr lines are the record; this is the

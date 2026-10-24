@@ -890,6 +890,13 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   apart from a plain silent drop. A committed root that does not parse is itself a finding
   (`<package> root-malformed: <path>: <reason>`), always escalating — the
   sweep moves on to the next package rather than aborting;
+  `core/registry_checks.py`'s G-15 checks run here as well, because
+  `validate-pr` skips them for a credentialed registry: `check_ownership`
+  answering `"mismatch"` is an `ownership-mismatch` finding, and a platform
+  manifest listed by a committed tag's image index that
+  `check_digest_in_scope` cannot find is a `digest-not-in-scope` finding (so
+  is an object that is no image index) — both always escalating, the latter
+  exempt for a yanked or ephemeral tag; `"unconfirmed"` stays a non-finding;
   a non-empty escalating-finding set
   opens/updates one anomaly issue via `ForgePort.create_or_update_issue`
   (promoted onto the port this stage, see §3/§10) before raising.
@@ -914,6 +921,11 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   identical finding taxonomy). `"mismatch"` or any `ValidationError` -> exit
   1. `"unconfirmed"` -> print a WARN to stderr, exit 0 (ADR-4 Risk 2,
   unchanged).
+  A root whose registry checks were skipped (`--offline`, or a credentialed
+  registry) carries `FileReport.registry_checks_skipped`, which
+  `cli/validate_pr.py` turns into one `registry checks skipped: <root>, ...`
+  notice annotation (roots sorted) on success too — none when nothing was
+  skipped.
   Also takes `--base-dir DIR` (optional): the directory the PR gate
   materializes each changed root's BASE-ref bytes into. ADR-2 ND-4 gates
   *claiming* a reserved segment, not *updating* a root already committed
