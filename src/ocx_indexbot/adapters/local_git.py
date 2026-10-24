@@ -51,7 +51,9 @@ class LocalGit:
 
     repo: Path
 
-    def changed_package_roots(self, base_sha: str, *, root_glob: str) -> tuple[str, ...]:
+    def changed_package_roots(
+        self, base_sha: str, *, root_glob: str, include_deleted: bool = False
+    ) -> tuple[str, ...]:
         """`git diff --name-only --diff-filter=d <base>...HEAD -- ':(glob)<root_glob>'`.
 
         Three of these four arguments are load-bearing, and each of them cost
@@ -80,7 +82,11 @@ class LocalGit:
         swapped for a symlink is status `T`, which an `ACMR` allowlist
         silently dropped — zero roots selected, validation skipped, required
         check green. There is nothing to validate about a delete; every other
-        status must reach `validate`.
+        status must reach `validate`. `include_deleted` drops the filter for
+        the CAS lookup, where a delete is the change: it removes an object a
+        root's tag may still name. `--no-renames` keeps a moved object visible
+        at BOTH paths: with rename detection only the new path is listed, and
+        the package that lost the object is never validated.
 
         `-z` is the one addition to the shell step this replaces: it makes
         git emit raw NUL-separated paths instead of C-quoting anything
@@ -90,7 +96,8 @@ class LocalGit:
         stdout = self._git(
             "diff",
             "--name-only",
-            "--diff-filter=d",
+            "--no-renames",
+            *(() if include_deleted else ("--diff-filter=d",)),
             "-z",
             f"{_checked_ref(base_sha)}...HEAD",
             "--",

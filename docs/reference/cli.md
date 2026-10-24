@@ -114,8 +114,14 @@ The diff is `<base>...HEAD` — **three dots**, against the merge base, so a
 branch cut before another pull request merged does not re-validate stale copies
 of roots it never touched — filtered by a `:(glob)` pathspec built from the
 deployment's `name_segments`, which selects package roots and never the CAS
-objects under them. Deletes are excluded; every other status, symlink swaps
+objects under them. Root deletes are excluded; every other status, symlink swaps
 included, is validated.
+
+A pull request that changes only a package's objects (`p/<ns>/<pkg>/o/sha256/…`)
+changes no root, so each added, modified or deleted object is mapped to its
+owning root and that root is validated: every tag's object must still exist, and
+every object must hash to its name. An object whose owning root no longer exists
+is skipped, since deleting a package deletes its objects with it.
 
 A root whose registry checks did not run — under `--offline`, or because its
 registry needs a credential this unprivileged job does not hold (`reconcile`

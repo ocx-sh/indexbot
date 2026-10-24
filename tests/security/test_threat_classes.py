@@ -24,10 +24,11 @@ import respx
 
 from ocx_indexbot.adapters.gitlab_api import GitLabApi
 from ocx_indexbot.adapters.local_files import LocalFiles
-from ocx_indexbot.cli import governance_check
+from ocx_indexbot.cli import governance_check, validate_pr
 from ocx_indexbot.cli import validate as validate_cli
 from ocx_indexbot.core.diff import classify_change, diff
 from ocx_indexbot.core.observe import Observation
+from ocx_indexbot.core.policy import INDEX_POLICY_PATH
 from ocx_indexbot.core.regenerate import regenerate
 from ocx_indexbot.core.validate_entry import (
     check_namespace_not_reserved,
@@ -496,3 +497,48 @@ def test_threat_arming_a_fork_merge_request_never_starts_a_pipeline_in_the_paren
     )
 
     assert merge.called  # the arm itself is unchanged
+
+
+# --- a CAS-only PR is validated ----------------------------------------------
+
+
+def test_threat_cas_only_pull_request_is_validated() -> None:
+    """A branch that touches only `p/<ns>/<pkg>/o/sha256/*` — adds a tampered
+    object, or deletes one a tag still names — changes no package root, so a
+    root-only diff selected nothing and the required check went green over it.
+    `validate-pr` maps each object to its owning root and runs the full
+    closure and hash validation on it."""
+    root_bytes = serialize_package_root(
+        _root(tags={"1.0.0": TagEntry(content=_RESERVED_DIGEST, observed=_TS)})
+    )
+    cas_path = f"p/kitware/cmake/o/sha256/{_RESERVED_DIGEST.removeprefix('sha256:')}.json"
+
+    def verdict(*, present: dict[str, bytes], changed: tuple[str, ...]) -> ExitCode:
+        policy_bytes = (
+            b'{"name":"ocx.sh","name_segments":2,"registry_hosts":["ghcr.io"],'
+            b'"reserved_namespaces":[]}\n'
+        )
+        files = InMemoryFiles(
+            files={INDEX_POLICY_PATH: policy_bytes, _ROOT_PATH: root_bytes} | present
+        )
+
+        class _Git:
+            def changed_package_roots(
+                self, base_sha: str, *, root_glob: str, include_deleted: bool = False
+            ) -> tuple[str, ...]:
+                return changed if include_deleted else ()
+
+            def file_at(self, ref: str, path: str) -> bytes | None:
+                return policy_bytes if path == INDEX_POLICY_PATH else None
+
+        return validate_pr.run(
+            argparse.Namespace(base_sha="base", offline=True, same_repo_pr=False, fork_pr=True),
+            git=_Git(),
+            files=files,
+            registry_for=lambda _policy: FakeRegistry(),
+            base_files=InMemoryFiles(),
+        )
+
+    assert verdict(present={cas_path: _RESERVED_INDEX_BYTES}, changed=(cas_path,)) == ExitCode.OK
+    assert verdict(present={cas_path: b"tampered"}, changed=(cas_path,)) == ExitCode.ANOMALY
+    assert verdict(present={}, changed=(cas_path,)) == ExitCode.ANOMALY

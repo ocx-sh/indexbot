@@ -26,7 +26,11 @@ from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.cli import validate
 from ocx_indexbot.cli._common import write_ci_annotation, write_ci_summary
-from ocx_indexbot.core.policy import INDEX_POLICY_PATH, parse_index_policy, root_glob
+from ocx_indexbot.core.policy import (
+    INDEX_POLICY_PATH,
+    parse_index_policy,
+    root_glob,
+)
 from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 
@@ -380,6 +384,43 @@ def _materialize_base(
             base_files.write_bytes(path, raw)
 
 
+def _package_root_of_object_dir(path: str, *, name_segments: int) -> str | None:
+    """The root whose `p/<segments>/o/` object tree contains `path`, by prefix only.
+
+    Deliberately not `cas_owner_root_path`: that one also parses the file name,
+    so a malformed object (`o/sha256/garbage.json`) maps to no owner and the
+    package is never validated, which is what rejects it. The segments are
+    untrusted here; `validate_paths` runs `parse_package_id` on the result.
+    """
+    parts = path.split("/")
+    if len(parts) <= name_segments + 2 or parts[0] != "p" or parts[name_segments + 1] != "o":
+        return None
+    return "p/" + "/".join(parts[1 : name_segments + 1]) + ".json"
+
+
+def _packages_to_validate(
+    base_sha: str, *, git: GitPort, files: FilePort, name_segments: int
+) -> tuple[str, ...]:
+    """The roots this pull request changed, plus the owner of every CAS object
+    it added, modified or deleted.
+
+    `root_glob` selects roots and never objects, so a branch that touches only
+    `p/<seg…>/o/sha256/*` — a tampered object, or a delete that leaves a tag
+    pointing at nothing — selected no root and went green unread. The owner is
+    handed to `validate_paths`, which already checks closure and hashes every
+    file in the package's tree. Root deletions stay excluded, and an owner
+    absent at HEAD is dropped: removing a package removes its objects with it.
+    """
+    roots = git.changed_package_roots(base_sha, root_glob=root_glob(name_segments))
+    changed = git.changed_package_roots(base_sha, root_glob=_PACKAGE_TREE, include_deleted=True)
+    owners = (_package_root_of_object_dir(path, name_segments=name_segments) for path in changed)
+    return tuple(
+        dict.fromkeys(
+            (*roots, *(owner for owner in owners if owner is not None and files.exists(owner)))
+        )
+    )
+
+
 def run(
     args: argparse.Namespace,
     *,
@@ -411,7 +452,9 @@ def run(
     if policy is None:
         return _no_policy_in_force(base_sha, git=git)
     _check_package_tree_shape(base_sha, git=git, name_segments=policy.name_segments)
-    paths = git.changed_package_roots(base_sha, root_glob=root_glob(policy.name_segments))
+    paths = _packages_to_validate(
+        base_sha, git=git, files=files, name_segments=policy.name_segments
+    )
     if not paths:
         write_ci_annotation(
             "notice",

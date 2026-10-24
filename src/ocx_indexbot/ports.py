@@ -539,14 +539,18 @@ class GitPort(Protocol):
     hard, non-retryable configuration error rather than weather.
     """
 
-    def changed_package_roots(self, base_sha: str, *, root_glob: str) -> tuple[str, ...]:
-        """Repository-relative paths of every package root this branch
-        added or modified relative to `base_sha`, in git's own order.
+    def changed_package_roots(
+        self, base_sha: str, *, root_glob: str, include_deleted: bool = False
+    ) -> tuple[str, ...]:
+        """Repository-relative paths this branch changed relative to
+        `base_sha` under `root_glob`, in git's own order.
 
-        Deletes are excluded — there is nothing to validate about a removed
-        root — but every other status is included, symlink-swaps included.
-        `root_glob` is `core/policy.root_glob(name_segments)`, applied as a
-        `:(glob)` pathspec so it can never select a CAS object.
+        By default deletes are excluded — there is nothing to validate about a
+        removed root — but every other status is included, symlink-swaps
+        included. `include_deleted=True` keeps deletes too, for the one caller
+        that needs them: a removed CAS object can leave its package's tags
+        dangling. `root_glob` is `core/policy.root_glob(name_segments)`,
+        applied as a `:(glob)` pathspec so it can never select a CAS object.
         """
         ...
 
