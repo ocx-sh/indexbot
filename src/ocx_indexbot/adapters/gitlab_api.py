@@ -63,13 +63,15 @@ import httpx
 
 from ocx_indexbot.adapters import _http
 from ocx_indexbot.adapters._http import (
+    PageCapExceeded,
+    account_id,
     as_object,
     as_object_list,
     check_transient,
     paginate,
     raise_for_status,
 )
-from ocx_indexbot.errors import ForgeError, TransientError
+from ocx_indexbot.errors import ForgeError, IndexBotError, TransientError
 from ocx_indexbot.model import CommitStatusState, PullRequestHeadMatch, PullRequestInfo
 
 if TYPE_CHECKING:
@@ -82,8 +84,16 @@ GITLAB_API_URL: Final[str] = "https://gitlab.com/api/v4"
 is `$CI_API_V4_URL`, which the runner sets on every job."""
 
 
-def _day_before(timestamp: str) -> str:
-    """The `YYYY-MM-DD` one day before an ISO-8601 `timestamp`.
+_PUSH_LOOKBACK_DAYS: Final[int] = 90
+"""How far before a merge request opened `list_pushers` looks for pushes of its
+branch. The events API cannot filter by ref and pages the whole project, so
+the walk needs a floor; this is an unforgeable one (the merge request's own
+`created_at`, not a commit date the pusher writes). A push older than this
+that is still in the merge request is outside what is read."""
+
+
+def _day_before(timestamp: str, days: int = 1) -> str:
+    """The `YYYY-MM-DD` `days` before an ISO-8601 `timestamp`.
 
     GitLab's events API takes `after` as a date, exclusive, in the project's
     own timezone. One day of slack absorbs both that exclusivity and any
@@ -91,7 +101,7 @@ def _day_before(timestamp: str) -> str:
     `_approver_ids_since`).
     """
     day = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date()
-    return (day - timedelta(days=1)).isoformat()
+    return (day - timedelta(days=days)).isoformat()
 
 
 _BAD_REQUEST: Final[int] = 400
@@ -737,6 +747,76 @@ class GitLabApi:
             ):
                 ids.add(int(author.get("id", 0) or 0))
         return ids
+
+    def list_pushers(
+        self, pr_number: int, *, base_sha: str, head_sha: str
+    ) -> tuple[int, ...] | None:
+        """The authors of the push events on the source branch.
+
+        `GET /projects/{id}/events?action=pushed` is the only record of who
+        pushed; the commits' authors are whatever the committer's git config
+        said and prove nothing about the account. The announce branch name is
+        reused across merge requests, so an event counts when it happened
+        since this merge request opened (both timestamps come from GitLab in
+        one format, which is why they are compared as text, as
+        `_approver_ids_since` does) **or** when its `commit_to` is one of the
+        merge request's commits: a push made before the owner opened the merge
+        request is still in what is being merged. Events are read from
+        `_PUSH_LOOKBACK_DAYS` before the merge request opened.
+
+        A push touching more refs than the instance's
+        `push_event_activities_limit` is stored as one bulk event with no
+        `ref`, so its branch cannot be told: any such event in the fetched
+        lookback window is `None`, not a skipped row, and so is an event feed
+        longer than the page cap (retrying would read the same pages).
+
+        The merge request is re-read and `None` returned unless its diff refs
+        are still the revisions the gate judged and it is not from a fork
+        (whose pushes are events of the fork, not of this project). A
+        transient failure is raised, not answered `None` — "run me again" is
+        not "ask a person".
+        """
+        try:
+            payload = self._merge_request(pr_number)
+            refs = self._diff_refs(payload, pr_number)
+            if (
+                refs["head_sha"] != head_sha
+                or refs["base_sha"] != base_sha
+                or payload["source_project_id"] != payload["target_project_id"]
+            ):
+                return None
+            branch, created_at = payload["source_branch"], payload["created_at"]
+            if not isinstance(branch, str) or not branch:
+                return None
+            commit_shas = {
+                commit["id"]
+                for commit in self._paginate(
+                    self._project_url("merge_requests", str(pr_number), "commits"), {}
+                )
+            }
+            events = self._paginate(
+                self._url("projects", self.project, "events"),
+                {"action": "pushed", "after": _day_before(created_at, _PUSH_LOOKBACK_DAYS)},
+            )
+            ids: set[int] = set()
+            for event in events:
+                push_data: Mapping[str, Any] = event.get("push_data") or {}
+                if not push_data:
+                    continue
+                if push_data.get("ref") is None:
+                    return None
+                if push_data["ref"] == branch and (
+                    str(event.get("created_at", "")) >= created_at
+                    or push_data.get("commit_to") in commit_shas
+                ):
+                    ids.add(account_id(event, "author_id", forge=_FORGE))
+        except PageCapExceeded:
+            return None
+        except TransientError:
+            raise
+        except (IndexBotError, KeyError, ValueError):
+            return None
+        return tuple(sorted(ids))
 
     def list_open_pull_requests(self) -> tuple[int, ...]:
         items = self._paginate(self._project_url("merge_requests"), {"state": "opened"})

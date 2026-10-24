@@ -1003,8 +1003,20 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   G-20): re-derives the classification via
   `classify_pr.classify_pull_request` (unchanged single-source-of-truth
   approach), then: **machine lane** (`refresh`) requires the PR author's
-  numeric forge id (`PullRequestInfo.author_id`, §3) to appear in `owners[]` of
-  *every* touched package root, read from the **base** ref only (never the
+  numeric forge id (`PullRequestInfo.author_id`, §3), and that of every other
+  account that pushed to the PR (`ForgePort.list_pushers`: GitHub — the
+  `actor` of every `push`/`force_push`/`branch_creation` in
+  `GET /repos/{o}/{r}/activity?ref=refs/heads/<head>`, plus commit authors and
+  committers and `head_ref_force_pushed` actors; GitLab — push events on the
+  source branch; an activity or event counts when it is newer than the PR/MR
+  or its tip is one of the PR/MR's commits; `None` for a fork, an
+  unidentified account, a moved head, a refused request, an activity or event
+  feed past the 100-page cap, a GitHub push with no readable timestamp, a
+  GitHub feed with no counted push of the judged head, or a GitLab bulk push
+  event with no ref anywhere in the fetched window, which counts as a failure, so GitHub's
+  `web-flow` committer also fails it; a transient failure is raised, exit
+  75), to appear in
+  `owners[]` of *every* touched package root, read from the **base** ref only (never the
   PR head — the same `governance-gate` trust boundary
   `cli/classify_pr.py` already documents) — pass -> `success`; fail ->
   falls back to the human lane below. **Human lane** (`new-package`/

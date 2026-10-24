@@ -101,9 +101,10 @@ def _approval(login: str, uid: int, commit_id: str) -> dict[str, object]:
 
 def _pr_payload(*, login: str, uid: int) -> dict[str, object]:
     return {
-        "base": {"sha": _BASE_SHA},
-        "head": {"sha": _HEAD_SHA},
+        "base": {"sha": _BASE_SHA, "repo": {"id": 5}},
+        "head": {"sha": _HEAD_SHA, "repo": {"id": 5}, "ref": "announce-branch"},
         "user": {"login": login, "id": uid},
+        "created_at": "2026-07-17T00:00:00Z",
         "updated_at": "2026-07-17T00:00:00Z",
         "labels": [],
     }
@@ -132,6 +133,25 @@ def _setup_forge(
     )
     forge.stub_json(
         "GET", forge.repo_path("pulls", str(_PR_NUMBER), "files"), [{"filename": _ROOT_PATH}]
+    )
+    pusher = {"login": login, "id": uid}
+    forge.stub_json(
+        "GET",
+        forge.repo_path("pulls", str(_PR_NUMBER), "commits"),
+        [{"sha": _HEAD_SHA, "author": pusher, "committer": pusher}],
+    )
+    forge.stub_json("GET", forge.repo_path("issues", str(_PR_NUMBER), "timeline"), [])
+    forge.stub_json(
+        "GET",
+        forge.repo_path("activity"),
+        [
+            {
+                "activity_type": "push",
+                "timestamp": "2026-08-25T01:00:00Z",
+                "after": _HEAD_SHA,
+                "actor": pusher,
+            }
+        ],
     )
     if base_root is not None:
         forge.stub_json(

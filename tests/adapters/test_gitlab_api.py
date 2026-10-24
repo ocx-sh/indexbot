@@ -1631,6 +1631,264 @@ def test_the_events_query_is_bounded_by_the_day_before_the_push() -> None:
     assert _request(events).url.params["after"] == "2026-08-24"
 
 
+# ---- list_pushers ------------------------------------------------------------
+
+_MR_CREATED = "2026-08-25T10:00:00.000Z"
+_BRANCH = "indexbot-announce-ns-pkg"
+
+
+def _pushers_mr(**overrides: object) -> None:
+    payload: dict[str, Any] = {
+        "diff_refs": {"base_sha": "base-sha", "head_sha": "head-sha"},
+        "source_project_id": 42,
+        "target_project_id": 42,
+        "source_branch": _BRANCH,
+        "created_at": _MR_CREATED,
+    }
+    payload.update(overrides)
+    respx.get(f"{_PROJECT}/merge_requests/7").mock(return_value=httpx.Response(200, json=payload))
+
+
+def _push(
+    author_id: object,
+    *,
+    ref: str | None = _BRANCH,
+    at: str = "2026-08-25T11:00:00.000Z",
+    commit_to: str = "elsewhere",
+) -> dict[str, Any]:
+    return {
+        "author_id": author_id,
+        "created_at": at,
+        "push_data": {"ref": ref, "commit_to": commit_to},
+    }
+
+
+def _mock_push_events(
+    events: list[dict[str, Any]], *, mr_commits: tuple[str, ...] = ()
+) -> respx.Route:
+    respx.get(f"{_PROJECT}/merge_requests/7/commits").mock(
+        return_value=httpx.Response(200, json=[{"id": sha} for sha in mr_commits])
+    )
+    return respx.get(f"{_PROJECT}/events", params={"action": "pushed"}).mock(
+        return_value=httpx.Response(200, json=events)
+    )
+
+
+def _pushers() -> tuple[int, ...] | None:
+    return _client().list_pushers(7, base_sha="base-sha", head_sha="head-sha")
+
+
+@respx.mock
+def test_list_pushers_reports_push_events_on_the_source_branch_since_the_mr_opened() -> None:
+    """Another branch's pushes, and this branch's pushes from before the merge
+    request existed that are not in it (the announce branch name is reused
+    across merge requests), are not who put this revision here."""
+    _pushers_mr()
+    route = _mock_push_events(
+        [
+            _push(1),
+            _push(2, at=_MR_CREATED),
+            _push(3, ref="some-other-branch"),
+            _push(None, ref="some-other-branch"),
+            _push(4, at="2026-08-25T09:59:59.000Z"),
+            _push(1),
+        ]
+    )
+
+    assert _pushers() == (1, 2)
+    assert _request(route).url.params["after"] == "2026-05-27"
+
+
+@respx.mock
+def test_list_pushers_follows_event_and_commit_pagination() -> None:
+    _pushers_mr()
+    commits_url = f"{_PROJECT}/merge_requests/7/commits"
+    respx.get(commits_url, params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=[{"id": "second"}])
+    )
+    respx.get(commits_url).mock(
+        return_value=httpx.Response(
+            200, json=[{"id": "first"}], headers={"Link": f'<{commits_url}?page=2>; rel="next"'}
+        )
+    )
+    url = f"{_PROJECT}/events"
+    respx.get(url, params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=[_push(2, at="2026-08-01T00:00:00.000Z")])
+    )
+    respx.get(url, params={"action": "pushed"}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[_push(1), _push(3, at="2026-08-01T00:00:00.000Z", commit_to="first")],
+            headers={"Link": f'<{url}?page=2>; rel="next"'},
+        )
+    )
+
+    assert _pushers() == (1, 3)
+
+
+@pytest.mark.parametrize(
+    "mr_overrides",
+    [
+        {"source_project_id": 43},
+        {"diff_refs": {"base_sha": "base-sha", "head_sha": "moved-sha"}},
+        {"diff_refs": {"base_sha": "moved-base", "head_sha": "head-sha"}},
+        {"source_branch": None},
+        {"created_at": "not-a-timestamp"},
+    ],
+    ids=["fork", "head-moved", "base-moved", "no-source-branch", "bad-created-at"],
+)
+@respx.mock
+def test_list_pushers_is_none_when_the_merge_request_is_not_the_one_judged(
+    mr_overrides: dict[str, Any],
+) -> None:
+    _pushers_mr(**mr_overrides)
+    events = _mock_push_events([_push(1)])
+
+    assert _pushers() is None
+    assert not events.called
+
+
+@respx.mock
+def test_list_pushers_raises_transient_while_gitlab_has_not_computed_the_diff_refs() -> None:
+    """GitLab fills `diff_refs` in asynchronously; "not yet" is a retry."""
+    _pushers_mr(diff_refs=None)
+    _mock_push_events([_push(1)])
+
+    with pytest.raises(TransientError):
+        _pushers()
+
+
+@respx.mock
+def test_list_pushers_is_none_without_a_created_at() -> None:
+    respx.get(f"{_PROJECT}/merge_requests/7").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "diff_refs": {"base_sha": "base-sha", "head_sha": "head-sha"},
+                "source_project_id": 42,
+                "target_project_id": 42,
+                "source_branch": _BRANCH,
+            },
+        )
+    )
+
+    assert _pushers() is None
+
+
+@pytest.mark.parametrize("author_id", [None, "1", True, 0], ids=["null", "string", "bool", "zero"])
+@respx.mock
+def test_list_pushers_is_none_when_a_push_on_the_branch_has_no_account(author_id: object) -> None:
+    _pushers_mr()
+    _mock_push_events([_push(1), _push(author_id)])
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_counts_a_push_made_before_the_mr_opened_when_its_tip_is_in_the_mr() -> None:
+    """Mallory pushes first and the owner opens the merge request afterwards:
+    the event predates `created_at`, but its `commit_to` is one of the merge
+    request's commits, so it is in what would be merged."""
+    _pushers_mr()
+    _mock_push_events(
+        [
+            _push(66, at="2026-08-25T09:00:00.000Z", commit_to="mine"),
+            _push(99, at="2026-08-20T09:00:00.000Z", commit_to="from-an-earlier-mr"),
+            _push(55, at="2026-08-25T09:30:00.000Z", ref="some-other-branch", commit_to="mine"),
+        ],
+        mr_commits=("owned", "mine"),
+    )
+
+    assert _pushers() == (66,)
+
+
+@respx.mock
+def test_list_pushers_is_none_when_a_bulk_push_event_has_no_ref() -> None:
+    """A push touching more refs than the instance's event limit is stored as
+    one event with a null `ref`: it may well have moved this branch, and
+    nothing in it says it did not."""
+    _pushers_mr()
+    _mock_push_events([_push(1), _push(2, ref=None)])
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_is_none_when_a_bulk_push_event_is_outside_the_window() -> None:
+    """The event carries no ref, so nothing says its tip is not one of the
+    merge request's commits: its time cannot clear it."""
+    _pushers_mr()
+    _mock_push_events([_push(1), _push(2, ref=None, at="2026-08-01T00:00:00.000Z")])
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_is_none_when_the_event_feed_is_longer_than_the_page_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is deterministic: retrying a busy project reads the same pages
+    again, so it is "ask a person" (`None`), never exit 75 forever."""
+    monkeypatch.setattr("ocx_indexbot.adapters._http.MAX_PAGES", 2)
+    _pushers_mr()
+    respx.get(f"{_PROJECT}/merge_requests/7/commits").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    url = f"{_PROJECT}/events"
+    respx.get(url).mock(
+        return_value=httpx.Response(200, json=[], headers={"Link": f'<{url}>; rel="next"'})
+    )
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_ignores_an_event_without_push_data() -> None:
+    _pushers_mr()
+    _mock_push_events([{"author_id": None, "created_at": _MR_CREATED}, _push(1)])
+
+    assert _pushers() == (1,)
+
+
+def _fail_pushers_request(failing: str, status: int) -> None:
+    _pushers_mr()
+    _mock_push_events([_push(1)])
+    # Resolved lazily: `respx.get` registers a route, and registering the two
+    # that must keep their mocks would replace them with unmocked ones.
+    url = {
+        "merge_request": f"{_PROJECT}/merge_requests/7",
+        "commits": f"{_PROJECT}/merge_requests/7/commits",
+        "events": f"{_PROJECT}/events",
+    }[failing]
+    params = {"action": "pushed"} if failing == "events" else None
+    respx.get(url, params=params).mock(return_value=httpx.Response(status, json={"message": "no"}))
+
+
+_PUSHERS_REQUESTS = ["merge_request", "commits", "events"]
+
+
+@pytest.mark.parametrize("status", [404, 403])
+@pytest.mark.parametrize("failing", _PUSHERS_REQUESTS)
+@respx.mock
+def test_list_pushers_is_none_on_any_refused_request(failing: str, status: int) -> None:
+    _fail_pushers_request(failing, status)
+
+    assert _pushers() is None
+
+
+@pytest.mark.parametrize("status", [429, 500])
+@pytest.mark.parametrize("failing", _PUSHERS_REQUESTS)
+@respx.mock
+def test_list_pushers_raises_transient_when_the_forge_asks_to_retry(
+    failing: str, status: int
+) -> None:
+    """A rate limit or a 5xx is "run me again" (exit 75), not "ask a person"."""
+    _fail_pushers_request(failing, status)
+
+    with pytest.raises(TransientError):
+        _pushers()
+
+
 # ---- list_open_pull_requests -------------------------------------------------
 
 

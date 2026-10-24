@@ -211,9 +211,21 @@ between the two lanes and nothing else:
 
 | Value | Green when |
 |---|---|
-| `owners` (default) | the change is a tag refresh **and** the author owns every touched root (G-19) |
+| `owners` (default) | the change is a tag refresh **and** the author, and every other account that pushed to the pull request, owns every touched root (G-19) |
 | `never` | never — every change waits for a person |
 | `always` | the change is a tag refresh, whoever opened it |
+
+A pusher is an account the forge records as having pushed to the branch: on
+GitHub the actor of a push, force-push or branch creation in the repository
+activity feed, plus the author and committer of its commits and whoever
+force-pushed it; on GitLab the author of a push event on the source branch. A
+push counts when it happened since the pull request opened, or when its tip is
+one of the pull request's commits, so a push made before the owner opened it
+is still counted. A fork, a forge that cannot identify one of them, a push
+whose time cannot be read, a GitHub head no counted push put on the branch,
+an activity or event feed longer than 100 pages, or a refused lookup sends
+the change to a person. So does GitHub's own `web-flow`
+account, which signs commits made from the web UI.
 
 `always` drops the ownership check, so it is only coherent where the forge
 already decides who may open a pull request at all. It does not widen what

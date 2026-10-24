@@ -634,6 +634,7 @@ def _refresh_pr_github(
     author_id: int,
     author_login: str = "alice",
     extra_changed_paths: tuple[str, ...] = (),
+    pushers: tuple[int, ...] | None = (),
 ) -> FakeGitHub:
     """A refresh-class PR (only a tag's content changes) with `owners=(alice/1)`
     on both base and head; the author identity is the variable under test.
@@ -662,7 +663,7 @@ def _refresh_pr_github(
         author_login=author_login,
         author_id=author_id,
     )
-    return FakeGitHub(files=files, pull_request_info={1: info})
+    return FakeGitHub(files=files, pull_request_info={1: info}, pushers={1: pushers})
 
 
 def _disposition_of(github: FakeGitHub) -> str:
@@ -680,7 +681,9 @@ def _disposition_of(github: FakeGitHub) -> str:
 def test_g19_machine_lane_requires_author_owner(_github_output: Path) -> None:
     """G-19: a refresh PR whose author's `github_id` is in the base-ref
     `owners[]` goes green (`success`); an author not in `owners[]` falls back
-    to the human lane (`pending`)."""
+    to the human lane (`pending`). The same holds for every other account that
+    pushed to the PR: one non-owner pusher, or a pusher set the forge could
+    not establish (`None`), also falls back to the human lane."""
     owner_github = _refresh_pr_github(author_id=1)
     assert (
         governance_check.run(
@@ -701,6 +704,14 @@ def test_g19_machine_lane_requires_author_owner(_github_output: Path) -> None:
     _context, stranger_state, description = stranger_github.statuses["head-sha"][0]
     assert stranger_state == "pending"
     assert "G-19" in description
+
+    owner_pusher_github = _refresh_pr_github(author_id=1, pushers=(1,))
+    assert _disposition_of(owner_pusher_github) == "success"
+
+    for pushers in ((1, 999), None):
+        pushed_github = _refresh_pr_github(author_id=1, pushers=pushers)
+        assert _disposition_of(pushed_github) == "pending"
+        assert "G-19" in pushed_github.statuses["head-sha"][0][2]
 
 
 # --- ADR-6 FP-5 (machine-lane scope; enforced in cli/classify_pr.py) --------

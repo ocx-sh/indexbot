@@ -327,6 +327,19 @@ class FakeGitHub:
         del head_sha
         return tuple(sorted(self.approvals.get(pr_number, [])))
 
+    pushers: dict[int, tuple[int, ...] | None] = field(
+        default_factory=dict[int, tuple[int, ...] | None]
+    )
+    """pr_number -> the account ids that pushed to the PR, or `None` for "the
+    forge could not say" (`ForgePort.list_pushers`). A PR with no entry reports
+    `()`: no pusher beyond the author, who `governance_check` adds itself."""
+
+    def list_pushers(
+        self, pr_number: int, *, base_sha: str, head_sha: str
+    ) -> tuple[int, ...] | None:
+        del base_sha, head_sha  # canned, like `pull_request_info` — see module docstring
+        return self.pushers.get(pr_number, ())
+
     def list_open_pull_requests(self) -> tuple[int, ...]:
         """Every PR the fake has been given info for — `pull_request_info` is
         canned, so "configured" is the only meaning "open" can have here."""

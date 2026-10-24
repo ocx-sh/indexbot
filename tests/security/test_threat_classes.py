@@ -198,7 +198,9 @@ def test_threat_self_authorizing_owners_edit(_github_output: Path) -> None:
 # --- authorization binds the numeric id, not the login ---------------------
 
 
-def _refresh_github(*, author_login: str, author_id: int) -> FakeGitHub:
+def _refresh_github(
+    *, author_login: str, author_id: int, pushers: tuple[int, ...] | None = ()
+) -> FakeGitHub:
     """A refresh PR (a tag's content changes) whose base+head `owners[]` are
     both `{github:'alice', github_id:1}`; only the author identity varies."""
     base = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
@@ -216,7 +218,7 @@ def _refresh_github(*, author_login: str, author_id: int) -> FakeGitHub:
         author_login=author_login,
         author_id=author_id,
     )
-    return FakeGitHub(files=files, pull_request_info={1: info})
+    return FakeGitHub(files=files, pull_request_info={1: info}, pushers={1: pushers})
 
 
 def test_threat_authz_binds_numeric_id_not_login(_github_output: Path) -> None:
@@ -239,6 +241,50 @@ def test_threat_authz_binds_numeric_id_not_login(_github_output: Path) -> None:
     )
     _context, renamed_state, _description = renamed.statuses["head-sha"][0]
     assert renamed_state == "success"
+
+    # The ids of the accounts that pushed bind the same way: an owner-opened PR
+    # that a recycled-login account (id 999) pushed to is not machine-lane, and
+    # one pushed to by the owner's renamed account (id 1) is.
+    recycled_pusher = _refresh_github(author_login="alice", author_id=1, pushers=(999,))
+    assert (
+        governance_check.run(
+            argparse.Namespace(pr_number=1), github=recycled_pusher, policy=make_policy()
+        )
+        == ExitCode.OK
+    )
+    assert recycled_pusher.statuses["head-sha"][0][1] == "pending"
+
+    renamed_pusher = _refresh_github(author_login="alice", author_id=1, pushers=(1,))
+    assert (
+        governance_check.run(
+            argparse.Namespace(pr_number=1), github=renamed_pusher, policy=make_policy()
+        )
+        == ExitCode.OK
+    )
+    assert renamed_pusher.statuses["head-sha"][0][1] == "success"
+
+
+def test_threat_non_owner_push_into_owner_pr_leaves_machine_lane(_github_output: Path) -> None:
+    """An owner opens the PR, a non-owner pushes to its branch: the author alone
+    owns the package, but the head carries a stranger's commits, so the machine
+    lane (auto-merge) is refused and the PR waits for a human. A forge that
+    cannot name the pushers is treated the same way, never as "no one else"."""
+    pushed = _refresh_github(author_login="alice", author_id=1, pushers=(1, 999))
+    assert (
+        governance_check.run(argparse.Namespace(pr_number=1), github=pushed, policy=make_policy())
+        == ExitCode.OK
+    )
+    _context, state, description = pushed.statuses["head-sha"][0]
+    assert state == "pending"
+    assert "G-19" in description
+    assert pushed.requested_reviewers[1] == ["carol"]
+
+    unknown = _refresh_github(author_login="alice", author_id=1, pushers=None)
+    assert (
+        governance_check.run(argparse.Namespace(pr_number=1), github=unknown, policy=make_policy())
+        == ExitCode.OK
+    )
+    assert unknown.statuses["head-sha"][0][1] == "pending"
 
 
 # --- path escape + digest fullmatch reject before any filesystem/path join -

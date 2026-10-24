@@ -15,6 +15,7 @@ import httpx
 import pytest
 import respx
 
+from ocx_indexbot.adapters._http import PageCapExceeded
 from ocx_indexbot.adapters.github_api import GitHubApi, GraphQLError
 from ocx_indexbot.errors import ForgeError, TransientError
 from ocx_indexbot.exit_codes import ExitCode
@@ -1313,6 +1314,427 @@ def test_an_approval_is_reported_by_numeric_id_never_by_login() -> None:
     assert _client().list_approvals(7, head_sha="head-sha") == (99,)
 
 
+# ---- list_pushers --------------------------------------------------------------
+
+_REPO = "https://api.github.com/repos/ocx-sh/index"
+
+
+_PR_OPENED = "2026-08-25T10:00:00Z"
+
+
+def _pushers_pr(
+    *,
+    head: str = "head-sha",
+    base: str = "base-sha",
+    head_repo: dict[str, Any] | None = {"id": 5},  # noqa: B006 - read-only fixture default
+    base_repo_id: int = 5,
+    head_ref: object = "announce-branch",
+    created_at: object = _PR_OPENED,
+) -> None:
+    respx.get(f"{_REPO}/pulls/7").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "head": {"sha": head, "repo": head_repo, "ref": head_ref},
+                "base": {"sha": base, "repo": {"id": base_repo_id}},
+                "created_at": created_at,
+            },
+        )
+    )
+
+
+def _commit(author: object, committer: object, sha: str = "c1") -> dict[str, Any]:
+    return {"sha": sha, "author": author, "committer": committer}
+
+
+def _activity(
+    actor: object,
+    *,
+    kind: str = "push",
+    at: str = "2026-08-25T11:00:00Z",
+    after: str = "elsewhere",
+) -> dict[str, Any]:
+    return {"activity_type": kind, "timestamp": at, "after": after, "actor": actor}
+
+
+def _head_push(actor_id: int = 1) -> dict[str, Any]:
+    """The feed's record of the push that put the judged head on the branch."""
+    return _activity({"id": actor_id}, after="head-sha")
+
+
+def _mock_activity(entries: list[dict[str, Any]]) -> respx.Route:
+    return respx.get(f"{_REPO}/activity").mock(return_value=httpx.Response(200, json=entries))
+
+
+def _mock_commits(commits: list[dict[str, Any]]) -> respx.Route:
+    return respx.get(f"{_REPO}/pulls/7/commits").mock(
+        return_value=httpx.Response(200, json=commits)
+    )
+
+
+def _mock_timeline(events: list[dict[str, Any]]) -> respx.Route:
+    return respx.get(f"{_REPO}/issues/7/timeline").mock(
+        return_value=httpx.Response(200, json=events)
+    )
+
+
+def _pushers() -> tuple[int, ...] | None:
+    return _client().list_pushers(7, base_sha="base-sha", head_sha="head-sha")
+
+
+@respx.mock
+def test_list_pushers_unions_commit_authors_committers_and_force_push_actors() -> None:
+    """Who put a commit on the branch is every id the forge exposes for it: the
+    commit's author, its committer (a maintainer who rebased or used the web
+    UI), and whoever force-pushed the head. Other timeline events carry actors
+    too, but commenting or labelling is not pushing."""
+    _pushers_pr()
+    _mock_commits(
+        [
+            _commit({"id": 1, "login": "alice"}, {"id": 1, "login": "alice"}, "c1"),
+            _commit({"id": 1, "login": "alice"}, {"id": 19864447, "login": "web-flow"}, "c2"),
+        ]
+    )
+    _mock_timeline(
+        [
+            {"event": "head_ref_force_pushed", "actor": {"id": 7, "login": "mallory"}},
+            {"event": "labeled", "actor": None},
+            {"event": "commented", "actor": {"id": 500}},
+        ]
+    )
+    _mock_activity([_head_push()])
+
+    assert _pushers() == (1, 7, 19864447)
+
+
+@respx.mock
+def test_list_pushers_follows_pagination_on_every_endpoint() -> None:
+    _pushers_pr()
+    commits_url = f"{_REPO}/pulls/7/commits"
+    respx.get(commits_url, params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=[_commit({"id": 2}, {"id": 2}, "c2")])
+    )
+    respx.get(commits_url).mock(
+        return_value=httpx.Response(
+            200,
+            json=[_commit({"id": 1}, {"id": 1})],
+            headers={"Link": f'<{commits_url}?page=2>; rel="next"'},
+        )
+    )
+    timeline_url = f"{_REPO}/issues/7/timeline"
+    respx.get(timeline_url, params={"page": "2"}).mock(
+        return_value=httpx.Response(
+            200, json=[{"event": "head_ref_force_pushed", "actor": {"id": 4}}]
+        )
+    )
+    respx.get(timeline_url).mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"event": "head_ref_force_pushed", "actor": {"id": 3}}],
+            headers={"Link": f'<{timeline_url}?page=2>; rel="next"'},
+        )
+    )
+
+    activity_url = f"{_REPO}/activity"
+    respx.get(activity_url, params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=[_activity({"id": 6}, after="head-sha")])
+    )
+    respx.get(activity_url).mock(
+        return_value=httpx.Response(
+            200,
+            json=[_activity({"id": 5})],
+            headers={"Link": f'<{activity_url}?page=2>; rel="next"'},
+        )
+    )
+
+    assert _pushers() == (1, 2, 3, 4, 5, 6)
+
+
+@pytest.mark.parametrize(
+    ("pr_kwargs"),
+    [
+        {"head_repo": {"id": 6}},
+        {"head_repo": None},
+        {"head_repo": {}},
+        {"head": "moved-sha"},
+        {"base": "moved-base"},
+        {"head_ref": None},
+        {"head_ref": ""},
+        {"created_at": None},
+    ],
+    ids=[
+        "fork",
+        "deleted-fork",
+        "repo-without-id",
+        "head-moved",
+        "base-moved",
+        "no-head-ref",
+        "empty-head-ref",
+        "no-created-at",
+    ],
+)
+@respx.mock
+def test_list_pushers_is_none_when_the_pull_request_is_not_the_one_judged(
+    pr_kwargs: dict[str, Any],
+) -> None:
+    """A fork's commits and a moved head are not the revision the gate judged;
+    the commits endpoint is never asked, so there is nothing to mistake for the
+    answer."""
+    _pushers_pr(**pr_kwargs)
+    commits = _mock_commits([_commit({"id": 1}, {"id": 1})])
+
+    assert _pushers() is None
+    assert not commits.called
+
+
+@pytest.mark.parametrize(
+    "commit",
+    [
+        _commit(None, {"id": 1}),
+        _commit({"id": 1}, None),
+        _commit({"login": "ghost"}, {"id": 1}),
+        _commit({"id": None}, {"id": 1}),
+        _commit({"id": 1}, {"id": "1"}),
+        _commit({"id": True}, {"id": 1}),
+        _commit({"id": 0}, {"id": 1}),
+    ],
+    ids=["no-author", "no-committer", "missing-id", "null-id", "string-id", "bool-id", "zero-id"],
+)
+@respx.mock
+def test_list_pushers_is_none_when_any_commit_account_is_unlinked(commit: dict[str, Any]) -> None:
+    """An email GitHub cannot map to an account yields `author: null`. That is
+    an unidentified pusher, not an absent one."""
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1}), commit])
+    _mock_timeline([])
+    _mock_activity([])
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_is_none_when_a_force_push_actor_is_unknown() -> None:
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([{"event": "head_ref_force_pushed", "actor": None}])
+    _mock_activity([])
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_is_none_when_the_commit_list_is_at_the_endpoint_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub stops listing a pull request's commits at a fixed ceiling and
+    says nothing; a list that long may be missing the commit that matters."""
+    monkeypatch.setattr("ocx_indexbot.adapters.github_api._COMMITS_ENDPOINT_CAP", 2)
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1}), _commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+
+    assert _pushers() is None
+
+
+def _fail_pushers_request(failing: str, status: int) -> None:
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    _mock_activity([])
+    route = {
+        "pull": f"{_REPO}/pulls/7",
+        "commits": f"{_REPO}/pulls/7/commits",
+        "timeline": f"{_REPO}/issues/7/timeline",
+        "activity": f"{_REPO}/activity",
+    }[failing]
+    respx.get(route).mock(return_value=httpx.Response(status, json={"message": "no"}))
+
+
+_PUSHERS_REQUESTS = ["pull", "commits", "timeline", "activity"]
+
+
+@pytest.mark.parametrize("status", [404, 422])
+@pytest.mark.parametrize("failing", _PUSHERS_REQUESTS)
+@respx.mock
+def test_list_pushers_is_none_on_any_refused_request(failing: str, status: int) -> None:
+    _fail_pushers_request(failing, status)
+
+    assert _pushers() is None
+
+
+@pytest.mark.parametrize("status", [429, 500])
+@pytest.mark.parametrize("failing", _PUSHERS_REQUESTS)
+@respx.mock
+def test_list_pushers_raises_transient_when_the_forge_asks_to_retry(
+    failing: str, status: int
+) -> None:
+    """A rate limit or a 5xx is "run me again" (exit 75), not "ask a person":
+    answering `None` would send an owner's refresh to review on a blip."""
+    _fail_pushers_request(failing, status)
+
+    with pytest.raises(TransientError):
+        _pushers()
+
+
+@respx.mock
+def test_list_pushers_includes_the_actor_of_a_push_whatever_the_commit_emails_say() -> None:
+    """The commit's author and committer are the pusher's own claim: mallory
+    pushes a commit written under the owner's email, so the commit list names
+    only the owner. The activity feed records who actually pushed."""
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    route = _mock_activity(
+        [
+            _activity({"id": 66, "login": "mallory"}, kind="push"),
+            _activity({"id": 77}, kind="force_push"),
+            _activity({"id": 88}, kind="branch_creation", after="head-sha"),
+        ]
+    )
+
+    assert _pushers() == (1, 66, 77, 88)
+    request = cast("list[Any]", route.calls)[0].request
+    assert request.url.params["ref"] == "refs/heads/announce-branch"
+
+
+@respx.mock
+def test_list_pushers_ignores_activities_that_move_no_head() -> None:
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    _mock_activity(
+        [
+            _head_push(),
+            _activity(None, kind="branch_deletion"),
+            _activity({"id": 5}, kind="pr_merge"),
+            _activity({"id": 6}, kind="merge_queue_merge"),
+        ]
+    )
+
+    assert _pushers() == (1,)
+
+
+@respx.mock
+def test_list_pushers_counts_a_push_made_before_the_pull_request_opened() -> None:
+    """Mallory pushes first and the owner opens the pull request afterwards: the
+    push predates `created_at`, but its tip is one of the pull request's
+    commits, so it is in what would be merged. A push of the same branch name
+    from an earlier pull request is neither in the window nor in the commits."""
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1}, "owned"), _commit({"id": 1}, {"id": 1}, "mine")])
+    _mock_timeline([])
+    _mock_activity(
+        [
+            _activity({"id": 66}, at="2026-08-25T09:00:00Z", after="mine"),
+            _activity({"id": 99}, at="2026-08-20T09:00:00Z", after="from-an-earlier-pr"),
+            _activity({"id": 55}, at=_PR_OPENED, after="elsewhere"),
+            _head_push(),
+        ]
+    )
+
+    assert _pushers() == (1, 55, 66)
+
+
+@respx.mock
+def test_list_pushers_is_none_when_a_push_in_the_window_has_no_actor() -> None:
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    _mock_activity([_activity(None)])
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_ignores_an_out_of_window_push_with_no_actor() -> None:
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    _mock_activity([_activity(None, at="2026-08-01T00:00:00Z"), _head_push()])
+
+    assert _pushers() == (1,)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [None, 20260825, "", "not-a-date", "2026-08-25T11:00:00"],
+    ids=["missing", "not-a-string", "empty", "unparseable", "no-zone"],
+)
+@respx.mock
+def test_list_pushers_is_none_when_a_push_has_no_usable_timestamp(timestamp: object) -> None:
+    """Whether a push is in the window cannot be told without its time: a
+    push that might be this branch's must go to a person, not be dropped."""
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    _mock_activity([_head_push(), {**_activity({"id": 9}), "timestamp": timestamp}])
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_ignores_the_timestamp_of_an_activity_that_moves_no_head() -> None:
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    _mock_activity([_head_push(), {**_activity(None, kind="branch_deletion"), "timestamp": None}])
+
+    assert _pushers() == (1,)
+
+
+@pytest.mark.parametrize(
+    "feed",
+    [
+        [],
+        [_activity({"id": 1}, after="an-older-head")],
+        [_activity({"id": 1}, kind="branch_deletion", after="head-sha")],
+        [_activity({"id": 1}, at="2026-08-01T00:00:00Z", after="head-sha")],
+    ],
+    ids=["empty", "other-head", "not-a-push", "out-of-window"],
+)
+@respx.mock
+def test_list_pushers_is_none_when_no_push_in_the_feed_put_the_judged_head_there(
+    feed: list[dict[str, Any]],
+) -> None:
+    """The feed lags a push, or the head came from somewhere it does not
+    record: the pusher of this head is unknown, so a person decides."""
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    _mock_activity(feed)
+
+    assert _pushers() is None
+
+
+@respx.mock
+def test_list_pushers_accepts_a_head_push_whose_tip_is_one_of_the_pull_requests_commits() -> None:
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1}, "head-sha")])
+    _mock_timeline([])
+    _mock_activity([_activity({"id": 4}, at="2026-08-01T00:00:00Z", after="head-sha")])
+
+    assert _pushers() == (1, 4)
+
+
+@respx.mock
+def test_list_pushers_is_none_when_the_activity_feed_is_longer_than_the_page_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is deterministic: retrying a busy branch reads the same pages
+    again, so it is "ask a person" (`None`), never exit 75 forever. Other
+    reads still treat the cap as transient."""
+    monkeypatch.setattr("ocx_indexbot.adapters._http.MAX_PAGES", 2)
+    _pushers_pr()
+    _mock_commits([_commit({"id": 1}, {"id": 1})])
+    _mock_timeline([])
+    url = f"{_REPO}/activity"
+    respx.get(url).mock(
+        return_value=httpx.Response(200, json=[], headers={"Link": f'<{url}>; rel="next"'})
+    )
+
+    assert _pushers() is None
+
+
 # ---- list_open_pull_requests -------------------------------------------------
 
 
@@ -1332,7 +1754,9 @@ def test_list_open_pull_requests_returns_ascending_numbers() -> None:
 
 
 @respx.mock
-def test_paginate_exceeds_page_cap_raises_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_paginate_exceeds_page_cap_raises_a_transient_cap_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("ocx_indexbot.adapters._http.MAX_PAGES", 2)
     url = "https://api.github.com/repos/ocx-sh/index/issues"
     # A next-link that always points back at itself never terminates —
@@ -1341,7 +1765,7 @@ def test_paginate_exceeds_page_cap_raises_transient(monkeypatch: pytest.MonkeyPa
         return_value=httpx.Response(200, json=[], headers={"Link": f'<{url}>; rel="next"'})
     )
 
-    with pytest.raises(TransientError, match="pagination exceeded 2 pages"):
+    with pytest.raises(PageCapExceeded, match="pagination exceeded 2 pages"):
         _client().create_or_update_issue(title="Anomaly: ns/pkg", body="details")
 
 

@@ -294,6 +294,16 @@ def test_fake_github_request_reviewers_accumulates() -> None:
     assert github.requested_reviewers[7] == ["alice", "bob"]
 
 
+def test_fake_github_list_pushers_defaults_to_no_pusher_beyond_the_author() -> None:
+    assert FakeGitHub().list_pushers(7, base_sha="b", head_sha="h") == ()
+
+
+def test_fake_github_list_pushers_returns_the_canned_set_or_none() -> None:
+    github = FakeGitHub(pushers={7: (1, 999), 8: None})
+    assert github.list_pushers(7, base_sha="b", head_sha="h") == (1, 999)
+    assert github.list_pushers(8, base_sha="b", head_sha="h") is None
+
+
 def test_fake_github_create_comment_idempotent_per_marker() -> None:
     github = FakeGitHub()
     github.create_comment(7, "first body", marker="<!-- m -->")

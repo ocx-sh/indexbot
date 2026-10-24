@@ -425,6 +425,39 @@ class ForgePort(Protocol):
         """
         ...
 
+    def list_pushers(
+        self, pr_number: int, *, base_sha: str, head_sha: str
+    ) -> tuple[int, ...] | None:
+        """Numeric ids of the accounts that put commits on `pr_number`'s branch,
+        ascending, or `None` when the forge cannot establish that set.
+
+        G-19 asks "does everyone who pushed own the package", and the PR author
+        is only one of them: a branch reused across pull requests lets a
+        non-owner push into an owner's. **Ids, never logins**, for the reason
+        `list_approvals` documents.
+
+        `None` is the fail-closed answer and the caller sends it to the human
+        lane. It means any of: a fork (its commits are the fork's, and the
+        forge exposes no pusher list for them), a head or base that is no
+        longer `head_sha`/`base_sha` (the decision is stale), an account the
+        forge reports without an id, or a request the forge refused. A
+        transient failure (rate limit, 5xx, network) is **raised** as
+        `TransientError`, never folded into `None`: "run me again" is not
+        "ask a person". An empty tuple is a different claim — "no pusher the
+        forge knows of" — and is what an adapter reports only when it
+        actually read the whole set.
+
+        Each forge reads the push record it keeps: GitHub the repository
+        activity feed (`push`, `force_push`, `branch_creation` actors) plus
+        the commits' author and committer and the actors of forced pushes;
+        GitLab the push events on the source branch. A push counts when it
+        happened since the PR/MR opened or when its tip is one of the PR/MR's
+        commits, so a push made before the owner opened it is not missed.
+        GitLab answers `None` when a bulk push event with no ref falls in that
+        window.
+        """
+        ...
+
     def list_open_pull_requests(self) -> tuple[int, ...]:
         """Every open PR/MR number on this repository, ascending.
 

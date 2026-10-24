@@ -10,14 +10,16 @@ the shared pure function, not a second hand-rolled diff walk).
 
 Disposition:
 
-- **Machine lane** (`refresh`): green (`success`) requires the PR author's
-  numeric forge id to appear in `owners[]` of *every* touched package root — read
+- **Machine lane** (`refresh`): green (`success`) requires the numeric forge id
+  of the PR author, and of every other account that pushed to the PR
+  (`ForgePort.list_pushers`; a forge that cannot say counts as failing), to
+  appear in `owners[]` of *every* touched package root — read
   from the **base** ref only (`ForgePort.get_file_contents`, never the PR
   head; the same untrusted-head-content trust boundary
   `cli/classify_pr.py`'s module docstring already documents for
   `governance-gate`'s `pull_request_target` context) — this is G-19. A
-  refresh-classified PR whose author does not own every touched package
-  falls back to the human lane below (`pending` + reviewers + comment)
+  refresh-classified PR with an author or pusher who does not own every
+  touched package falls back to the human lane below (`pending` + reviewers + comment)
   rather than merging unreviewed.
 - **Human lane** (`new-package`/`human-review-required`, or a refresh PR that
   failed G-19): `pending` + reviewers assigned from committed
@@ -103,9 +105,15 @@ def _is_package_root_path(path: str, *, name_segments: int) -> bool:
 def _author_owns_every_touched_package(
     info: PullRequestInfo, github: ForgePort, *, policy: IndexPolicy
 ) -> bool:
-    """G-19: the PR author's numeric forge id must appear in `owners[]` of every
-    touched `p/<namespace>/<package>.json` root, read from the base ref
-    (never the PR head).
+    """G-19: the PR author's numeric forge id, and that of every other account
+    that pushed to the PR, must appear in `owners[]` of every touched
+    `p/<namespace>/<package>.json` root, read from the base ref (never the PR
+    head).
+
+    The author alone is not enough: the fixed announce branch name lets
+    someone else push into an owner's PR, and the machine lane would then
+    merge their bytes under the owner's name. A forge that cannot name the
+    pushers (`None`) is refused, never read as "nobody else".
 
     Filtering `changed_paths` down to roots is safe *here* only because this
     runs behind `classify_pull_request`, which already returned `"refresh"` —
@@ -113,6 +121,10 @@ def _author_owns_every_touched_package(
     roots' refresh scope (ADR-6 FP-5). Do not reuse this filter anywhere that
     is not downstream of that gate.
     """
+    pushers = github.list_pushers(info.number, base_sha=info.base_sha, head_sha=info.head_sha)
+    if pushers is None:
+        return False
+    accounts = {info.author_id, *pushers}
     root_paths = [
         path
         for path in info.changed_paths
@@ -127,7 +139,7 @@ def _author_owns_every_touched_package(
             # contract regardless of that upstream guarantee.
             return False
         root = parse_package_root(base_raw)
-        if info.author_id not in {owner.id for owner in root.owners}:
+        if not accounts <= {owner.id for owner in root.owners}:
             return False
     return True
 
@@ -178,7 +190,7 @@ def _disposition(
         return "success", "refresh: policy sets governance.auto_merge = always"
     if author_is_owner:
         return "success", "refresh: PR author owns every touched package, no review required"
-    return "pending", "refresh: PR author does not own every touched package (G-19)"
+    return "pending", "refresh: PR author or a pusher does not own every touched package (G-19)"
 
 
 def _committed_maintainers(github: ForgePort, base_sha: str) -> tuple[Owner, ...]:

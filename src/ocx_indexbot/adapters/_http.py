@@ -141,9 +141,35 @@ def as_object(response: httpx.Response, *, forge: str, url: str) -> dict[str, An
     return cast("dict[str, Any]", payload)
 
 
+def account_id(holder: object, key: str = "id", *, forge: str) -> int:
+    """The numeric account id at `holder[key]`, or `ForgeError` for anything else.
+
+    `ForgePort.list_pushers` feeds an authorization decision, so an account
+    the forge could not identify (GitHub reports a commit whose email maps to
+    no account as `author: null`) must fail the whole read rather than be
+    skipped: a missing pusher is not the same fact as no pusher. `bool` is an
+    `int` to Python and `0` is no account on either forge, so both are refused
+    alongside strings, nulls and a `holder` that is not an object.
+    """
+    value = cast("dict[str, object]", holder).get(key) if isinstance(holder, dict) else None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ForgeError(f"{forge} API returned an account without a numeric id")
+    return value
+
+
 def _same_host(url: str, other: str) -> bool:
     left, right = urlsplit(url), urlsplit(other)
     return (left.scheme, left.netloc) == (right.scheme, right.netloc)
+
+
+class PageCapExceeded(TransientError):
+    """A paginated read ran past `MAX_PAGES`.
+
+    Still `TransientError` (exit 75) for every caller that only needs the
+    list. It is its own type because the cap is deterministic: re-reading the
+    same busy resource hits it again, so an authorization read that would
+    otherwise retry forever catches it and answers "ask a person" instead.
+    """
 
 
 def paginate(
@@ -179,7 +205,7 @@ def paginate(
             )
         current_url = next_link
         current_params = None
-    raise TransientError(f"{forge} API pagination exceeded {MAX_PAGES} pages: {url}")
+    raise PageCapExceeded(f"{forge} API pagination exceeded {MAX_PAGES} pages: {url}")
 
 
 class _TransientTransport(httpx.BaseTransport):
