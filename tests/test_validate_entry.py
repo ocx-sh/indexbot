@@ -1147,3 +1147,58 @@ def test_parse_package_id_rejects_adversarial_input_within_wall_clock_bound(raw:
         validate_entry.parse_package_id(raw, name_segments=2)
     elapsed = time.monotonic() - start
     assert elapsed < _WALL_CLOCK_BOUND_SECONDS
+
+
+# --- dangling_references / closure_counts ------------------------------------
+
+
+def test_dangling_references_lists_only_the_absent_ones_in_root_order() -> None:
+    present = "sha256:" + "a" * 64
+    absent = "sha256:" + "b" * 64
+    root = _minimal_root(
+        tags={
+            "1.0": TagEntry(content=present, observed="2026-07-17T00:00:00Z"),
+            "2.0": TagEntry(content=absent, observed="2026-07-17T00:00:00Z"),
+        }
+    )
+
+    assert validate_entry.dangling_references(root, frozenset({present})) == [
+        f"tags[2.0].content -> {absent}"
+    ]
+
+
+def test_closure_counts_complete_closure() -> None:
+    raw = b"{}"
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    root = _minimal_root(tags={"1.0": TagEntry(content=digest, observed="2026-07-17T00:00:00Z")})
+
+    counts = validate_entry.closure_counts(root, {digest: raw})
+
+    assert counts == validate_entry.ClosureCounts(referenced=1, missing=0, bad=0)
+
+
+def test_closure_counts_separates_missing_from_bad_and_dedups_shared_objects() -> None:
+    good_raw = b"{}"
+    good = "sha256:" + hashlib.sha256(good_raw).hexdigest()
+    corrupt = "sha256:" + "c" * 64
+    absent = "sha256:" + "d" * 64
+    stamp = "2026-07-17T00:00:00Z"
+    desc = Desc(digest=good, title="CMake", description="x", readme=absent)
+    root = _minimal_root(
+        desc=desc,
+        tags={
+            "1.0": TagEntry(content=good, observed=stamp),
+            "1.1": TagEntry(content=good, observed=stamp),
+            "2.0": TagEntry(content=corrupt, observed=stamp),
+        },
+    )
+
+    counts = validate_entry.closure_counts(root, {good: good_raw, corrupt: b"not that hash"})
+
+    assert counts == validate_entry.ClosureCounts(referenced=3, missing=1, bad=1)
+
+
+def test_closure_counts_of_an_empty_root() -> None:
+    assert validate_entry.closure_counts(_minimal_root(), {}) == validate_entry.ClosureCounts(
+        referenced=0, missing=0, bad=0
+    )

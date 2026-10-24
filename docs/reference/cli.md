@@ -352,7 +352,7 @@ job that dispatches it the moment a machine-lane PR merges.
 Emit the served wire tree.
 
 ```bash
-indexbot render --index-dir PREFIX --out DIR [--check]
+indexbot render --index-dir PREFIX --out DIR [--check] [--strict]
 ```
 
 | Flag | Meaning |
@@ -360,10 +360,21 @@ indexbot render --index-dir PREFIX --out DIR [--check]
 | `--index-dir` | Prefix *before* the literal `p/` component. `""` reads `p/**`; `demo` reads `demo/p/**` |
 | `--out` | Output root |
 | `--check` | Compare against what is already there instead of writing |
+| `--strict` | Exit 65 instead of leaving out a package whose root points at objects that are missing |
 
 Produces `config.json`, the `/p/**` mirror and `c/index.json`. With no `p/`
 tree yet it still emits `config.json` and an empty `c/index.json` — no
 separate pre-seed code path.
+
+Render serves only what it can vouch for. An object whose bytes do not hash to
+the digest in its filename stops the run with exit 65, with or without
+`--strict`. A root that points at an object missing from the tree is
+**quarantined**: the package's root and objects are left out of `/p/**` and
+`c/index.json`, a `render: quarantined <package>: dangling <ref>, …` line goes
+to stderr and the CI job summary, and the other packages render normally. The
+package stays out of the served index until its objects are restored. Root
+bytes are never rewritten to drop a bad row. With `--strict` the same
+condition exits 65.
 
 Reads no environment variable and holds no forge credential — it is a pure
 local transformation, `p/**` in, `--out DIR` out. The "deploy credentials"

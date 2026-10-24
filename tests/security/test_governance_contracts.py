@@ -74,7 +74,7 @@ from ocx_indexbot.core.validate_entry import (
     check_repository_allowlisted,
     serialize_package_root,
 )
-from ocx_indexbot.errors import ValidationError
+from ocx_indexbot.errors import AnomalyError, ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import (
     Owner,
@@ -253,16 +253,54 @@ def test_g06_render_reachability_filter() -> None:
     assert cas_relpath(_PKG, _DIGEST_B, "json") not in paths
 
 
+def test_g06_render_never_serves_a_dangling_or_corrupt_package(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """G-06: render serves a package only when its root's CAS closure is
+    complete and every object hashes to its name. A root pointing at an absent
+    object is left out of the tree and the listing (root bytes stay verbatim,
+    never re-serialized); `--strict` and a hash mismatch both exit 65."""
+    good = InMemoryFiles()
+    _seed_render_source(good)
+    obj = _index_bytes()
+    digest = _digest_of(obj).removeprefix("sha256:")
+
+    dangling = InMemoryFiles(files=dict(good.files))
+    del dangling.files[f"p/kitware/cmake/o/sha256/{digest}.json"]
+    args = argparse.Namespace(index_dir="", out="dist", check=False, strict=False)
+    with pytest.raises(ValidationError, match="quarantined"):
+        cli_render.run(args, files=dangling, policy=make_policy())
+    allow = argparse.Namespace(
+        index_dir="", out="dist", check=False, strict=False, allow_empty=True
+    )
+    assert cli_render.run(allow, files=dangling, policy=make_policy()) == ExitCode.OK
+    assert "render: quarantined kitware/cmake: dangling" in capsys.readouterr().err
+    assert not [path for path in dangling.files if path.startswith("dist/p/")]
+    assert json.loads(dangling.files["dist/c/index.json"])["packages"] == {}
+
+    strict = argparse.Namespace(index_dir="", out="dist", check=False, strict=True)
+    with pytest.raises(AnomalyError):
+        cli_render.run(strict, files=dangling, policy=make_policy())
+
+    corrupt = InMemoryFiles(files=dict(good.files))
+    corrupt.files[f"p/kitware/cmake/o/sha256/{digest}.json"] = obj + b" "
+    with pytest.raises(AnomalyError):
+        cli_render.run(args, files=corrupt, policy=make_policy())
+
+
 # --- G-07 ------------------------------------------------------------------
 
 
+def _digest_of(raw: bytes) -> str:
+    return f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
 def _seed_render_source(files: InMemoryFiles) -> None:
-    root = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
+    obj = _index_bytes()
+    digest = _digest_of(obj)
+    root = _root(tags={"1.0.0": TagEntry(content=digest, observed=_TS)})
     files.write_bytes("p/kitware/cmake.json", serialize_package_root(root))
-    files.write_bytes(
-        f"p/kitware/cmake/o/sha256/{'a' * 64}.json",
-        _index_bytes(),
-    )
+    files.write_bytes(f"p/kitware/cmake/o/sha256/{digest.removeprefix('sha256:')}.json", obj)
 
 
 def test_g07_render_idempotent_noop() -> None:

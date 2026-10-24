@@ -43,14 +43,21 @@ own `ValidationError` for that case.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING, cast
 
 from ocx_indexbot.core.policy import IndexPolicy
 from ocx_indexbot.core.render import FileWrite, SourcePackage, build_render_plan
-from ocx_indexbot.core.validate_entry import parse_package_root
-from ocx_indexbot.errors import ValidationError
+from ocx_indexbot.core.validate_entry import (
+    check_digest_self_consistent,
+    dangling_references,
+    parse_package_root,
+)
+from ocx_indexbot.errors import AnomalyError, ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import PackageId
+
+from ._common import write_ci_summary
 
 if TYPE_CHECKING:
     import argparse
@@ -119,27 +126,56 @@ def _package_roots(
 
 
 def _load_source_package(
-    files: FilePort, index_dir: str, package_id: PackageId, root_path: str
-) -> SourcePackage:
+    files: FilePort, index_dir: str, package_id: PackageId, root_path: str, *, strict: bool
+) -> SourcePackage | None:
+    """The package as committed, or `None` when it must not be served.
+
+    A blob whose bytes do not hash to the digest its filename claims is
+    corruption and always `AnomalyError` -- `--strict` or not. A root that
+    points at a CAS object absent from the tree is quarantined whole (`None`,
+    announced on stderr and the CI summary): the root's bytes are served
+    verbatim or not at all, so dropping one row would mean re-serializing it.
+    `--strict` turns the quarantine into `AnomalyError`.
+    """
     root_raw = _read_required_bytes(files, root_path)
     root = parse_package_root(root_raw)
     cas_prefix = f"{_package_dir(index_dir, package_id)}/o/sha256/"
-    content_by_digest = {
-        f"sha256:{cas_path.removeprefix(cas_prefix)}": _read_required_bytes(files, cas_path)
-        for cas_path in files.list_files(cas_prefix)
-    }
+    content_by_digest: dict[str, bytes] = {}
+    present: set[str] = set()
+    for cas_path in files.list_files(cas_prefix):
+        name = cas_path.removeprefix(cas_prefix)
+        content = _read_required_bytes(files, cas_path)
+        digest = f"sha256:{name.split('.', 1)[0]}"
+        check_digest_self_consistent(digest, content)
+        present.add(digest)
+        content_by_digest[f"sha256:{name}"] = content
+
+    dangling = dangling_references(root, frozenset(present))
+    if dangling:
+        reason = f"render: quarantined {package_id}: dangling {', '.join(dangling)}"
+        if strict:
+            raise AnomalyError(reason)
+        print(reason, file=sys.stderr)
+        write_ci_summary(
+            "indexbot render: package quarantined",
+            f"`{package_id}` is left out of the rendered tree: its root points at CAS "
+            "objects that are not in the source tree.",
+            detail="\n".join(dangling),
+        )
+        return None
     return SourcePackage(
         package_id=package_id, root=root, root_raw=root_raw, content_by_digest=content_by_digest
     )
 
 
 def _load_source_packages(
-    files: FilePort, index_dir: str, *, name_segments: int
+    files: FilePort, index_dir: str, *, name_segments: int, strict: bool
 ) -> list[SourcePackage]:
-    return [
-        _load_source_package(files, index_dir, package_id, root_path)
+    loaded = (
+        _load_source_package(files, index_dir, package_id, root_path, strict=strict)
         for package_id, root_path in _package_roots(files, index_dir, name_segments=name_segments)
-    ]
+    )
+    return [source for source in loaded if source is not None]
 
 
 def _write_tree(files: FilePort, output_root: str, file_writes: tuple[FileWrite, ...]) -> None:
@@ -168,7 +204,7 @@ def _tree_drifted(files: FilePort, output_root: str, file_writes: tuple[FileWrit
 def run(args: argparse.Namespace, *, files: FilePort, policy: IndexPolicy) -> ExitCode:
     """`indexbot render` entry point. Expected `args` attributes:
     `index_dir` (str, required), `out` (str, required), `check` (bool),
-    `allow_empty` (bool) --
+    `allow_empty` (bool), `strict` (bool) --
     argparse's default dest derivation already maps `--index-dir`/`--out`/
     `--check` to those names, so WP2-M's `subparsers.add_parser` wiring
     needs no extra `dest=` overrides.
@@ -177,13 +213,26 @@ def run(args: argparse.Namespace, *, files: FilePort, policy: IndexPolicy) -> Ex
     out = cast(str, args.out)
     check = bool(getattr(args, "check", False))
 
-    sources = _load_source_packages(files, index_dir, name_segments=policy.name_segments)
-    if not sources and not bool(getattr(args, "allow_empty", False)):
+    if not _package_roots(files, index_dir, name_segments=policy.name_segments) and not bool(
+        getattr(args, "allow_empty", False)
+    ):
         raise ValidationError(
             f"render found no package roots under {_p_prefix(index_dir)!r} — "
             "a typo in --index-dir renders a valid but EMPTY index, which then "
             "deploys over a populated one. Pass --allow-empty if that is really "
             "what you mean (a brand-new index before its first announce)."
+        )
+    sources = _load_source_packages(
+        files,
+        index_dir,
+        name_segments=policy.name_segments,
+        strict=bool(getattr(args, "strict", False)),
+    )
+    if not sources and not bool(getattr(args, "allow_empty", False)):
+        raise ValidationError(
+            f"every package root under {_p_prefix(index_dir)!r} was quarantined — "
+            "rendering would publish an EMPTY index over a populated one. Fix the "
+            "quarantined packages, or pass --allow-empty if that is really what you mean."
         )
     plan = build_render_plan(sources, name_segments=policy.name_segments)
 

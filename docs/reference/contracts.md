@@ -940,6 +940,16 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   `indexbot render --out` second, into the same `emptyOutDir`-wiped tree.
   `--check` computes the plan and reports drift against `--out` without
   writing, `ExitCode.VALIDATION_FAILURE` on drift.
+  Before planning, each package's CAS blobs are hashed against the digest in
+  their filename (`check_digest_self_consistent`; a mismatch is `AnomalyError`,
+  exit 65, always) and its root's references are checked against the blobs
+  present (`dangling_references`). A package with a dangling reference is
+  **quarantined whole** -- omitted from the plan, so from `/p/**` and
+  `/c/index.json` -- with a `render: quarantined <package>: dangling <ref>, …`
+  stderr line and a CI summary entry; `--strict` raises `AnomalyError` instead.
+  Root bytes stay verbatim (§8): there is no row-level drop and no
+  re-serialization. `validate_entry.closure_counts(root, cas)` is the same
+  census as pure counts (`referenced`, `missing`, `bad`).
 - **`cli/seed_import.py`**: reads local `CATALOG.md` (title/description/
   keywords — frontmatter shape TBD by whoever writes this WP; note the
   precedent in `ocx_lib::package::description::Frontmatter`, §7's desc.py

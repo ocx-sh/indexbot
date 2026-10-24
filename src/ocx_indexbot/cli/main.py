@@ -66,6 +66,11 @@ def _add_render_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="render an index with no package roots (a new index before its first announce)",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 65 instead of leaving out a package whose root points at missing objects",
+    )
 
 
 def _add_seed_import_arguments(parser: argparse.ArgumentParser) -> None:
