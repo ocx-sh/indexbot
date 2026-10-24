@@ -495,6 +495,19 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
     assert github.issues == {}  # no anomaly issue opened
     assert files.files == before  # FilePort store untouched — verify-only
 
+    # A malformed root is a finding, and still writes nothing to `p/`.
+    files.write_bytes("p/ocx-contrib/broken.json", b"{}")
+    before = dict(files.files)
+    with pytest.raises(AnomalyError, match="root-malformed"):
+        reconcile.run(
+            argparse.Namespace(package=None),
+            files=files,
+            registry=registry,
+            github=github,
+            policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
+        )
+    assert files.files == before
+
     parser = argparse.ArgumentParser()
     reconcile.add_arguments(parser)
     with pytest.raises(SystemExit):  # no --dry-run arg exists

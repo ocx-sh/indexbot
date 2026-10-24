@@ -733,7 +733,7 @@ def parse_package_root(raw: bytes) -> PackageRoot:
     """
     try:
         parsed: Any = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValidationError(f"malformed root JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValidationError("root JSON must be a JSON object")

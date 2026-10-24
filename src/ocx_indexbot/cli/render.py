@@ -125,6 +125,20 @@ def _package_roots(
     return roots
 
 
+def _quarantine(package_id: PackageId, reason: str, *, why: str, detail: str, strict: bool) -> None:
+    """Announce `package_id` as left out of the rendered tree, or raise
+    `AnomalyError` under `--strict`."""
+    message = f"render: quarantined {package_id}: {reason}"
+    if strict:
+        raise AnomalyError(message)
+    print(message, file=sys.stderr)
+    write_ci_summary(
+        "indexbot render: package quarantined",
+        f"`{package_id}` is left out of the rendered tree: {why}.",
+        detail=detail,
+    )
+
+
 def _load_source_package(
     files: FilePort, index_dir: str, package_id: PackageId, root_path: str, *, strict: bool
 ) -> SourcePackage | None:
@@ -132,13 +146,24 @@ def _load_source_package(
 
     A blob whose bytes do not hash to the digest its filename claims is
     corruption and always `AnomalyError` -- `--strict` or not. A root that
-    points at a CAS object absent from the tree is quarantined whole (`None`,
-    announced on stderr and the CI summary): the root's bytes are served
-    verbatim or not at all, so dropping one row would mean re-serializing it.
-    `--strict` turns the quarantine into `AnomalyError`.
+    cannot be parsed, or that points at a CAS object absent from the tree, is
+    quarantined whole (`None`, announced on stderr and the CI summary): the
+    root's bytes are served verbatim or not at all, so dropping one row would
+    mean re-serializing it. `--strict` turns the quarantine into `AnomalyError`.
     """
     root_raw = _read_required_bytes(files, root_path)
-    root = parse_package_root(root_raw)
+    try:
+        root = parse_package_root(root_raw)
+    except ValidationError as error:
+        reason = f"malformed root {root_path}: {error}"
+        _quarantine(
+            package_id,
+            reason,
+            why=f"its root `{root_path}` is malformed",
+            detail=str(error),
+            strict=strict,
+        )
+        return None
     cas_prefix = f"{_package_dir(index_dir, package_id)}/o/sha256/"
     content_by_digest: dict[str, bytes] = {}
     present: set[str] = set()
@@ -152,15 +177,12 @@ def _load_source_package(
 
     dangling = dangling_references(root, frozenset(present))
     if dangling:
-        reason = f"render: quarantined {package_id}: dangling {', '.join(dangling)}"
-        if strict:
-            raise AnomalyError(reason)
-        print(reason, file=sys.stderr)
-        write_ci_summary(
-            "indexbot render: package quarantined",
-            f"`{package_id}` is left out of the rendered tree: its root points at CAS "
-            "objects that are not in the source tree.",
+        _quarantine(
+            package_id,
+            f"dangling {', '.join(dangling)}",
+            why="its root points at CAS objects that are not in the source tree",
             detail="\n".join(dangling),
+            strict=strict,
         )
         return None
     return SourcePackage(

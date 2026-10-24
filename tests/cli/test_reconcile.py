@@ -339,6 +339,25 @@ def test_anomaly_ok_stays_green_and_files_the_same_issue(
     assert "```" in summary
 
 
+def test_a_malformed_root_is_a_finding_and_the_sweep_continues() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    github = FakeGitHub()
+    entry, object_bytes = _committed_tag(registry, _CMAKE_REPO, "1.0.0")
+    _put_root(files, "kitware", "cmake", _root(tags={"1.0.0": entry}))
+    _put_cas(files, "kitware", "cmake", entry.content, object_bytes)
+    files.write_bytes("p/kitware/ninja.json", b'{"name": "ocx.sh/kitware/ninja"}')
+
+    with pytest.raises(AnomalyError) as excinfo:
+        _run(_args(), files=files, registry=registry, github=github)
+
+    message = str(excinfo.value)
+    assert "verified 2 package(s); 1 anomaly(ies)" in message
+    assert "kitware/ninja root-malformed: p/kitware/ninja.json" in message
+    assert "kitware/cmake" not in message
+    assert "root-malformed" in github.issues[_ISSUE_TITLE][1]
+
+
 def test_anomaly_ok_does_not_change_the_clean_no_op_case() -> None:
     result = _run(
         _args(anomaly_ok=True), files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub()

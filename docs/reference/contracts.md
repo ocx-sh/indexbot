@@ -883,7 +883,10 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   grace, an explicit owner-authorized exemption from the registry-existence
   check (an `ephemeral` row is exempt too — its tag is meant to vanish) — `_PackageReport` carries the committed root's yanked-tag names
   precisely so `_escalating_findings` can tell a yanked-and-vanished tag
-  apart from a plain silent drop. A non-empty escalating-finding set
+  apart from a plain silent drop. A committed root that does not parse is itself a finding
+  (`<package> root-malformed: <path>: <reason>`), always escalating — the
+  sweep moves on to the next package rather than aborting;
+  a non-empty escalating-finding set
   opens/updates one anomaly issue via `ForgePort.create_or_update_issue`
   (promoted onto the port this stage, see §3/§10) before raising.
 - **`cli/validate.py`** (extended, fork-PR announce revamp — byte-exact
@@ -947,6 +950,10 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   **quarantined whole** -- omitted from the plan, so from `/p/**` and
   `/c/index.json` -- with a `render: quarantined <package>: dangling <ref>, …`
   stderr line and a CI summary entry; `--strict` raises `AnomalyError` instead.
+  A root that does not parse is quarantined the same way, with
+  `render: quarantined <package>: malformed root <path>: <reason>`; `--strict`
+  raises `AnomalyError` naming the path. When every package is quarantined the
+  render is refused (`ValidationError`) unless `--allow-empty`, as for no roots.
   Root bytes stay verbatim (§8): there is no row-level drop and no
   re-serialization. `validate_entry.closure_counts(root, cas)` is the same
   census as pure counts (`referenced`, `missing`, `bad`).

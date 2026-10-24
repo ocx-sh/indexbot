@@ -803,6 +803,11 @@ def test_parse_package_root_malformed_json_raises() -> None:
         validate_entry.parse_package_root(b"{not json")
 
 
+def test_parse_package_root_non_utf8_bytes_raise_a_validation_error() -> None:
+    with pytest.raises(ValidationError, match="malformed root JSON"):
+        validate_entry.parse_package_root(b"\xff\xfe\x00")
+
+
 def test_parse_package_root_non_object_json_raises() -> None:
     with pytest.raises(ValidationError, match="JSON object"):
         validate_entry.parse_package_root(b"[1, 2, 3]")

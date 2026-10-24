@@ -369,8 +369,10 @@ separate pre-seed code path.
 Render serves only what it can vouch for. An object whose bytes do not hash to
 the digest in its filename stops the run with exit 65, with or without
 `--strict`. A root that points at an object missing from the tree is
-**quarantined**: the package's root and objects are left out of `/p/**` and
-`c/index.json`, a `render: quarantined <package>: dangling <ref>, …` line goes
+**quarantined**, and so is a root that does not parse: the package's root and
+objects are left out of `/p/**` and
+`c/index.json`, a `render: quarantined <package>: dangling <ref>, …` (or
+`malformed root <path>: …`) line goes
 to stderr and the CI job summary, and the other packages render normally. The
 package stays out of the served index until its objects are restored. Root
 bytes are never rewritten to drop a bad row. With `--strict` the same

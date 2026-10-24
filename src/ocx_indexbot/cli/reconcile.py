@@ -158,6 +158,10 @@ class _PackageReport:
     gets — the index has already disclaimed them, so what the registry now
     serves for one is not the index's anomaly."""
 
+    malformed_root: str | None = None
+    """`"<path>: <reason>"` when the committed root does not parse — every
+    other field is then empty, and the sweep moves on to the next package."""
+
 
 def _root_path(package_id: PackageId) -> str:
     return f"{_ROOT_PREFIX}{package_id}.json"
@@ -227,7 +231,18 @@ def _verify_one(
     raw = files.read_bytes(_root_path(package_id))
     if raw is None:
         return None
-    root = parse_package_root(raw)
+    try:
+        root = parse_package_root(raw)
+    except ValidationError as error:
+        return _PackageReport(
+            package_id=package_id,
+            pinned_mutations=(),
+            claim_findings=(),
+            yanked_tags=frozenset(),
+            ephemeral_tags=frozenset(),
+            unrecordable_tags=(),
+            malformed_root=f"{_root_path(package_id)}: {error}",
+        )
 
     # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
     # call below.
@@ -285,6 +300,8 @@ def _escalating_findings(report: _PackageReport) -> tuple[str, ...]:
         f"committed={finding.committed_content} fresh={finding.fresh_content}"
         for finding in report.pinned_mutations
     ]
+    if report.malformed_root is not None:
+        lines.append(f"{report.package_id} root-malformed: {report.malformed_root}")
     lines.extend(
         f"{report.package_id} tag-unrecordable: {entry}" for entry in report.unrecordable_tags
     )

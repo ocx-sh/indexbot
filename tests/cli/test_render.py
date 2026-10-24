@@ -292,6 +292,40 @@ def test_dangling_package_is_quarantined_and_the_rest_still_render(
     assert f"tags[1.0.0].content -> {_DIGEST}" in written
 
 
+def test_malformed_root_is_quarantined_with_its_path_and_the_rest_still_render(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    files = InMemoryFiles()
+    _seed_source(files)
+    files.write_bytes("p/kitware/ninja.json", b'{"name": "ocx.sh/kitware/ninja"}')
+
+    assert run(_args(), files=files, policy=make_policy()) == ExitCode.OK
+
+    err = capsys.readouterr().err
+    assert "render: quarantined kitware/ninja: malformed root p/kitware/ninja.json" in err
+    assert not [path for path in files.files if path.startswith("dist/p/kitware/ninja")]
+    assert files.exists("dist/p/kitware/cmake.json")
+    index = json.loads(files.read_bytes("dist/c/index.json") or b"{}")
+    assert list(index["packages"]) == ["kitware/cmake"]
+    written = summary.read_text(encoding="utf-8")
+    assert "kitware/ninja" in written
+    assert "p/kitware/ninja.json" in written
+
+
+def test_strict_turns_a_malformed_root_into_an_anomaly_naming_its_path() -> None:
+    files = InMemoryFiles()
+    _seed_source(files)
+    files.write_bytes("p/kitware/ninja.json", b"not json")
+
+    with pytest.raises(AnomalyError, match=r"malformed root p/kitware/ninja\.json") as excinfo:
+        run(_args(strict=True), files=files, policy=make_policy())
+
+    assert excinfo.value.exit_code == ExitCode.ANOMALY == 65
+    assert not files.exists("dist/config.json"), "a refused render writes nothing"
+
+
 def test_quarantining_every_package_refuses_an_empty_index() -> None:
     files = InMemoryFiles()
     _seed_second_package(files, with_object=False)
