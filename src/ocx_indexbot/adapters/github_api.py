@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final, cast
 from urllib.parse import quote
 
@@ -35,13 +36,15 @@ import httpx
 
 from ocx_indexbot.adapters import _http
 from ocx_indexbot.adapters._http import (
+    PageCapExceeded,
+    account_id,
     as_object,
     as_object_list,
     check_transient,
     paginate,
     raise_for_status,
 )
-from ocx_indexbot.errors import ForgeError, TransientError
+from ocx_indexbot.errors import ForgeError, IndexBotError, TransientError
 from ocx_indexbot.model import CommitStatusState, PullRequestHeadMatch, PullRequestInfo
 
 if TYPE_CHECKING:
@@ -127,7 +130,35 @@ class GraphQLError(ForgeError):
     """
 
 
+_COMMITS_ENDPOINT_CAP: Final[int] = 250
+"""`GET /pulls/{n}/commits` lists at most this many commits and says nothing
+when it stops. A list that long may be missing the commit that matters, so
+`list_pushers` refuses it rather than report a set that looks complete."""
+
+_PUSH_ACTIVITIES: Final[frozenset[str]] = frozenset({"push", "force_push", "branch_creation"})
+"""The `activity_type` values of `GET /repos/{o}/{r}/activity` that put commits
+on a branch. `branch_deletion`, `pr_merge` and `merge_queue_merge` move no
+head of this pull request."""
+
 _FORBIDDEN: Final[int] = 403
+
+
+def _timestamp(value: object) -> datetime:
+    """A forge timestamp as an aware time, or `ForgeError`.
+
+    `list_pushers` decides whether a push is inside the pull request's
+    window by its time; one that cannot be read cannot be placed, so it is
+    refused rather than compared as text (`""` sorts before every date) or
+    dropped.
+    """
+    try:
+        when = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        when = None
+    if when is None or when.tzinfo is None:
+        raise ForgeError(f"{_FORGE} API returned a timestamp that is not an ISO-8601 time")
+    return when
+
 
 _BOT_ACCOUNT_TYPE: Final[str] = "Bot"
 """`user.type` of a GitHub App identity. An ordinary account cannot claim it,
@@ -334,6 +365,10 @@ class GitHubApi:
             return
         self._raise(response)
 
+    def ensure_head_pipeline(self, pr_number: int, *, head_sha: str) -> None:
+        """No-op: GitHub starts the required checks on its own."""
+        del pr_number, head_sha
+
     def withdraw_auto_merge(self, pr_number: int) -> None:
         with self._client() as client:
             pr_response = client.get(self._repo_url("pulls", str(pr_number)))
@@ -486,9 +521,101 @@ class GitHubApi:
             )
         )
 
+    def list_pushers(
+        self, pr_number: int, *, base_sha: str, head_sha: str
+    ) -> tuple[int, ...] | None:
+        """The accounts that pushed to the pull request's branch, from the
+        forge's own push record, plus the commit identities as a floor.
+
+        A commit's `author` and `committer` come from the email in the commit,
+        which the pusher writes: a non-owner can push a commit carrying an
+        owner's email and be read as the owner. They stay in the set only
+        because more names can only send the change to a person. The
+        authority is `GET /repos/{o}/{r}/activity?ref=refs/heads/<branch>`
+        (List repository activities): GitHub records the `actor` of every
+        `push`, `force_push` and `branch_creation` itself. The branch name is
+        reused across pull requests, so an activity counts when it happened
+        since this pull request opened **or** when its `after` is one of the
+        pull request's commits — a push made before the owner opened the pull
+        request is still in what is being merged. The timeline's
+        `head_ref_force_pushed` actors are kept as well. `None` when an
+        in-scope push has no readable timestamp, when no such push put
+        `head_sha` on the branch (the feed lags, or the head came from
+        somewhere it does not record), or when the feed outruns the page cap.
+
+        A commit whose email maps to no account has a `null` author, and the
+        web UI's own commits (squash, "update branch") carry the `web-flow`
+        account as committer — a real id that is nobody's `owners[]`, so those
+        land in the human lane too, which is the safe direction.
+
+        The PR is re-read here and `None` returned unless its head and base
+        are still the revisions the gate judged and it is not from a fork:
+        the commits of a fork are not served as the base repository's. A
+        transient failure (429, 5xx, network) is raised, not answered `None`:
+        "run me again" must not be confused with "ask a person".
+        """
+        try:
+            payload = self._pull_request(pr_number)
+            head_repo: Mapping[str, Any] = payload["head"].get("repo") or {}
+            base_repo: Mapping[str, Any] = payload["base"].get("repo") or {}
+            head_ref, created_at = payload["head"]["ref"], payload["created_at"]
+            if (
+                payload["head"]["sha"] != head_sha
+                or payload["base"]["sha"] != base_sha
+                or head_repo.get("id") is None
+                or head_repo.get("id") != base_repo.get("id")
+                or not isinstance(head_ref, str)
+                or not head_ref
+                or not isinstance(created_at, str)
+            ):
+                return None
+            commits = self._paginate(self._repo_url("pulls", str(pr_number), "commits"), {})
+            if len(commits) >= _COMMITS_ENDPOINT_CAP:
+                return None
+            ids = {
+                account_id(commit.get(role), forge=_FORGE)
+                for commit in commits
+                for role in ("author", "committer")
+            }
+            timeline = self._paginate(self._repo_url("issues", str(pr_number), "timeline"), {})
+            ids.update(
+                account_id(event.get("actor"), forge=_FORGE)
+                for event in timeline
+                if event.get("event") == "head_ref_force_pushed"
+            )
+            commit_shas = {commit["sha"] for commit in commits}
+            activities = self._paginate(
+                self._repo_url("activity"), {"ref": f"refs/heads/{head_ref}"}
+            )
+            opened = _timestamp(created_at)
+            pushes = [
+                activity
+                for activity in activities
+                if activity.get("activity_type") in _PUSH_ACTIVITIES
+                and (
+                    _timestamp(activity.get("timestamp")) >= opened
+                    or activity.get("after") in commit_shas
+                )
+            ]
+            if not any(push.get("after") == head_sha for push in pushes):
+                return None
+            ids.update(account_id(push.get("actor"), forge=_FORGE) for push in pushes)
+        except PageCapExceeded:
+            return None
+        except TransientError:
+            raise
+        except (IndexBotError, KeyError):
+            return None
+        return tuple(sorted(ids))
+
     def list_open_pull_requests(self) -> tuple[int, ...]:
         items = self._paginate(self._repo_url("pulls"), {"state": "open"})
         return tuple(sorted(int(item["number"]) for item in items))
+
+    def merge_settings(self) -> None:
+        """Nothing to read: branch protection needs an admin token and is
+        brittle to parse. No request is made."""
+        return None
 
     def resolve_review_thread(self, pr_number: int, *, marker: str) -> None:
         """Nothing to do. An issue comment is not resolvable and blocks no

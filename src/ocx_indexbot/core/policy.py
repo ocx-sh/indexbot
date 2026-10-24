@@ -52,7 +52,13 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, cast, get_args
 from urllib.parse import urlsplit
 
-from ocx_indexbot.core.grammar import HOST_MAX_LENGTH, HOST_RE, NAMESPACE_RE, NAMESPACE_SHAPE
+from ocx_indexbot.core.grammar import (
+    HOST_MAX_LENGTH,
+    HOST_RE,
+    NAMESPACE_RE,
+    NAMESPACE_SHAPE,
+    package_id_max_length,
+)
 from ocx_indexbot.errors import ValidationError
 
 if TYPE_CHECKING:
@@ -381,6 +387,52 @@ def root_glob(name_segments: int) -> str:
     itself). A second copy would drift the moment `name_segments` changed.
     """
     return "p/" + "*/" * (name_segments - 1) + "*.json"
+
+
+def _cas_path_max_length(name_segments: int) -> int:
+    """`p/` + the package id + `/o/sha256/` + 64 hex + `.` + a 4-char
+    extension. Derived from the declared depth rather than fixed at the
+    two-segment 256, so BD-4's cap-before-regex order still has something to
+    cap against on an index that nests deeper."""
+    return len("p/") + package_id_max_length(name_segments) + len("/o/sha256/") + 64 + 1 + 4
+
+
+_CAS_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[a-f0-9]{64}")
+
+_CAS_EXTENSIONS: Final[frozenset[str]] = frozenset({"json", "md", "svg", "png"})
+"""Every extension `cli/announce.py` writes under a package's `o/sha256/`
+tree: `.json` image indices plus the `.md` readme and `.svg`/`.png`
+logo desc blobs (`announce._cas_path`/`_logo_extension`; CONTRACTS.md §7
+`core/desc.py`, ADR-6 FP-4)."""
+
+
+def cas_owner_root_path(path: str, *, name_segments: int) -> str | None:
+    """The `p/<segments>.json` root that owns `path`, if `path` is a
+    `p/<segments>/o/sha256/<64-hex>.<ext>` package-local CAS object — else
+    `None`.
+
+    The inverse of what `root_glob` selects: `root_glob` finds roots and never
+    objects, this maps an object back to its root. Two consumers: `classify-pr`
+    (an object is in refresh scope only beside its own root) and `validate-pr`
+    (a branch that touches only objects still has its package validated).
+    Total by construction: a malformed CAS-shaped path returns `None` rather
+    than raising, so an unparseable diff entry lands on the caller's
+    conservative branch instead of crashing it.
+    """
+    if len(path) > _cas_path_max_length(name_segments):
+        return None
+    parts = path.split("/")
+    if (
+        len(parts) != name_segments + 4
+        or parts[0] != "p"
+        or parts[name_segments + 1] != "o"
+        or parts[name_segments + 2] != "sha256"
+    ):
+        return None
+    hex_digest, _, extension = parts[-1].partition(".")
+    if extension not in _CAS_EXTENSIONS or _CAS_HEX_RE.fullmatch(hex_digest) is None:
+        return None
+    return "p/" + "/".join(parts[1 : name_segments + 1]) + ".json"
 
 
 def resolves_at_runtime(command: str) -> bool:
@@ -809,7 +861,7 @@ def parse_index_policy(raw: bytes) -> IndexPolicy:
     """
     try:
         parsed: Any = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValidationError(f"{INDEX_POLICY_PATH}: malformed JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValidationError(f"{INDEX_POLICY_PATH}: must be a JSON object")

@@ -109,7 +109,10 @@ Commit the result. From here on, tags arrive by announce.
 forge API resolves to a user id when this bot requests review. `--owner-id` is
 that numeric id, and it — not the login — is the ownership key G-19 matches a
 pull request author against. A login can be renamed and, once released,
-recycled; an id cannot.
+recycled; an id cannot. The same ids are checked for everyone who pushed to the
+pull request, not only its author: a change that someone who is not an owner
+pushed to goes to a person (so does one with a commit made through GitHub's web
+UI, whose committer is GitHub's own `web-flow` account).
 
 ## 3. Announce a tag
 

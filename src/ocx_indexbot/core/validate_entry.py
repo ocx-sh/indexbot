@@ -37,6 +37,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
@@ -495,26 +497,66 @@ def check_content_digest_self_consistent(tag: TagEntry, object_bytes: bytes) -> 
     check_digest_self_consistent(tag.content, object_bytes)
 
 
+def dangling_references(root: PackageRoot, cas_digests: frozenset[str]) -> list[str]:
+    """Every `TagEntry.content` and `Desc.readme`/`Desc.logo` of `root` that
+    is absent from `cas_digests`, as `"<field> -> <digest>"` strings in root
+    order -- empty when the root's closure is complete."""
+    return [
+        f"{field} -> {digest}" for field, digest in _references(root) if digest not in cas_digests
+    ]
+
+
+def _references(root: PackageRoot) -> list[tuple[str, str]]:
+    """`(field, digest)` for every CAS object `root` points at."""
+    references = [(f"tags[{tag}].content", entry.content) for tag, entry in root.tags.items()]
+    if root.desc is not None:
+        if root.desc.readme is not None:
+            references.append(("desc.readme", root.desc.readme))
+        if root.desc.logo is not None:
+            references.append(("desc.logo", root.desc.logo))
+    return references
+
+
 def check_no_dangling_references(root: PackageRoot, cas_digests: frozenset[str]) -> None:
     """Every `TagEntry.content` and `Desc.readme`/`Desc.logo` must appear in
     `cas_digests` (this package's `o/sha256/` tree, per `FilePort.list_files`).
 
     A root pointing at a CAS object that doesn't exist is corruption, not a
-    routine PR mistake — `AnomalyError`, listing every dangling reference
+    routine PR mistake -- `AnomalyError`, listing every dangling reference
     found (not just the first) so a human fixing the PR sees the whole
     picture in one pass.
     """
-    missing: list[str] = []
-    for tag_name, entry in root.tags.items():
-        if entry.content not in cas_digests:
-            missing.append(f"tags[{tag_name}].content -> {entry.content}")
-    if root.desc is not None:
-        if root.desc.readme is not None and root.desc.readme not in cas_digests:
-            missing.append(f"desc.readme -> {root.desc.readme}")
-        if root.desc.logo is not None and root.desc.logo not in cas_digests:
-            missing.append(f"desc.logo -> {root.desc.logo}")
+    missing = dangling_references(root, cas_digests)
     if missing:
         raise AnomalyError("dangling CAS reference(s): " + "; ".join(missing))
+
+
+@dataclass(frozen=True, slots=True)
+class ClosureCounts:
+    """How complete one root's CAS closure is: distinct objects it
+    `referenced`, how many are `missing` from the tree, and how many are
+    present but `bad` (their bytes do not hash to their digest)."""
+
+    referenced: int
+    missing: int
+    bad: int
+
+
+def closure_counts(root: PackageRoot, cas: Mapping[str, bytes]) -> ClosureCounts:
+    """Pure closure census of `root` against `cas` (digest -> object bytes).
+
+    Counts distinct digests, so two tags sharing one object count once. Never
+    raises: a caller that wants to refuse acts on the counts.
+    """
+    referenced = {digest for _, digest in _references(root)}
+    present = referenced & cas.keys()
+    bad = 0
+    for digest in present:
+        try:
+            check_digest_self_consistent(digest, cas[digest])
+        except AnomalyError:
+            bad += 1
+    return ClosureCounts(referenced=len(referenced), missing=len(referenced - present), bad=bad)
 
 
 # --- PackageRoot <-> dict codec (CONTRACTS.md §5.6) -------------------------
@@ -691,7 +733,7 @@ def parse_package_root(raw: bytes) -> PackageRoot:
     """
     try:
         parsed: Any = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValidationError(f"malformed root JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValidationError("root JSON must be a JSON object")
@@ -756,7 +798,7 @@ def parse_image_index_digests(raw: bytes) -> tuple[str, ...]:
     """
     try:
         parsed: Any = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValidationError(f"malformed CAS object JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValidationError("CAS object JSON must be a JSON object")

@@ -142,6 +142,41 @@ def test_changed_package_roots_excludes_deletes_but_keeps_type_changes(repo: Pat
     assert changed == ("p/kitware/cmake.json",)
 
 
+def test_include_deleted_reports_a_removed_object_and_still_excludes_it_by_default(
+    repo: Path,
+) -> None:
+    """A CAS-only delete is invisible under `--diff-filter=d`, which is the
+    right default for roots and the wrong one for objects: a removed object can
+    leave its owner's tags pointing at nothing."""
+    cas = "p/kitware/cmake/o/sha256/" + "a" * 64 + ".json"
+    base = _commit(repo, "existing", {"p/kitware/cmake.json": b"{}\n", cas: b"{}\n"})
+    _git(repo, "checkout", "-b", "prune")
+    (repo / cas).unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "drop the object")
+
+    git = LocalGit(repo=repo)
+    assert git.changed_package_roots(base, root_glob="p") == ()
+    assert git.changed_package_roots(base, root_glob="p", include_deleted=True) == (cas,)
+
+
+def test_include_deleted_reports_both_paths_of_an_object_moved_between_packages(
+    repo: Path,
+) -> None:
+    """With rename detection a moved object shows only its new path, so the
+    package that lost it is never validated and its tags dangle silently."""
+    old = "p/kitware/cmake/o/sha256/" + "a" * 64 + ".json"
+    new = "p/acme/cmake/o/sha256/" + "a" * 64 + ".json"
+    body = b'{"manifests": []}\n' * 20
+    base = _commit(repo, "existing", {"p/kitware/cmake.json": b"{}\n", old: body})
+    _git(repo, "checkout", "-b", "move")
+    (repo / old).unlink()
+    _commit(repo, "move the object", {new: body})
+
+    changed = LocalGit(repo=repo).changed_package_roots(base, root_glob="p", include_deleted=True)
+    assert set(changed) == {old, new}
+
+
 def test_the_root_glob_cannot_see_the_package_tree_swapped_for_a_symlink(repo: Path) -> None:
     """Why `cli/validate_pr._check_package_tree_shape` exists, measured rather
     than argued.

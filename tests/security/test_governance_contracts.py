@@ -74,7 +74,7 @@ from ocx_indexbot.core.validate_entry import (
     check_repository_allowlisted,
     serialize_package_root,
 )
-from ocx_indexbot.errors import ValidationError
+from ocx_indexbot.errors import AnomalyError, ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import (
     Owner,
@@ -94,6 +94,7 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "ocx_indexbot"
 
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
+_DIGEST_C = "sha256:" + "c" * 64
 _TS = "2026-07-17T00:00:00Z"
 _OWNER = Owner(login="alice", id=1)
 _PKG = PackageId(segments=("kitware", "cmake"))
@@ -223,11 +224,19 @@ def test_g05_governance_key_change_is_human_review(
 
 
 def test_g06_render_reachability_filter() -> None:
-    """G-06: render copies only CAS reachable from a live tag; an orphaned
-    CAS object (no live tag references its digest) is excluded."""
+    """G-06: render copies the CAS of every tag, yanked or not; an object only
+    a repointed tag once referenced (no tag references its digest) is excluded."""
     live_obj = _index_bytes(architecture="amd64")
+    yanked_obj = _index_bytes(architecture="s390x", digest="sha256:" + "4" * 64)
     orphan_obj = _index_bytes(architecture="arm64", digest="sha256:" + "2" * 64)
-    root = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
+    root = _root(
+        tags={
+            "1.0.0": TagEntry(content=_DIGEST_A, observed=_TS),
+            "0.9.0": TagEntry(
+                content=_DIGEST_C, observed=_TS, yanked=Yank(reason="broken", at=_TS)
+            ),
+        }
+    )
     source = SourcePackage(
         package_id=_PKG,
         root=root,
@@ -235,23 +244,63 @@ def test_g06_render_reachability_filter() -> None:
         content_by_digest={
             f"{_DIGEST_A}.json": live_obj,
             f"{_DIGEST_B}.json": orphan_obj,
+            f"{_DIGEST_C}.json": yanked_obj,
         },
     )
     paths = {fw.path for fw in build_render_plan((source,), name_segments=2)}
     assert cas_relpath(_PKG, _DIGEST_A, "json") in paths
+    assert cas_relpath(_PKG, _DIGEST_C, "json") in paths
     assert cas_relpath(_PKG, _DIGEST_B, "json") not in paths
+
+
+def test_g06_render_never_serves_a_dangling_or_corrupt_package(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """G-06: render serves a package only when its root's CAS closure is
+    complete and every object hashes to its name. A root pointing at an absent
+    object is left out of the tree and the listing (root bytes stay verbatim,
+    never re-serialized); `--strict` and a hash mismatch both exit 65."""
+    good = InMemoryFiles()
+    _seed_render_source(good)
+    obj = _index_bytes()
+    digest = _digest_of(obj).removeprefix("sha256:")
+
+    dangling = InMemoryFiles(files=dict(good.files))
+    del dangling.files[f"p/kitware/cmake/o/sha256/{digest}.json"]
+    args = argparse.Namespace(index_dir="", out="dist", check=False, strict=False)
+    with pytest.raises(ValidationError, match="quarantined"):
+        cli_render.run(args, files=dangling, policy=make_policy())
+    allow = argparse.Namespace(
+        index_dir="", out="dist", check=False, strict=False, allow_empty=True
+    )
+    assert cli_render.run(allow, files=dangling, policy=make_policy()) == ExitCode.OK
+    assert "render: quarantined kitware/cmake: dangling" in capsys.readouterr().err
+    assert not [path for path in dangling.files if path.startswith("dist/p/")]
+    assert json.loads(dangling.files["dist/c/index.json"])["packages"] == {}
+
+    strict = argparse.Namespace(index_dir="", out="dist", check=False, strict=True)
+    with pytest.raises(AnomalyError):
+        cli_render.run(strict, files=dangling, policy=make_policy())
+
+    corrupt = InMemoryFiles(files=dict(good.files))
+    corrupt.files[f"p/kitware/cmake/o/sha256/{digest}.json"] = obj + b" "
+    with pytest.raises(AnomalyError):
+        cli_render.run(args, files=corrupt, policy=make_policy())
 
 
 # --- G-07 ------------------------------------------------------------------
 
 
+def _digest_of(raw: bytes) -> str:
+    return f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
 def _seed_render_source(files: InMemoryFiles) -> None:
-    root = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
+    obj = _index_bytes()
+    digest = _digest_of(obj)
+    root = _root(tags={"1.0.0": TagEntry(content=digest, observed=_TS)})
     files.write_bytes("p/kitware/cmake.json", serialize_package_root(root))
-    files.write_bytes(
-        f"p/kitware/cmake/o/sha256/{'a' * 64}.json",
-        _index_bytes(),
-    )
+    files.write_bytes(f"p/kitware/cmake/o/sha256/{digest.removeprefix('sha256:')}.json", obj)
 
 
 def test_g07_render_idempotent_noop() -> None:
@@ -416,7 +465,9 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
             {"platform": {"architecture": "amd64", "os": "linux"}, "digest": "sha256:" + "1" * 64}
         ],
     }
-    registry = FakeRegistry(manifests={(repository, "1.0.0"): manifest})
+    registry = FakeRegistry(
+        manifests={(repository, "1.0.0"): manifest, (repository, "sha256:" + "1" * 64): {}}
+    )
     observation = observe_one_tag(repository, "1.0.0", registry)
     assert observation is not None
     content = observation.content_digest
@@ -445,6 +496,19 @@ def test_g12_reconcile_is_verify_only_no_write() -> None:
     assert result == ExitCode.OK
     assert github.issues == {}  # no anomaly issue opened
     assert files.files == before  # FilePort store untouched — verify-only
+
+    # A malformed root is a finding, and still writes nothing to `p/`.
+    files.write_bytes("p/ocx-contrib/broken.json", b"{}")
+    before = dict(files.files)
+    with pytest.raises(AnomalyError, match="root-malformed"):
+        reconcile.run(
+            argparse.Namespace(package=None),
+            files=files,
+            registry=registry,
+            github=github,
+            policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
+        )
+    assert files.files == before
 
     parser = argparse.ArgumentParser()
     reconcile.add_arguments(parser)
@@ -504,6 +568,32 @@ def test_g15_ownership_probe_dispositions() -> None:
         == "confirmed"
     )
 
+    # The privileged sweep is the only lane that can ask a credentialed
+    # registry: its disposition is the same three-way split, and only
+    # `mismatch` escalates.
+    repository = "oci://ghcr.io/ocx-contrib/mismatch"
+    files = InMemoryFiles()
+    files.write_bytes(
+        "p/ocx-contrib/mismatch.json",
+        serialize_package_root(_root(name="ocx.sh/ocx-contrib/mismatch", repository=repository)),
+    )
+    github = FakeGitHub()
+
+    def sweep() -> ExitCode:
+        return reconcile.run(
+            argparse.Namespace(package=None),
+            files=files,
+            registry=registry,
+            github=github,
+            policy=make_policy(registry_hosts=frozenset({"ghcr.io"})),
+        )
+
+    registry.ownership[repository] = "unconfirmed"
+    assert sweep() == ExitCode.OK
+    registry.ownership[repository] = "mismatch"
+    with pytest.raises(AnomalyError, match="ownership-mismatch"):
+        sweep()
+
 
 # --- G-16 ------------------------------------------------------------------
 
@@ -544,6 +634,7 @@ def _refresh_pr_github(
     author_id: int,
     author_login: str = "alice",
     extra_changed_paths: tuple[str, ...] = (),
+    pushers: tuple[int, ...] | None = (),
 ) -> FakeGitHub:
     """A refresh-class PR (only a tag's content changes) with `owners=(alice/1)`
     on both base and head; the author identity is the variable under test.
@@ -572,7 +663,7 @@ def _refresh_pr_github(
         author_login=author_login,
         author_id=author_id,
     )
-    return FakeGitHub(files=files, pull_request_info={1: info})
+    return FakeGitHub(files=files, pull_request_info={1: info}, pushers={1: pushers})
 
 
 def _disposition_of(github: FakeGitHub) -> str:
@@ -590,7 +681,9 @@ def _disposition_of(github: FakeGitHub) -> str:
 def test_g19_machine_lane_requires_author_owner(_github_output: Path) -> None:
     """G-19: a refresh PR whose author's `github_id` is in the base-ref
     `owners[]` goes green (`success`); an author not in `owners[]` falls back
-    to the human lane (`pending`)."""
+    to the human lane (`pending`). The same holds for every other account that
+    pushed to the PR: one non-owner pusher, or a pusher set the forge could
+    not establish (`None`), also falls back to the human lane."""
     owner_github = _refresh_pr_github(author_id=1)
     assert (
         governance_check.run(
@@ -611,6 +704,14 @@ def test_g19_machine_lane_requires_author_owner(_github_output: Path) -> None:
     _context, stranger_state, description = stranger_github.statuses["head-sha"][0]
     assert stranger_state == "pending"
     assert "G-19" in description
+
+    owner_pusher_github = _refresh_pr_github(author_id=1, pushers=(1,))
+    assert _disposition_of(owner_pusher_github) == "success"
+
+    for pushers in ((1, 999), None):
+        pushed_github = _refresh_pr_github(author_id=1, pushers=pushers)
+        assert _disposition_of(pushed_github) == "pending"
+        assert "G-19" in pushed_github.statuses["head-sha"][0][2]
 
 
 # --- ADR-6 FP-5 (machine-lane scope; enforced in cli/classify_pr.py) --------
@@ -697,3 +798,8 @@ def test_g20_human_lane_assigns_maintainers_reviewers(_github_output: Path) -> N
     assert list(github.comments[1]) == [
         "<!-- indexbot:governance -->"
     ]  # one marker, updated in place
+    body = github.comments[1]["<!-- indexbot:governance -->"]
+    assert (
+        "Release: a committed maintainer other than the author approves at head head-sha." in body
+    )
+    assert f"`{root_path}`: 0 referenced, 0 missing, 0 bad" in body

@@ -251,6 +251,19 @@ class ForgePort(Protocol):
         """
         ...
 
+    def ensure_head_pipeline(self, pr_number: int, *, head_sha: str) -> None:
+        """Make sure `head_sha` has a pipeline, so a head pushed with
+        `CI_JOB_TOKEN` (which creates none) is still validated by "pipelines
+        must succeed".
+
+        `enable_auto_merge` does this on the arm path; this is the same step
+        for the human lane, which never arms. The caller decides whether the
+        diff is safe to run a pipeline for; the adapter still refuses a fork
+        merge request, and a head that is no longer `head_sha`. A forge whose
+        checks start on their own does nothing.
+        """
+        ...
+
     def withdraw_auto_merge(self, pr_number: int) -> None:
         """Idempotently take back whatever `enable_auto_merge` armed for
         `pr_number`, if anything.
@@ -412,6 +425,39 @@ class ForgePort(Protocol):
         """
         ...
 
+    def list_pushers(
+        self, pr_number: int, *, base_sha: str, head_sha: str
+    ) -> tuple[int, ...] | None:
+        """Numeric ids of the accounts that put commits on `pr_number`'s branch,
+        ascending, or `None` when the forge cannot establish that set.
+
+        G-19 asks "does everyone who pushed own the package", and the PR author
+        is only one of them: a branch reused across pull requests lets a
+        non-owner push into an owner's. **Ids, never logins**, for the reason
+        `list_approvals` documents.
+
+        `None` is the fail-closed answer and the caller sends it to the human
+        lane. It means any of: a fork (its commits are the fork's, and the
+        forge exposes no pusher list for them), a head or base that is no
+        longer `head_sha`/`base_sha` (the decision is stale), an account the
+        forge reports without an id, or a request the forge refused. A
+        transient failure (rate limit, 5xx, network) is **raised** as
+        `TransientError`, never folded into `None`: "run me again" is not
+        "ask a person". An empty tuple is a different claim — "no pusher the
+        forge knows of" — and is what an adapter reports only when it
+        actually read the whole set.
+
+        Each forge reads the push record it keeps: GitHub the repository
+        activity feed (`push`, `force_push`, `branch_creation` actors) plus
+        the commits' author and committer and the actors of forced pushes;
+        GitLab the push events on the source branch. A push counts when it
+        happened since the PR/MR opened or when its tip is one of the PR/MR's
+        commits, so a push made before the owner opened it is not missed.
+        GitLab answers `None` when a bulk push event with no ref falls in that
+        window.
+        """
+        ...
+
     def list_open_pull_requests(self) -> tuple[int, ...]:
         """Every open PR/MR number on this repository, ascending.
 
@@ -428,6 +474,21 @@ class ForgePort(Protocol):
         the poll lane testable and runnable against either forge, and what a
         GitHub deployment would use if it ever wanted a sweep that re-gates
         PRs whose base moved under them.
+        """
+        ...
+
+    def merge_settings(self) -> dict[str, bool | None] | None:
+        """The project merge settings the human lane depends on, by name, or
+        `None` when the forge has nothing to read. A setting the forge does not
+        report is `None` too — unknown, which is not the same as off.
+
+        GitLab only: `only_allow_merge_if_pipeline_succeeds` is what makes the
+        external commit status blocking, and
+        `only_allow_merge_if_all_discussions_are_resolved` is what holds a
+        fork merge request. Either off leaves the lane unenforced, silently.
+        `cli/governance_poll.py` reads this once per run and warns. GitHub
+        returns `None` without a request: branch protection needs an admin
+        token and is brittle to read.
         """
         ...
 
@@ -539,14 +600,18 @@ class GitPort(Protocol):
     hard, non-retryable configuration error rather than weather.
     """
 
-    def changed_package_roots(self, base_sha: str, *, root_glob: str) -> tuple[str, ...]:
-        """Repository-relative paths of every package root this branch
-        added or modified relative to `base_sha`, in git's own order.
+    def changed_package_roots(
+        self, base_sha: str, *, root_glob: str, include_deleted: bool = False
+    ) -> tuple[str, ...]:
+        """Repository-relative paths this branch changed relative to
+        `base_sha` under `root_glob`, in git's own order.
 
-        Deletes are excluded — there is nothing to validate about a removed
-        root — but every other status is included, symlink-swaps included.
-        `root_glob` is `core/policy.root_glob(name_segments)`, applied as a
-        `:(glob)` pathspec so it can never select a CAS object.
+        By default deletes are excluded — there is nothing to validate about a
+        removed root — but every other status is included, symlink-swaps
+        included. `include_deleted=True` keeps deletes too, for the one caller
+        that needs them: a removed CAS object can leave its package's tags
+        dangling. `root_glob` is `core/policy.root_glob(name_segments)`,
+        applied as a `:(glob)` pathspec so it can never select a CAS object.
         """
         ...
 

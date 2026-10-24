@@ -663,6 +663,22 @@ def test_validate_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert main_module.main(["validate", _ROOT_PATH, "--offline"]) == ExitCode.OK
 
 
+def test_validate_all_sweeps_the_checkout_through_the_shipped_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--all` is reachable from `main`, discovers the checkout's roots without
+    a path argument, and a zero-root checkout is a pass."""
+    files = InMemoryFiles(files={_ROOT_PATH: serialize_package_root(_root({}))})
+    _patch_adapters(monkeypatch, files=files)
+    assert main_module.main(["validate", "--all", "--offline"]) == ExitCode.OK
+
+    files.write_bytes(_ROOT_PATH, b"not json")
+    assert main_module.main(["validate", "--all", "--offline"]) == ExitCode.VALIDATION_FAILURE
+
+    _patch_adapters(monkeypatch, files=InMemoryFiles())
+    assert main_module.main(["validate", "--all", "--offline"]) == ExitCode.OK
+
+
 def test_validate_base_dir_wires_a_second_file_port(monkeypatch: pytest.MonkeyPatch) -> None:
     """`--base-dir` gives `validate` the base-ref bytes it needs to tell an
     update to a reserved root from a fresh claim (ADR-2 ND-4). Without the

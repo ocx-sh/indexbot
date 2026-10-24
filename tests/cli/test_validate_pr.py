@@ -16,6 +16,7 @@ file set it is reasoning about.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,7 +29,7 @@ from ocx_indexbot.core.policy import INDEX_POLICY_PATH
 from ocx_indexbot.core.validate_entry import serialize_package_root
 from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
-from ocx_indexbot.model import Owner, PackageRoot
+from ocx_indexbot.model import Owner, PackageRoot, TagEntry
 from ocx_indexbot.ports import GitPort
 from tests.fakes import FakeRegistry, InMemoryFiles
 
@@ -73,8 +74,14 @@ class ScriptedGit:
         changed: tuple[str, ...] = (),
         at_base: dict[str, bytes] | None = None,
         tree_changed: tuple[str, ...] | None = None,
+        cas_changed: tuple[str, ...] = (),
     ) -> None:
         self.changed = changed
+        # What the include-deleted pathspec answers: every path under `p/` the
+        # branch added, modified OR deleted, which is the only view in which a
+        # CAS object's removal is visible at all.
+        self.cas_changed = cas_changed
+        self.include_deleted_calls = 0
         # What the widest pathspec answers, when a test needs it to differ
         # from the root glob's answer. Real git returns a superset there, and
         # the whole point of `_check_package_tree_shape` is a path that only
@@ -87,7 +94,12 @@ class ScriptedGit:
         self.diffed_globs: list[str] = []
         self.read_at: list[tuple[str, str]] = []
 
-    def changed_package_roots(self, base_sha: str, *, root_glob: str) -> tuple[str, ...]:
+    def changed_package_roots(
+        self, base_sha: str, *, root_glob: str, include_deleted: bool = False
+    ) -> tuple[str, ...]:
+        if include_deleted:
+            self.include_deleted_calls += 1
+            return self.cas_changed
         self.diffed_from = base_sha
         self.diffed_glob = root_glob
         self.diffed_globs.append(root_glob)
@@ -718,20 +730,87 @@ def test_a_failure_emits_an_annotation_and_a_fenced_summary_block(
     assert "```\np/kitware/cmake.json: VALIDATION_FAILURE" in body
 
 
-def test_a_pass_writes_no_annotation_and_no_summary(
+def test_a_pass_that_checked_everything_writes_no_annotation_and_no_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A green run is silent on both surfaces — an annotation on every run is
-    an annotation nobody reads."""
+    """A green run that skipped nothing is silent on both surfaces - an
+    annotation on every run is an annotation nobody reads."""
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     files = InMemoryFiles(files={"p/kitware/cmake.json": _root_bytes("ocx.sh/kitware/cmake")})
     git = ScriptedGit(changed=("p/kitware/cmake.json",))
 
-    assert _run(_args(), git=git, files=files) == ExitCode.OK
+    assert _run(_args(offline=False), git=git, files=files) == ExitCode.OK
     assert capsys.readouterr().out == ""
     assert not summary.exists()
+
+
+def test_a_pass_that_skipped_the_registry_checks_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A green check must never read as "the registry agreed" when the registry
+    was not asked: one notice names every root whose G-15 check was skipped,
+    sorted, and a pass still writes no job summary."""
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    files = InMemoryFiles(
+        files={
+            "p/kitware/cmake.json": _root_bytes("ocx.sh/kitware/cmake"),
+            "p/acme/tool.json": _root_bytes("ocx.sh/acme/tool"),
+        }
+    )
+    git = ScriptedGit(changed=("p/kitware/cmake.json", "p/acme/tool.json"))
+
+    assert _run(_args(offline=True), git=git, files=files) == ExitCode.OK
+    assert capsys.readouterr().out == (
+        "::notice title=indexbot validate-pr::registry checks skipped: "
+        "p/acme/tool.json, p/kitware/cmake.json\n"
+    )
+    assert not summary.exists()
+
+
+def test_a_credentialed_registry_is_named_in_the_skipped_notice(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fork lane holds no registry secret, so a root on a credentialed
+    registry is skipped online as well - and says so."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    files = InMemoryFiles(files={"p/kitware/cmake.json": _root_bytes("ocx.sh/kitware/cmake")})
+    credentialed_policy = _POLICY_BYTES.replace(
+        b'"registry_hosts":["ghcr.io"]',
+        b'"registry_hosts":[{"host":"ghcr.io","credentials_env":"OCX_REGISTRY_ART"}]',
+    )
+    git = ScriptedGit(
+        changed=("p/kitware/cmake.json",), at_base={INDEX_POLICY_PATH: credentialed_policy}
+    )
+    files.files[INDEX_POLICY_PATH] = credentialed_policy
+
+    assert (
+        validate_pr.run(
+            _args(offline=False),
+            git=git,
+            files=files,
+            registry_for=lambda _policy: FakeRegistry(),
+            base_files=InMemoryFiles(),
+        )
+        == ExitCode.OK
+    )
+    assert "registry checks skipped: p/kitware/cmake.json" in capsys.readouterr().out
+
+
+def test_a_failing_run_does_not_list_a_failed_root_as_skipped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only a root that passed is named: a failed root's path is not yet known to
+    be well-formed, and its own failure is already the annotation."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    files = InMemoryFiles(files={"p/kitware/cmake.json": b"not json"})
+    git = ScriptedGit(changed=("p/kitware/cmake.json",))
+
+    assert _run(_args(offline=True), git=git, files=files) == ExitCode.VALIDATION_FAILURE
+    assert "registry checks skipped" not in capsys.readouterr().out
 
 
 def test_the_worst_exit_code_across_every_changed_root_wins() -> None:
@@ -746,3 +825,98 @@ def test_the_worst_exit_code_across_every_changed_root_wins() -> None:
     git = ScriptedGit(changed=("p/kitware/cmake.json", "p/acme/tool.json"))
 
     assert _run(_args(), git=git, files=files) == ExitCode.VALIDATION_FAILURE
+
+
+# --- a package whose objects change, or are deleted, is still validated --------------
+
+_INDEX_BYTES = json.dumps(
+    {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {"platform": {"architecture": "amd64", "os": "linux"}, "digest": "sha256:" + "a" * 64}
+        ],
+    }
+).encode("utf-8")
+_INDEX_HEX = hashlib.sha256(_INDEX_BYTES).hexdigest()
+_OBJECT_ROOT = "p/kitware/cmake.json"
+_OBJECT_PATH = f"p/kitware/cmake/o/sha256/{_INDEX_HEX}.json"
+
+
+def _root_with_tag_bytes() -> bytes:
+    return serialize_package_root(
+        PackageRoot(
+            name="ocx.sh/kitware/cmake",
+            repository=_REPOSITORY,
+            owners=(Owner(login="alice", id=1),),
+            status="active",
+            deprecated_message=None,
+            created="2026-07-17",
+            desc=None,
+            upstream=None,
+            tags={
+                "1.0.0": TagEntry(content=f"sha256:{_INDEX_HEX}", observed="2026-07-17T00:00:00Z")
+            },
+        )
+    )
+
+
+def test_a_pull_request_that_only_adds_an_object_validates_the_owning_package() -> None:
+    """The gap: the root glob selects roots, so a branch that touches only
+    `p/<ns>/<pkg>/o/sha256/<hex>.json` selected nothing and the required check
+    went green over bytes nobody read. The object is mapped to its root and
+    the existing validation hashes it."""
+    files = InMemoryFiles({_OBJECT_ROOT: _root_with_tag_bytes(), _OBJECT_PATH: b"not the index"})
+    git = ScriptedGit(cas_changed=(_OBJECT_PATH,))
+
+    assert _run(_args(), git=git, files=files) == ExitCode.ANOMALY
+    assert git.include_deleted_calls == 1
+
+
+def test_a_pull_request_that_only_adds_a_sound_object_passes() -> None:
+    """The false-positive side: the same shape with a self-consistent object."""
+    files = InMemoryFiles({_OBJECT_ROOT: _root_with_tag_bytes(), _OBJECT_PATH: _INDEX_BYTES})
+    git = ScriptedGit(cas_changed=(_OBJECT_PATH,))
+
+    assert _run(_args(), git=git, files=files) == ExitCode.OK
+
+
+def test_a_malformed_object_name_still_selects_the_owning_package() -> None:
+    """The owner is chosen by the package's `o/` path prefix, not by parsing the
+    object's name: a file that is not a well-formed digest must reach the
+    package's validation and be rejected there, not map to no owner and pass."""
+    garbage = "p/kitware/cmake/o/sha256/garbage.json"
+    files = InMemoryFiles({_OBJECT_ROOT: _root_with_tag_bytes(), garbage: b"{}"})
+    git = ScriptedGit(cas_changed=(garbage,))
+
+    assert _run(_args(), git=git, files=files) != ExitCode.OK
+
+
+def test_a_pull_request_that_only_deletes_an_object_is_caught_as_a_dangling_reference() -> None:
+    """The root still names the object; the delete is the whole change."""
+    files = InMemoryFiles({_OBJECT_ROOT: _root_with_tag_bytes()})
+    git = ScriptedGit(cas_changed=(_OBJECT_PATH,))
+
+    assert _run(_args(), git=git, files=files) == ExitCode.ANOMALY
+
+
+def test_an_object_of_a_package_deleted_in_the_same_pull_request_is_skipped(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Removing a package removes its objects with it. The owner is gone at
+    HEAD, so validating it would turn a legitimate removal into "does not
+    exist"; root deletions stay excluded and so does everything under them."""
+    git = ScriptedGit(cas_changed=(_OBJECT_PATH, "p/kitware/cmake/o/sha256/" + "b" * 64 + ".md"))
+
+    assert _run(_args(), git=git, files=InMemoryFiles()) == ExitCode.OK
+    assert "nothing to validate" in capsys.readouterr().err
+
+
+def test_a_root_changed_alongside_its_object_is_validated_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = InMemoryFiles({_OBJECT_ROOT: _root_with_tag_bytes(), _OBJECT_PATH: _INDEX_BYTES})
+    git = ScriptedGit(changed=(_OBJECT_ROOT,), cas_changed=(_OBJECT_ROOT, _OBJECT_PATH))
+
+    assert _run(_args(), git=git, files=files) == ExitCode.OK
+    assert capsys.readouterr().err.count(f"{_OBJECT_ROOT}: OK") == 1

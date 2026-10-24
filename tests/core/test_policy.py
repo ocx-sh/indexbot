@@ -27,6 +27,7 @@ from ocx_indexbot.core.policy import (
     CiConfig,
     IndexPolicy,
     RegistryConfig,
+    cas_owner_root_path,
     parse_index_policy,
     registry_credential_env,
     resolves_at_runtime,
@@ -102,6 +103,11 @@ def test_schema_key_is_accepted_and_ignored() -> None:
 def test_malformed_json_raises() -> None:
     with pytest.raises(ValidationError, match="malformed JSON"):
         parse_index_policy(b"{not json")
+
+
+def test_a_policy_that_is_not_utf8_raises_a_validation_error() -> None:
+    with pytest.raises(ValidationError, match="malformed JSON"):
+        parse_index_policy(b"\xff\xfe\x00")
 
 
 def test_non_object_document_raises() -> None:
@@ -715,3 +721,40 @@ def test_a_runtime_resolved_invocation_is_recognised(command: str) -> None:
 )
 def test_a_pinned_or_resolver_free_invocation_is_accepted(command: str) -> None:
     assert not resolves_at_runtime(command)
+
+
+# --- cas_owner_root_path --------------------------------------------------------------
+
+_HEX = "a" * 64
+
+
+@pytest.mark.parametrize("extension", ["json", "md", "svg", "png"])
+def test_cas_owner_root_path_maps_an_object_to_its_root(extension: str) -> None:
+    assert (
+        cas_owner_root_path(f"p/kitware/cmake/o/sha256/{_HEX}.{extension}", name_segments=2)
+        == "p/kitware/cmake.json"
+    )
+
+
+def test_cas_owner_root_path_follows_the_declared_depth() -> None:
+    path = f"p/eu/acme/tool/o/sha256/{_HEX}.json"
+    assert cas_owner_root_path(path, name_segments=3) == "p/eu/acme/tool.json"
+    assert cas_owner_root_path(path, name_segments=2) is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "p/kitware/cmake.json",
+        "docs/x.md",
+        f"q/kitware/cmake/o/sha256/{_HEX}.json",
+        f"p/kitware/cmake/x/sha256/{_HEX}.json",
+        f"p/kitware/cmake/o/sha512/{_HEX}.json",
+        f"p/kitware/cmake/o/sha256/{_HEX}.exe",
+        f"p/kitware/cmake/o/sha256/{'A' * 64}.json",
+        f"p/kitware/cmake/o/sha256/{'a' * 63}.json",
+        f"p/{'x' * 400}/cmake/o/sha256/{_HEX}.json",
+    ],
+)
+def test_cas_owner_root_path_is_none_for_anything_else(path: str) -> None:
+    assert cas_owner_root_path(path, name_segments=2) is None

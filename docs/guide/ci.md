@@ -410,7 +410,8 @@ it comes from settings the bot cannot set for you.
 === "GitHub"
 
     - Branch protection on the default branch requiring the validate lane's
-      check and `governance/review-required`.
+      check. Do not require `governance/review-required`: it is deliberately
+      not a required check, and requiring it deadlocks the human lane.
     - Auto-merge enabled for the repository, or the arm does nothing.
 
 === "GitLab"
@@ -419,12 +420,14 @@ it comes from settings the bot cannot set for you.
       It also means a head with no pipeline never merges, and a push made with
       `CI_JOB_TOKEN` creates none — which is every announce that *accumulates*
       onto an already-open merge request. The poll lane creates the missing
-      pipeline itself before arming, so the governance token needs at least
-      the **Developer** role and the project's own pipeline needs a
-      `merge_request_event` lane (the generated `indexbot-validate` is one).
-      It does not do this for a *fork* merge request — the endpoint addresses
-      the parent, so it would run fork-authored config there — and a fork
-      announce whose head has no pipeline therefore still needs a person.
+      pipeline itself — before arming, and for a human-review merge request
+      too when every changed path is under `p/` — so the governance token
+      needs at least the **Developer** role and the project's own pipeline
+      needs a `merge_request_event` lane (the generated `indexbot-validate`
+      is one). It does not do this for a *fork* merge request — the endpoint
+      addresses the parent, so it would run fork-authored config there — nor
+      for one that changes a path outside `p/`, which could edit the config
+      that pipeline runs. Either still needs a person.
     - **All threads must be resolved** — this is what holds a *fork* merge
       request, whose pipeline runs in the fork. The bot's review-required
       notice is a resolvable discussion for exactly this reason, not a note.
@@ -432,6 +435,11 @@ it comes from settings the bot cannot set for you.
       an `INDEXBOT_LANE` variable: `governance` (the poll lane — its interval
       is the gate's latency, not its strength), `reconcile`, and
       `housekeeping`.
+
+    `indexbot governance-poll` reads these two project settings once per run
+    and prints `governance-poll: GitLab project setting <name> is off; the
+    human lane is not enforced` to stderr for each one that is off. It is a
+    warning only; the exit code does not change.
 
     Approvals need no setting: an approval counts only when it was granted
     after the last push, which the bot establishes from server-side
@@ -444,6 +452,12 @@ it comes from settings the bot cannot set for you.
     poller re-opens the thread on the next tick. Required approvals and
     blocking status checks, which an author cannot lift, are Premium and
     Ultimate.
+
+    On Free the human lane rests on "all threads resolved" plus the pipeline.
+    An author who also has merge rights can resolve the thread and merge
+    before the poller re-opens it. Give merge rights on the index project
+    only to maintainers, or protect the target branch so only maintainers
+    can merge.
 
 ## Environment contract
 

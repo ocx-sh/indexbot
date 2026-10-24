@@ -68,6 +68,10 @@ def _root(
     )
 
 
+_CHILD_DIGEST = "sha256:" + "9" * 64
+"""The one platform manifest `_image_index` lists."""
+
+
 def _image_index(architecture: str = "amd64") -> dict[str, object]:
     """What a tag must resolve to for this index to record it at all: an OCI
     image index, discriminated by its `manifests` key (D4(a))."""
@@ -77,7 +81,7 @@ def _image_index(architecture: str = "amd64") -> dict[str, object]:
         "manifests": [
             {
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "digest": "sha256:" + "9" * 64,
+                "digest": _CHILD_DIGEST,
                 "size": 512,
                 "platform": {"architecture": architecture, "os": "linux"},
             }
@@ -94,7 +98,11 @@ def _bare_manifest() -> dict[str, object]:
 
 _EMPTY_INDEX = b'{"schemaVersion":2,"manifests":[]}'
 """Filler CAS bytes for tests that commit a digest deliberately unrelated to
-what the registry serves — never expected to hash to its own claim."""
+what the registry serves."""
+
+_EMPTY_INDEX_DIGEST = f"sha256:{hashlib.sha256(_EMPTY_INDEX).hexdigest()}"
+"""The digest `_EMPTY_INDEX` really hashes to, so a row committed under it has
+a CAS object that passes the integrity check."""
 
 
 def _put_root(files: InMemoryFiles, namespace: str, package: str, root: PackageRoot) -> None:
@@ -109,6 +117,7 @@ def _committed_tag(
     test mutates one field of."""
     registry.tags.setdefault(repository, []).append(tag)
     registry.manifests[(repository, tag)] = _image_index(architecture)
+    registry.manifests[(repository, _CHILD_DIGEST)] = _bare_manifest()
     observation = observe_one_tag(repository, tag, registry)
     assert observation is not None
     object_bytes = observation.raw
@@ -283,7 +292,7 @@ def test_ghost_root_vanished_between_list_and_read_is_skipped() -> None:
 def test_pinned_tag_mutation_escalates_to_anomaly() -> None:
     files = InMemoryFiles()
     registry = FakeRegistry()
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     _put_root(
         files,
         "kitware",
@@ -315,7 +324,7 @@ def test_anomaly_ok_stays_green_and_files_the_same_issue(
     replaces the shell's hand-rolled `::warning`."""
     files = InMemoryFiles()
     registry = FakeRegistry()
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     _put_root(
         files,
         "kitware",
@@ -339,6 +348,25 @@ def test_anomaly_ok_stays_green_and_files_the_same_issue(
     assert "```" in summary
 
 
+def test_a_malformed_root_is_a_finding_and_the_sweep_continues() -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    github = FakeGitHub()
+    entry, object_bytes = _committed_tag(registry, _CMAKE_REPO, "1.0.0")
+    _put_root(files, "kitware", "cmake", _root(tags={"1.0.0": entry}))
+    _put_cas(files, "kitware", "cmake", entry.content, object_bytes)
+    files.write_bytes("p/kitware/ninja.json", b'{"name": "ocx.sh/kitware/ninja"}')
+
+    with pytest.raises(AnomalyError) as excinfo:
+        _run(_args(), files=files, registry=registry, github=github)
+
+    message = str(excinfo.value)
+    assert "verified 2 package(s); 1 anomaly(ies)" in message
+    assert "kitware/ninja root-malformed: p/kitware/ninja.json" in message
+    assert "kitware/cmake" not in message
+    assert "root-malformed" in github.issues[_ISSUE_TITLE][1]
+
+
 def test_anomaly_ok_does_not_change_the_clean_no_op_case() -> None:
     result = _run(
         _args(anomaly_ok=True), files=InMemoryFiles(), registry=FakeRegistry(), github=FakeGitHub()
@@ -355,7 +383,7 @@ def test_floating_tag_drift_does_not_escalate() -> None:
     # anomaly.
     files = InMemoryFiles()
     registry = FakeRegistry()
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     _put_root(
         files,
         "kitware",
@@ -377,7 +405,7 @@ def test_yanked_vanished_tag_does_not_escalate() -> None:
     # is not itself an anomaly.
     files = InMemoryFiles()
     registry = FakeRegistry()  # no tags registered at all -> tag no longer resolves
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     yanked_entry = TagEntry(
         content=committed_digest, observed="T0", yanked=Yank(reason="cve", at="T0")
     )
@@ -393,7 +421,7 @@ def test_ephemeral_vanished_tag_does_not_escalate() -> None:
     # An ephemeral tag is meant to vanish; `ocx package announce` removes its
     # row, so reconcile reports nothing for it.
     files = InMemoryFiles()
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     entry = TagEntry(content=committed_digest, observed="T0", ephemeral=True)
     _put_root(files, "kitware", "cmake", _root(tags={"snap-1": entry}))
     _put_cas(files, "kitware", "cmake", committed_digest, _EMPTY_INDEX)
@@ -410,7 +438,7 @@ def test_non_yanked_vanished_tag_escalates_to_anomaly() -> None:
     # a silent drop.
     files = InMemoryFiles()
     registry = FakeRegistry()  # no tags registered at all -> tag no longer resolves
-    committed_digest = "sha256:" + "a" * 64
+    committed_digest = _EMPTY_INDEX_DIGEST
     _put_root(
         files,
         "kitware",
@@ -436,6 +464,29 @@ def test_dangling_cas_reference_escalates() -> None:
 
     with pytest.raises(AnomalyError, match="cas-object-missing"):
         _run(_args(), files=files, registry=registry, github=github)
+
+
+@pytest.mark.parametrize("row_kind", ["moved", "vanished", "yanked", "ephemeral"])
+def test_a_missing_cas_object_escalates_whatever_the_tag_did_upstream(row_kind: str) -> None:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    entry, _object_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    if row_kind == "moved":
+        registry.manifests[(_CMAKE_REPO, "3.28.1")] = _image_index(architecture="arm64")
+    else:
+        registry.tags.clear()
+        registry.manifests.clear()
+    if row_kind == "yanked":
+        entry = TagEntry(content=entry.content, observed=entry.observed, yanked=Yank("cve", "T0"))
+    if row_kind == "ephemeral":
+        entry = TagEntry(content=entry.content, observed=entry.observed, ephemeral=True)
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": entry}))
+    # No CAS file written for entry.content.
+
+    with pytest.raises(AnomalyError) as excinfo:
+        _run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+    assert "kitware/cmake cas-object-missing: 3.28.1" in str(excinfo.value)
 
 
 def test_tampered_cas_object_escalates() -> None:
@@ -590,3 +641,131 @@ def test_yanked_unrecordable_tag_does_not_escalate() -> None:
 
     assert result == ExitCode.OK
     assert github.issues == {}
+
+
+# --- registry-side ownership and digest scope ---------------------------------
+
+
+def _clean_cmake() -> tuple[InMemoryFiles, FakeRegistry, TagEntry]:
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    entry, object_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": entry}))
+    _put_cas(files, "kitware", "cmake", entry.content, object_bytes)
+    return files, registry, entry
+
+
+def test_an_ownership_mismatch_escalates() -> None:
+    """The privileged lane is the only one that can ask the registry who owns a
+    private repository, so a mismatch it finds is an anomaly."""
+    files, registry, _entry = _clean_cmake()
+    registry.ownership[_CMAKE_REPO] = "mismatch"
+    github = FakeGitHub()
+
+    with pytest.raises(AnomalyError, match="kitware/cmake ownership-mismatch"):
+        _run(_args(), files=files, registry=registry, github=github)
+
+    assert "ownership-mismatch" in github.issues[_ISSUE_TITLE][1]
+
+
+@pytest.mark.parametrize("ownership", ["confirmed", "unconfirmed"])
+def test_an_ownership_that_is_not_a_mismatch_does_not_escalate(
+    ownership: OwnershipProbeResult,
+) -> None:
+    files, registry, _entry = _clean_cmake()
+    registry.ownership[_CMAKE_REPO] = ownership
+
+    assert _run(_args(), files=files, registry=registry, github=FakeGitHub()) == ExitCode.OK
+
+
+def test_a_platform_manifest_missing_from_the_repository_escalates() -> None:
+    files, registry, _entry = _clean_cmake()
+    del registry.manifests[(_CMAKE_REPO, _CHILD_DIGEST)]
+
+    with pytest.raises(AnomalyError, match=r"kitware/cmake digest-not-in-scope: 3\.28\.1"):
+        _run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+
+@pytest.mark.parametrize("grace", ["yanked", "ephemeral"])
+def test_a_yanked_or_ephemeral_tags_platform_manifest_is_not_required(grace: str) -> None:
+    """The same grace `tag-missing-upstream` gets: the index has disclaimed the
+    tag, so what the registry still holds under it is not the index's anomaly."""
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    entry, object_bytes = _committed_tag(registry, _CMAKE_REPO, "3.28.1")
+    del registry.manifests[(_CMAKE_REPO, _CHILD_DIGEST)]
+    graced = (
+        TagEntry(content=entry.content, observed=entry.observed, yanked=Yank(reason="cve", at="T0"))
+        if grace == "yanked"
+        else TagEntry(content=entry.content, observed=entry.observed, ephemeral=True)
+    )
+    _put_root(files, "kitware", "cmake", _root(tags={"3.28.1": graced}))
+    _put_cas(files, "kitware", "cmake", entry.content, object_bytes)
+
+    assert _run(_args(), files=files, registry=registry, github=FakeGitHub()) == ExitCode.OK
+
+
+def test_a_committed_object_that_is_not_an_image_index_escalates() -> None:
+    """Valid bytes under their own digest, but not a document whose platform
+    manifests can be listed: the scope check cannot run, which is itself the
+    finding."""
+    files = InMemoryFiles()
+    registry = FakeRegistry()
+    not_an_index = b'{"schemaVersion":2,"config":{},"layers":[]}'
+    digest = f"sha256:{hashlib.sha256(not_an_index).hexdigest()}"
+    _put_root(
+        files, "kitware", "cmake", _root(tags={"3.28.1": TagEntry(content=digest, observed="T0")})
+    )
+    _put_cas(files, "kitware", "cmake", digest, not_an_index)
+    registry.tags[_CMAKE_REPO] = ["3.28.1"]
+    registry.manifests[(_CMAKE_REPO, "3.28.1")] = _image_index()
+
+    with pytest.raises(AnomalyError, match=r"kitware/cmake digest-not-in-scope: 3\.28\.1"):
+        _run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+
+def test_a_committed_object_that_is_not_utf8_escalates_and_the_sweep_continues() -> None:
+    """Raw bytes that are not text must come out as a finding, not an uncaught
+    decode error that aborts the sweep before the later packages are read."""
+    files, registry, _entry = _clean_cmake()
+    garbage = b"\xff\xfe\x00not json"
+    garbage_digest = f"sha256:{hashlib.sha256(garbage).hexdigest()}"
+    _put_root(
+        files,
+        "acme",
+        "widget",
+        _root(tags={"1.0": TagEntry(content=garbage_digest, observed="T0")}),
+    )
+    _put_cas(files, "acme", "widget", garbage_digest, garbage)
+    registry.tags[_CMAKE_REPO] = ["3.28.1"]
+    registry.ownership[_CMAKE_REPO] = "mismatch"
+    registry.tags[_WIDGET_REPO] = ["1.0"]
+    registry.manifests[(_WIDGET_REPO, "1.0")] = _image_index()
+
+    with pytest.raises(AnomalyError) as raised:
+        _run(_args(), files=files, registry=registry, github=FakeGitHub())
+
+    assert "acme/widget digest-not-in-scope: 1.0" in str(raised.value)
+    assert "kitware/cmake ownership-mismatch" in str(raised.value)
+
+
+def test_a_manifest_digest_shared_by_several_tags_is_checked_once() -> None:
+    @dataclass
+    class _CountingRegistry(FakeRegistry):
+        child_lookups: int = 0
+
+        def get_manifest(self, repository: str, reference: str) -> ManifestFetch:
+            if reference == _CHILD_DIGEST:
+                self.child_lookups += 1
+            return super().get_manifest(repository, reference)
+
+    files = InMemoryFiles()
+    registry = _CountingRegistry()
+    tags: dict[str, TagEntry] = {}
+    for tag in ("3.28.1", "3.28", "3"):
+        tags[tag], object_bytes = _committed_tag(registry, _CMAKE_REPO, tag)
+    _put_root(files, "kitware", "cmake", _root(tags=tags))
+    _put_cas(files, "kitware", "cmake", tags["3"].content, object_bytes)
+
+    assert _run(_args(), files=files, registry=registry, github=FakeGitHub()) == ExitCode.OK
+    assert registry.child_lookups == 1

@@ -261,8 +261,11 @@ def test_reconcile_sweeps_a_repo_carrying_canonical_tags_clean(
 
     served = fake_ghcr.requests
     assert not any(path.endswith("/tags/list") for _method, path in served)
-    for reserved in (_CANONICAL_TAG_FORM, _DESC_TAG):
-        assert not any(path.endswith(f"/manifests/{reserved}") for _method, path in served)
+    assert not any(path.endswith(f"/manifests/{_CANONICAL_TAG_FORM}") for _method, path in served)
+    # The ownership probe reads `__ocx.desc` for the identifier it embeds, so
+    # that one request is expected; observing it as a claimed tag is not, and
+    # would have escalated `tag-unrecordable` above.
+    assert any(path.endswith(f"/manifests/{_DESC_TAG}") for _method, path in served)
     # The claimed tag WAS swept, so the negatives above are about scope, not
     # about the sweep having quietly done nothing.
     assert any(path.endswith(f"/manifests/{CANONICAL_TAG}") for _method, path in served)

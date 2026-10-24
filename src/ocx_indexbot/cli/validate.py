@@ -28,6 +28,7 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+from ocx_indexbot.cli.reconcile import discover_package_ids
 from ocx_indexbot.core.diff import classify_change
 from ocx_indexbot.core.policy import IndexPolicy, registry_credential_env
 from ocx_indexbot.core.registry_checks import check_digest_in_scope, check_ownership
@@ -77,11 +78,25 @@ class FileReport:
     exit_code: ExitCode
     error: str | None = None
     warnings: tuple[str, ...] = ()
+    registry_checks_skipped: bool = False
+    """True when the G-15 registry checks did not run for this root (`--offline`,
+    or a registry whose credential this lane does not hold). An `OK` report with
+    this set is a pass that never asked the registry. Set only on `OK` reports."""
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Populate `parser` with `validate`'s CLI surface."""
-    parser.add_argument("paths", nargs="+", help="changed p/<namespace>/<package>.json root paths")
+    parser.add_argument(
+        "paths", nargs="*", help="changed p/<namespace>/<package>.json root paths (or use --all)"
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "validate every committed root instead of named paths; zero roots is a pass, and "
+            "a root under a reserved segment is admitted because it is already on the base ref"
+        ),
+    )
     parser.add_argument(
         "--offline",
         action="store_true",
@@ -212,6 +227,7 @@ def _validate_one(
     offline: bool,
     allow_reserved: bool,
     base_files: FilePort | None,
+    committed: bool,
 ) -> FileReport:
     """Runs the full structural pipeline for one changed root, catching
     `ValidationError`/`AnomalyError` into a `FileReport` (first failure wins
@@ -220,6 +236,7 @@ def _validate_one(
     not caught here — it propagates out of `run` uncaught.
     """
     warnings: list[str] = []
+    registry_checks_skipped = False
     base_root = _base_root(path, base_files)
     try:
         raw = files.read_bytes(path)
@@ -262,7 +279,7 @@ def _validate_one(
             # announce-shaped update to such a root — see
             # `_is_announce_shaped_update` for why that scope, and why it is
             # narrower than "the path exists at the base ref".
-            if not _is_announce_shaped_update(root, base_root):
+            if not (committed or _is_announce_shaped_update(root, base_root)):
                 raise
             # Exactly the carve-out `--allow-reserved-namespace` opens, never
             # wider: brand segments only. Control-path (`p`, `o`) and generic
@@ -275,8 +292,13 @@ def _validate_one(
                 allow_reserved=True,
             )
             print(
-                f"{path}: reserved segment admitted — announce-shaped update to a root "
-                "already committed on the base ref (ADR-2 ND-4 gates claiming, not updating)",
+                f"{path}: reserved segment admitted — "
+                + (
+                    "root already committed (`validate --all`)"
+                    if committed
+                    else "announce-shaped update to a root already committed on the base ref "
+                    "(ADR-2 ND-4 gates claiming, not updating)"
+                ),
                 file=sys.stderr,
             )
         # SSRF ordering (G-03, ADR-4 BD-1): must run before any RegistryPort
@@ -331,8 +353,10 @@ def _validate_one(
         # construction in `cli/_wiring.py`, and this says so per root.
         credential_env = "" if offline else registry_credential_env(policy, root.repository)
         if offline:
+            registry_checks_skipped = True
             warnings.append("G-15 registry checks skipped (--offline)")
         elif credential_env:
+            registry_checks_skipped = True
             # The fork lane, against a private registry. A pull request's own
             # pipeline holds no secret — that is the point of the split, not
             # an oversight — so the claims that need registry truth are left
@@ -403,7 +427,12 @@ def _validate_one(
             error=str(exc),
             warnings=tuple(warnings),
         )
-    return FileReport(path=path, exit_code=ExitCode.OK, warnings=tuple(warnings))
+    return FileReport(
+        path=path,
+        exit_code=ExitCode.OK,
+        warnings=tuple(warnings),
+        registry_checks_skipped=registry_checks_skipped,
+    )
 
 
 def print_report(report: FileReport) -> None:
@@ -430,6 +459,7 @@ def validate_paths(
     offline: bool,
     allow_reserved: bool,
     base_files: FilePort | None,
+    committed: bool = False,
 ) -> list[FileReport]:
     """Every path's `FileReport`, in the order given — the whole of what this
     subcommand does, with argparse and stderr peeled off.
@@ -439,6 +469,10 @@ def validate_paths(
     `allow_reserved` from the pull request itself instead of taking them from
     a workflow's shell step. Both call THIS, so a rule can never hold on one
     lane and not the other.
+
+    `committed` marks paths that are already on the base ref (`validate --all`
+    sweeping the tree), so a reserved segment is not read as a fresh claim.
+    The PR lanes leave it off: they name files a pull request changed.
     """
     return [
         _validate_one(
@@ -449,6 +483,7 @@ def validate_paths(
             offline=offline,
             allow_reserved=allow_reserved,
             base_files=base_files,
+            committed=committed,
         )
         for path in paths
     ]
@@ -468,7 +503,7 @@ def run(
     policy: IndexPolicy,
     base_files: FilePort | None = None,
 ) -> ExitCode:
-    """`indexbot validate <path> [<path> ...] [--offline] [--allow-reserved-namespace]`
+    """`indexbot validate (<path> [<path> ...] | --all) [--offline] [--allow-reserved-namespace]`
     (CONTRACTS.md §12).
 
     Aggregates every path's `FileReport`: prints one structured stderr line
@@ -484,6 +519,17 @@ def run(
     only, policy PR-gated — same flag/semantics as `cli/seed_import.py`).
     """
     paths = cast(list[str], args.paths)
+    sweep = cast(bool, getattr(args, "all", False))
+    if sweep == bool(paths):
+        raise ValidationError("pass exactly one of root paths or --all")
+    if sweep:
+        paths = [
+            f"p/{package_id}.json"
+            for package_id in discover_package_ids(
+                files, scope=None, name_segments=policy.name_segments
+            )
+        ]
+        print(f"validate --all: {len(paths)} root(s)", file=sys.stderr)
     offline = cast(bool, args.offline)
     allow_reserved = cast(bool, args.allow_reserved_namespace)
 
@@ -495,6 +541,7 @@ def run(
         offline=offline,
         allow_reserved=allow_reserved,
         base_files=base_files,
+        committed=sweep,
     )
     for report in reports:
         print_report(report)

@@ -83,14 +83,15 @@ def _owns(github: ForgePort, *, pr_number: int) -> bool:
 # --- GitHub ----------------------------------------------------------------
 
 
-def _mock_github(root_bytes: bytes) -> None:
+def _mock_github(root_bytes: bytes, *, activity: list[dict[str, object]] | None = None) -> None:
     respx.get(f"{_GITHUB_API}/pulls/7").mock(
         return_value=httpx.Response(
             200,
             json={
-                "base": {"sha": "base-sha"},
-                "head": {"sha": "head-sha"},
+                "base": {"sha": "base-sha", "repo": {"id": 5}},
+                "head": {"sha": "head-sha", "repo": {"id": 5}, "ref": "announce-branch"},
                 "user": {"login": "alice", "id": _AUTHOR_ID},
+                "created_at": "2026-08-25T00:00:00Z",
                 "labels": [],
                 "updated_at": "2026-08-25T00:00:00Z",
             },
@@ -98,6 +99,22 @@ def _mock_github(root_bytes: bytes) -> None:
     )
     respx.get(f"{_GITHUB_API}/pulls/7/files").mock(
         return_value=httpx.Response(200, json=[{"filename": _ROOT_PATH, "status": "modified"}])
+    )
+    commit_account = {"login": "alice", "id": _AUTHOR_ID}
+    respx.get(f"{_GITHUB_API}/pulls/7/commits").mock(
+        return_value=httpx.Response(
+            200, json=[{"sha": "head-sha", "author": commit_account, "committer": commit_account}]
+        )
+    )
+    respx.get(f"{_GITHUB_API}/issues/7/timeline").mock(return_value=httpx.Response(200, json=[]))
+    owners_push = {
+        "activity_type": "push",
+        "timestamp": "2026-08-25T01:00:00Z",
+        "after": "head-sha",
+        "actor": commit_account,
+    }
+    respx.get(f"{_GITHUB_API}/activity").mock(
+        return_value=httpx.Response(200, json=[owners_push] if activity is None else activity)
     )
     respx.get(f"{_GITHUB_API}/contents/{_ROOT_PATH}", params={"ref": "base-sha"}).mock(
         return_value=httpx.Response(
@@ -133,12 +150,16 @@ def test_a_github_author_who_is_not_an_owner_stays_out_of_the_machine_lane() -> 
 # --- GitLab ----------------------------------------------------------------
 
 
-def _mock_gitlab(root_bytes: bytes) -> None:
+def _mock_gitlab(root_bytes: bytes, *, extra_events: list[dict[str, object]] | None = None) -> None:
     respx.get(f"{_GITLAB_PROJECT}/merge_requests/7").mock(
         return_value=httpx.Response(
             200,
             json={
                 "diff_refs": {"base_sha": "base-sha", "head_sha": "head-sha"},
+                "source_project_id": 42,
+                "target_project_id": 42,
+                "source_branch": "indexbot-announce-ns-pkg",
+                "created_at": "2026-08-25T00:00:00.000Z",
                 "author": {"username": "alice", "id": _AUTHOR_ID},
                 "updated_at": "2026-08-25T00:00:00Z",
                 "labels": [],
@@ -148,9 +169,44 @@ def _mock_gitlab(root_bytes: bytes) -> None:
     respx.get(f"{_GITLAB_PROJECT}/merge_requests/7/diffs").mock(
         return_value=httpx.Response(200, json=[{"new_path": _ROOT_PATH, "deleted_file": False}])
     )
+    respx.get(f"{_GITLAB_PROJECT}/merge_requests/7/commits").mock(
+        return_value=httpx.Response(200, json=[{"id": "head-sha"}])
+    )
+    respx.get(f"{_GITLAB_PROJECT}/events", params={"action": "pushed"}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "author_id": _AUTHOR_ID,
+                    "created_at": "2026-08-25T01:00:00.000Z",
+                    "push_data": {"ref": "indexbot-announce-ns-pkg", "commit_to": "head-sha"},
+                },
+                *(extra_events or []),
+            ],
+        )
+    )
     respx.get(f"{_GITLAB_PROJECT}/repository/files/p%2Fns%2Fpkg.json/raw").mock(
         return_value=httpx.Response(200, content=root_bytes)
     )
+
+
+@respx.mock
+def test_a_github_push_under_the_owners_commit_email_is_still_the_pushers() -> None:
+    """The commit list names only the owner, because the pusher wrote the
+    owner's email into the commit. GitHub's own push record names who pushed."""
+    _mock_github(
+        _root(owner_id=_AUTHOR_ID, spelling="new"),
+        activity=[
+            {
+                "activity_type": "push",
+                "timestamp": "2026-08-25T01:00:00Z",
+                "after": "head-sha",
+                "actor": {"login": "mallory", "id": _AUTHOR_ID + 1},
+            }
+        ],
+    )
+
+    assert _owns(GitHubApi(owner="ocx-sh", repo="index", token=""), pr_number=7) is False
 
 
 @pytest.mark.parametrize("spelling", ["new", "legacy", "both"])
@@ -167,6 +223,25 @@ def test_the_auto_merge_lane_resolves_ownership_on_gitlab(spelling: str) -> None
 @respx.mock
 def test_a_gitlab_author_who_is_not_an_owner_stays_out_of_the_machine_lane() -> None:
     _mock_gitlab(_root(owner_id=_AUTHOR_ID + 1, spelling="both"))
+
+    assert _owns(GitLabApi(project="42", token=""), pr_number=7) is False
+
+
+@respx.mock
+def test_a_gitlab_push_made_before_the_owner_opened_the_mr_is_still_the_pushers() -> None:
+    """Mallory pushes the announce branch, then the owner opens the merge
+    request: the event predates `created_at` but its tip is in the merge
+    request, so it is counted."""
+    _mock_gitlab(
+        _root(owner_id=_AUTHOR_ID, spelling="new"),
+        extra_events=[
+            {
+                "author_id": _AUTHOR_ID + 1,
+                "created_at": "2026-08-24T23:00:00.000Z",
+                "push_data": {"ref": "indexbot-announce-ns-pkg", "commit_to": "head-sha"},
+            }
+        ],
+    )
 
     assert _owns(GitLabApi(project="42", token=""), pr_number=7) is False
 

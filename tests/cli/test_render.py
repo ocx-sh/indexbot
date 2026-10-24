@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,15 +9,14 @@ from pathlib import Path
 import pytest
 
 from ocx_indexbot.adapters.local_files import LocalFiles
+from ocx_indexbot.cli.main import _build_parser  # pyright: ignore[reportPrivateUsage]
 from ocx_indexbot.cli.render import run
 from ocx_indexbot.core.validate_entry import serialize_package_root
-from ocx_indexbot.errors import ValidationError
+from ocx_indexbot.errors import AnomalyError, ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import Owner, PackageRoot, TagEntry
 from ocx_indexbot.ports import FilePort
 from tests.fakes import InMemoryFiles, make_policy
-
-_DIGEST = f"sha256:{'a' * 64}"
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -51,6 +51,11 @@ def _index_bytes() -> bytes:
         b'"digest":"sha256:' + b"9" * 64 + b'","size":512,'
         b'"platform":{"architecture":"amd64","os":"linux"}}]}'
     )
+
+
+_DIGEST = f"sha256:{hashlib.sha256(_index_bytes()).hexdigest()}"
+"""The one CAS object's real digest -- render refuses a blob whose bytes do
+not hash to the name it is filed under."""
 
 
 def _seed_source(files: FilePort, *, index_dir: str = "") -> None:
@@ -240,3 +245,136 @@ def test_allow_empty_is_how_a_brand_new_index_renders() -> None:
     files = InMemoryFiles()
 
     assert run(_args(allow_empty=True), files=files, policy=make_policy()) == ExitCode.OK
+
+
+# ---- closure + integrity: what render refuses to serve -----------------------
+
+
+def _seed_second_package(files: FilePort, *, with_object: bool) -> None:
+    """`kitware/ninja`, a second package whose root points at the same object
+    (filed under its own tree) -- present or deliberately absent."""
+    root = PackageRoot(
+        name="ocx.sh/kitware/ninja",
+        repository="oci://ghcr.io/ocx-contrib/ninja",
+        owners=(Owner(login="alice", id=1),),
+        status="active",
+        deprecated_message=None,
+        created="2026-07-17",
+        desc=None,
+        tags={"1.0.0": TagEntry(content=_DIGEST, observed="2026-07-17T00:00:00Z")},
+    )
+    files.write_bytes("p/kitware/ninja.json", serialize_package_root(root))
+    if with_object:
+        hex_digest = _DIGEST.removeprefix("sha256:")
+        files.write_bytes(f"p/kitware/ninja/o/sha256/{hex_digest}.json", _index_bytes())
+
+
+def test_dangling_package_is_quarantined_and_the_rest_still_render(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    files = InMemoryFiles()
+    _seed_source(files)
+    _seed_second_package(files, with_object=False)
+
+    assert run(_args(), files=files, policy=make_policy()) == ExitCode.OK
+
+    err = capsys.readouterr().err
+    assert f"render: quarantined kitware/ninja: dangling tags[1.0.0].content -> {_DIGEST}" in err
+    assert "kitware/cmake" not in err
+    assert not [path for path in files.files if path.startswith("dist/p/kitware/ninja")]
+    assert files.exists("dist/p/kitware/cmake.json")
+    index = json.loads(files.read_bytes("dist/c/index.json") or b"{}")
+    assert list(index["packages"]) == ["kitware/cmake"]
+    written = summary.read_text(encoding="utf-8")
+    assert "kitware/ninja" in written
+    assert f"tags[1.0.0].content -> {_DIGEST}" in written
+
+
+def test_malformed_root_is_quarantined_with_its_path_and_the_rest_still_render(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    files = InMemoryFiles()
+    _seed_source(files)
+    files.write_bytes("p/kitware/ninja.json", b'{"name": "ocx.sh/kitware/ninja"}')
+
+    assert run(_args(), files=files, policy=make_policy()) == ExitCode.OK
+
+    err = capsys.readouterr().err
+    assert "render: quarantined kitware/ninja: malformed root p/kitware/ninja.json" in err
+    assert not [path for path in files.files if path.startswith("dist/p/kitware/ninja")]
+    assert files.exists("dist/p/kitware/cmake.json")
+    index = json.loads(files.read_bytes("dist/c/index.json") or b"{}")
+    assert list(index["packages"]) == ["kitware/cmake"]
+    written = summary.read_text(encoding="utf-8")
+    assert "kitware/ninja" in written
+    assert "p/kitware/ninja.json" in written
+
+
+def test_strict_turns_a_malformed_root_into_an_anomaly_naming_its_path() -> None:
+    files = InMemoryFiles()
+    _seed_source(files)
+    files.write_bytes("p/kitware/ninja.json", b"not json")
+
+    with pytest.raises(AnomalyError, match=r"malformed root p/kitware/ninja\.json") as excinfo:
+        run(_args(strict=True), files=files, policy=make_policy())
+
+    assert excinfo.value.exit_code == ExitCode.ANOMALY == 65
+    assert not files.exists("dist/config.json"), "a refused render writes nothing"
+
+
+def test_quarantining_every_package_refuses_an_empty_index() -> None:
+    files = InMemoryFiles()
+    _seed_second_package(files, with_object=False)
+
+    with pytest.raises(ValidationError, match=r"every package root.*quarantined"):
+        run(_args(), files=files, policy=make_policy())
+
+    assert not files.exists("dist/c/index.json"), "a refused render writes nothing"
+
+
+def test_allow_empty_lets_a_fully_quarantined_index_render() -> None:
+    files = InMemoryFiles()
+    _seed_second_package(files, with_object=False)
+
+    assert run(_args(allow_empty=True), files=files, policy=make_policy()) == ExitCode.OK
+
+    index = json.loads(files.read_bytes("dist/c/index.json") or b"{}")
+    assert index["packages"] == {}
+
+
+def test_strict_turns_a_quarantine_into_an_anomaly() -> None:
+    files = InMemoryFiles()
+    _seed_source(files)
+    _seed_second_package(files, with_object=False)
+
+    with pytest.raises(AnomalyError, match="quarantined kitware/ninja") as excinfo:
+        run(_args(strict=True), files=files, policy=make_policy())
+
+    assert excinfo.value.exit_code == ExitCode.ANOMALY == 65
+    assert not files.exists("dist/config.json"), "a refused render writes nothing"
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_object_that_does_not_hash_to_its_name_is_refused(strict: bool) -> None:
+    files = InMemoryFiles()
+    _seed_source(files)
+    hex_digest = _DIGEST.removeprefix("sha256:")
+    files.write_bytes(f"p/kitware/cmake/o/sha256/{hex_digest}.json", _index_bytes() + b" ")
+
+    with pytest.raises(AnomalyError, match="self-consistency") as excinfo:
+        run(_args(strict=strict), files=files, policy=make_policy())
+
+    assert excinfo.value.exit_code == ExitCode.ANOMALY
+    assert not files.exists("dist/config.json")
+
+
+def test_strict_is_a_render_flag() -> None:
+    parser = _build_parser()
+    base = ["render", "--index-dir", "", "--out", "dist"]
+
+    assert parser.parse_args(base).strict is False
+    assert parser.parse_args([*base, "--strict"]).strict is True

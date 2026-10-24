@@ -410,14 +410,18 @@ Re-derives every *claimed* tag/desc-blob digest in `root` individually from
 `registry.list_tags()` (an owner's curated `tags` map may legitimately be a
 subset of what the registry carries; that is the entire point of owner
 curation — decision-set item 2, "announce is the only add/remove
-authority"). Per tag: `observe_one_tag(root.repository, tag, registry)`
+authority"). Per tag, the committed CAS object is checked **first** — the
+claimed digest missing from/not hashing to `cas_object_bytes` ->
+`"cas-object-missing"`/`"cas-object-hash-mismatch"`, returned before the
+registry is asked, so a moved, vanished, yanked or ephemeral row whose object
+is gone reports the missing object rather than the registry-derived finding
+the nightly sweep treats as drift or grace. Only then (and not for a
+carried-over claim, below): `observe_one_tag(root.repository, tag, registry)`
 returning `None` -> `"tag-missing-upstream"`; a different `content_digest`
 -> `"digest-mismatch"`; `observe_one_tag` *raising* `ValidationError` (the
 tag now resolves to a bare image manifest, or to bytes over
 `_MAX_INDEX_BYTES`) -> `"digest-mismatch"` as well, since the claim that
-this tag resolves to the committed index is exactly what stopped being true;
-the claimed digest missing from/not hashing to
-`cas_object_bytes` -> `"cas-object-missing"`/`"cas-object-hash-mismatch"`.
+this tag resolves to the committed index is exactly what stopped being true.
 `root.desc.readme`/`.logo`, when set, get the identical CAS-hash check
 (missing/mismatch -> `"desc-blob-missing"`/`"desc-blob-hash-mismatch"`) —
 closing the gap where only tag digests were ever byte-verified (byte-exact
@@ -716,14 +720,12 @@ output tree (`--out`, applied by `cli/render.py` after `site:build`'s
 VitePress build completes — see `taskfile.yml`'s `render:build` task and its
 `emptyOutDir` footgun comment).
 
-Reachability walk per package: only `tags[*].content` digests of *live*
-(non-yanked) tags, and, transitively, `desc.readme`/`desc.logo` digests, are
-copied — CAS objects orphaned by a repointed or yanked tag are pruning
+Reachability walk per package: every tag's `content` digest, yanked or not,
+and, transitively, the `desc.readme`/`desc.logo` digests, are copied, so the
+served tree stays closed over the root it serves — CAS objects orphaned by a
+repointed tag (no tag references the digest any more) are the pruning
 candidates (ADR-1 D8, **deployment artifact only**, never source-tree git
-history). A yanked tag's content is pruned **only if unreachable from every
-other live tag** — yanking does not itself force pruning while another tag
-still shares the digest (emergent aliasing, ADR-1 D3, applies to
-reachability too).
+history).
 
 Returned file list:
 - `config.json`: `{"format_version": format_version, "name_segments":
@@ -885,7 +887,17 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   grace, an explicit owner-authorized exemption from the registry-existence
   check (an `ephemeral` row is exempt too — its tag is meant to vanish) — `_PackageReport` carries the committed root's yanked-tag names
   precisely so `_escalating_findings` can tell a yanked-and-vanished tag
-  apart from a plain silent drop. A non-empty escalating-finding set
+  apart from a plain silent drop. A committed root that does not parse is itself a finding
+  (`<package> root-malformed: <path>: <reason>`), always escalating — the
+  sweep moves on to the next package rather than aborting;
+  `core/registry_checks.py`'s G-15 checks run here as well, because
+  `validate-pr` skips them for a credentialed registry: `check_ownership`
+  answering `"mismatch"` is an `ownership-mismatch` finding, and a platform
+  manifest listed by a committed tag's image index that
+  `check_digest_in_scope` cannot find is a `digest-not-in-scope` finding (so
+  is an object that is no image index) — both always escalating, the latter
+  exempt for a yanked or ephemeral tag; `"unconfirmed"` stays a non-finding;
+  a non-empty escalating-finding set
   opens/updates one anomaly issue via `ForgePort.create_or_update_issue`
   (promoted onto the port this stage, see §3/§10) before raising.
 - **`cli/validate.py`** (extended, fork-PR announce revamp — byte-exact
@@ -909,6 +921,11 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   identical finding taxonomy). `"mismatch"` or any `ValidationError` -> exit
   1. `"unconfirmed"` -> print a WARN to stderr, exit 0 (ADR-4 Risk 2,
   unchanged).
+  A root whose registry checks were skipped (`--offline`, or a credentialed
+  registry) carries `FileReport.registry_checks_skipped`, which
+  `cli/validate_pr.py` turns into one `registry checks skipped: <root>, ...`
+  notice annotation (roots sorted) on success too — none when nothing was
+  skipped.
   Also takes `--base-dir DIR` (optional): the directory the PR gate
   materializes each changed root's BASE-ref bytes into. ADR-2 ND-4 gates
   *claiming* a reserved segment, not *updating* a root already committed
@@ -942,6 +959,20 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   `indexbot render --out` second, into the same `emptyOutDir`-wiped tree.
   `--check` computes the plan and reports drift against `--out` without
   writing, `ExitCode.VALIDATION_FAILURE` on drift.
+  Before planning, each package's CAS blobs are hashed against the digest in
+  their filename (`check_digest_self_consistent`; a mismatch is `AnomalyError`,
+  exit 65, always) and its root's references are checked against the blobs
+  present (`dangling_references`). A package with a dangling reference is
+  **quarantined whole** -- omitted from the plan, so from `/p/**` and
+  `/c/index.json` -- with a `render: quarantined <package>: dangling <ref>, …`
+  stderr line and a CI summary entry; `--strict` raises `AnomalyError` instead.
+  A root that does not parse is quarantined the same way, with
+  `render: quarantined <package>: malformed root <path>: <reason>`; `--strict`
+  raises `AnomalyError` naming the path. When every package is quarantined the
+  render is refused (`ValidationError`) unless `--allow-empty`, as for no roots.
+  Root bytes stay verbatim (§8): there is no row-level drop and no
+  re-serialization. `validate_entry.closure_counts(root, cas)` is the same
+  census as pure counts (`referenced`, `missing`, `bad`).
 - **`cli/seed_import.py`**: reads local `CATALOG.md` (title/description/
   keywords — frontmatter shape TBD by whoever writes this WP; note the
   precedent in `ocx_lib::package::description::Frontmatter`, §7's desc.py
@@ -972,8 +1003,20 @@ your module's `run` function and its own tests, leave wiring to WP2-M.
   G-20): re-derives the classification via
   `classify_pr.classify_pull_request` (unchanged single-source-of-truth
   approach), then: **machine lane** (`refresh`) requires the PR author's
-  numeric forge id (`PullRequestInfo.author_id`, §3) to appear in `owners[]` of
-  *every* touched package root, read from the **base** ref only (never the
+  numeric forge id (`PullRequestInfo.author_id`, §3), and that of every other
+  account that pushed to the PR (`ForgePort.list_pushers`: GitHub — the
+  `actor` of every `push`/`force_push`/`branch_creation` in
+  `GET /repos/{o}/{r}/activity?ref=refs/heads/<head>`, plus commit authors and
+  committers and `head_ref_force_pushed` actors; GitLab — push events on the
+  source branch; an activity or event counts when it is newer than the PR/MR
+  or its tip is one of the PR/MR's commits; `None` for a fork, an
+  unidentified account, a moved head, a refused request, an activity or event
+  feed past the 100-page cap, a GitHub push with no readable timestamp, a
+  GitHub feed with no counted push of the judged head, or a GitLab bulk push
+  event with no ref anywhere in the fetched window, which counts as a failure, so GitHub's
+  `web-flow` committer also fails it; a transient failure is raised, exit
+  75), to appear in
+  `owners[]` of *every* touched package root, read from the **base** ref only (never the
   PR head — the same `governance-gate` trust boundary
   `cli/classify_pr.py` already documents) — pass -> `success`; fail ->
   falls back to the human lane below. **Human lane** (`new-package`/

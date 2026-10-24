@@ -42,11 +42,13 @@ express.
 
 ```bash
 indexbot validate [--offline] [--allow-reserved-namespace] [--base-dir DIR] <path>...
+indexbot validate [--offline] --all
 ```
 
 | Flag | Meaning |
 |---|---|
-| `paths` | The changed `p/<ns>/<pkg>.json` roots to validate |
+| `paths` | The changed `p/<ns>/<pkg>.json` roots to validate; exactly one of `paths` or `--all` |
+| `--all` | Validate every committed root, found the way `reconcile` finds them. Zero roots is a pass, and a root under a reserved segment is admitted because it is already on the base ref; control-path segments stay blocked. Every root is reported, the run exits on the worst outcome |
 | `--offline` | Skip the network checks (digest-in-scope, ownership probe) |
 | `--allow-reserved-namespace` | Admit the operator's own brand segments only; control-path segments stay blocked |
 | `--base-dir` | Directory holding each root's base-ref copy, so an announce-shaped update to a root already committed under a reserved segment is not read as a fresh claim |
@@ -58,8 +60,11 @@ from an empty environment, and a root on a credentialed registry is
 shape-checked with a WARN naming the variable, then verified for real by
 `reconcile`.
 
-Takes an explicit file set, which a caller has to compute. `validate-pr` below
-computes it and is what a pipeline should run.
+Takes an explicit file set, which a caller has to compute, or `--all` for a
+sweep of a branch that is already merged (the mainline invocation). `--all` is
+for the committed tree only: a pull request names its files, so a reserved
+segment it adds is still a claim. `validate-pr` below computes the file set and
+is what a pipeline should run.
 
 ## `validate-pr`
 
@@ -114,8 +119,20 @@ The diff is `<base>...HEAD` — **three dots**, against the merge base, so a
 branch cut before another pull request merged does not re-validate stale copies
 of roots it never touched — filtered by a `:(glob)` pathspec built from the
 deployment's `name_segments`, which selects package roots and never the CAS
-objects under them. Deletes are excluded; every other status, symlink swaps
+objects under them. Root deletes are excluded; every other status, symlink swaps
 included, is validated.
+
+A pull request that changes only a package's objects (`p/<ns>/<pkg>/o/sha256/…`)
+changes no root, so each added, modified or deleted object is mapped to its
+owning root and that root is validated: every tag's object must still exist, and
+every object must hash to its name. An object whose owning root no longer exists
+is skipped, since deleting a package deletes its objects with it.
+
+A root whose registry checks did not run — under `--offline`, or because its
+registry needs a credential this unprivileged job does not hold (`reconcile`
+runs those instead) — is named in one `registry checks skipped: <root>, <root>`
+notice, roots sorted, on a pass as well as a failure. A pass with nothing
+skipped writes no annotation and no job summary.
 
 Each changed root's base-ref bytes are written to a temporary directory outside
 the checkout, because the PR-head tree is what `validate` byte-compares against
@@ -194,9 +211,21 @@ between the two lanes and nothing else:
 
 | Value | Green when |
 |---|---|
-| `owners` (default) | the change is a tag refresh **and** the author owns every touched root (G-19) |
+| `owners` (default) | the change is a tag refresh **and** the author, and every other account that pushed to the pull request, owns every touched root (G-19) |
 | `never` | never — every change waits for a person |
 | `always` | the change is a tag refresh, whoever opened it |
+
+A pusher is an account the forge records as having pushed to the branch: on
+GitHub the actor of a push, force-push or branch creation in the repository
+activity feed, plus the author and committer of its commits and whoever
+force-pushed it; on GitLab the author of a push event on the source branch. A
+push counts when it happened since the pull request opened, or when its tip is
+one of the pull request's commits, so a push made before the owner opened it
+is still counted. A fork, a forge that cannot identify one of them, a push
+whose time cannot be read, a GitHub head no counted push put on the branch,
+an activity or event feed longer than 100 pages, or a refused lookup sends
+the change to a person. So does GitHub's own `web-flow`
+account, which signs commits made from the web UI.
 
 `always` drops the ownership check, so it is only coherent where the forge
 already decides who may open a pull request at all. It does not widen what
@@ -209,6 +238,13 @@ status **is** the merge gate: a `pending` nobody can turn green is not a
 stalled merge request but a permanently unmergeable one. On GitHub it changes
 nothing about who may merge — `governance/review-required` is deliberately not
 a required check there — it only makes the status say what already happened.
+
+The human-review comment says so in a sentence (`Release: a committed
+maintainer other than the author approves at head <sha>.`) and adds one line
+per touched root, `` `p/<id>.json`: N referenced, M missing, K bad ``: how many
+distinct CAS objects the root at the pull request's head points at, how many of
+those are absent from the head, and how many are present but do not hash to
+their digest. A re-run edits that comment in place.
 
 GitHub records the commit each review was left on, so a stale approval does
 not count. GitLab's approvals carry no commit, and its documented remedy —
@@ -293,10 +329,12 @@ Both project settings are Free-tier. Enable both.
 request's head, and a push authenticated with `CI_JOB_TOKEN` triggers none —
 so an announce accumulating onto an already-open merge request lands a head
 with no pipeline, and arming auto-merge on it waits forever. The poll lane
-creates that pipeline before it arms (Developer role, and a
+creates that pipeline before it arms, and for a human-review merge request
+whose changed paths are all under `p/` (Developer role, and a
 `merge_request_event` lane in the project's own pipeline). Never for a fork
 merge request: that `POST` addresses the parent project, where it would run
-fork-authored config with the parent's token.
+fork-authored config with the parent's token. Never for a merge request that
+changes a path outside `p/`, which could edit the config that pipeline runs.
 
 Run it from a scheduled pipeline on the default branch. That is the only place
 on GitLab where parent-authored config runs with the parent's token — a fork's
@@ -352,7 +390,7 @@ job that dispatches it the moment a machine-lane PR merges.
 Emit the served wire tree.
 
 ```bash
-indexbot render --index-dir PREFIX --out DIR [--check]
+indexbot render --index-dir PREFIX --out DIR [--check] [--strict]
 ```
 
 | Flag | Meaning |
@@ -360,10 +398,23 @@ indexbot render --index-dir PREFIX --out DIR [--check]
 | `--index-dir` | Prefix *before* the literal `p/` component. `""` reads `p/**`; `demo` reads `demo/p/**` |
 | `--out` | Output root |
 | `--check` | Compare against what is already there instead of writing |
+| `--strict` | Exit 65 instead of leaving out a package whose root points at objects that are missing |
 
 Produces `config.json`, the `/p/**` mirror and `c/index.json`. With no `p/`
 tree yet it still emits `config.json` and an empty `c/index.json` — no
 separate pre-seed code path.
+
+Render serves only what it can vouch for. An object whose bytes do not hash to
+the digest in its filename stops the run with exit 65, with or without
+`--strict`. A root that points at an object missing from the tree is
+**quarantined**, and so is a root that does not parse: the package's root and
+objects are left out of `/p/**` and
+`c/index.json`, a `render: quarantined <package>: dangling <ref>, …` (or
+`malformed root <path>: …`) line goes
+to stderr and the CI job summary, and the other packages render normally. The
+package stays out of the served index until its objects are restored. Root
+bytes are never rewritten to drop a bad row. With `--strict` the same
+condition exits 65.
 
 Reads no environment variable and holds no forge credential — it is a pure
 local transformation, `p/**` in, `--out DIR` out. The "deploy credentials"
@@ -380,6 +431,13 @@ Verify committed state against registry truth.
 ```bash
 indexbot reconcile [--package <ns>/<pkg>] [--anomaly-ok]
 ```
+
+Besides re-deriving every claimed tag and blob, it runs the registry-side
+checks `validate-pr` cannot run against a credentialed registry: a repository
+whose ownership probe answers `mismatch`, or a tag whose image index lists a
+platform manifest the repository does not hold, is an anomaly. An `unconfirmed`
+ownership probe is not, and a yanked or ephemeral tag is exempt from the
+manifest check.
 
 **Verify-only.** It never writes a correction: a divergence is filed as an
 issue and exits `65`. Backoff exhaustion exits `75` — a transient failure is

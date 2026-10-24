@@ -24,10 +24,11 @@ import respx
 
 from ocx_indexbot.adapters.gitlab_api import GitLabApi
 from ocx_indexbot.adapters.local_files import LocalFiles
-from ocx_indexbot.cli import governance_check
+from ocx_indexbot.cli import governance_check, validate_pr
 from ocx_indexbot.cli import validate as validate_cli
 from ocx_indexbot.core.diff import classify_change, diff
 from ocx_indexbot.core.observe import Observation
+from ocx_indexbot.core.policy import INDEX_POLICY_PATH
 from ocx_indexbot.core.regenerate import regenerate
 from ocx_indexbot.core.validate_entry import (
     check_namespace_not_reserved,
@@ -197,7 +198,9 @@ def test_threat_self_authorizing_owners_edit(_github_output: Path) -> None:
 # --- authorization binds the numeric id, not the login ---------------------
 
 
-def _refresh_github(*, author_login: str, author_id: int) -> FakeGitHub:
+def _refresh_github(
+    *, author_login: str, author_id: int, pushers: tuple[int, ...] | None = ()
+) -> FakeGitHub:
     """A refresh PR (a tag's content changes) whose base+head `owners[]` are
     both `{github:'alice', github_id:1}`; only the author identity varies."""
     base = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
@@ -215,7 +218,7 @@ def _refresh_github(*, author_login: str, author_id: int) -> FakeGitHub:
         author_login=author_login,
         author_id=author_id,
     )
-    return FakeGitHub(files=files, pull_request_info={1: info})
+    return FakeGitHub(files=files, pull_request_info={1: info}, pushers={1: pushers})
 
 
 def test_threat_authz_binds_numeric_id_not_login(_github_output: Path) -> None:
@@ -238,6 +241,50 @@ def test_threat_authz_binds_numeric_id_not_login(_github_output: Path) -> None:
     )
     _context, renamed_state, _description = renamed.statuses["head-sha"][0]
     assert renamed_state == "success"
+
+    # The ids of the accounts that pushed bind the same way: an owner-opened PR
+    # that a recycled-login account (id 999) pushed to is not machine-lane, and
+    # one pushed to by the owner's renamed account (id 1) is.
+    recycled_pusher = _refresh_github(author_login="alice", author_id=1, pushers=(999,))
+    assert (
+        governance_check.run(
+            argparse.Namespace(pr_number=1), github=recycled_pusher, policy=make_policy()
+        )
+        == ExitCode.OK
+    )
+    assert recycled_pusher.statuses["head-sha"][0][1] == "pending"
+
+    renamed_pusher = _refresh_github(author_login="alice", author_id=1, pushers=(1,))
+    assert (
+        governance_check.run(
+            argparse.Namespace(pr_number=1), github=renamed_pusher, policy=make_policy()
+        )
+        == ExitCode.OK
+    )
+    assert renamed_pusher.statuses["head-sha"][0][1] == "success"
+
+
+def test_threat_non_owner_push_into_owner_pr_leaves_machine_lane(_github_output: Path) -> None:
+    """An owner opens the PR, a non-owner pushes to its branch: the author alone
+    owns the package, but the head carries a stranger's commits, so the machine
+    lane (auto-merge) is refused and the PR waits for a human. A forge that
+    cannot name the pushers is treated the same way, never as "no one else"."""
+    pushed = _refresh_github(author_login="alice", author_id=1, pushers=(1, 999))
+    assert (
+        governance_check.run(argparse.Namespace(pr_number=1), github=pushed, policy=make_policy())
+        == ExitCode.OK
+    )
+    _context, state, description = pushed.statuses["head-sha"][0]
+    assert state == "pending"
+    assert "G-19" in description
+    assert pushed.requested_reviewers[1] == ["carol"]
+
+    unknown = _refresh_github(author_login="alice", author_id=1, pushers=None)
+    assert (
+        governance_check.run(argparse.Namespace(pr_number=1), github=unknown, policy=make_policy())
+        == ExitCode.OK
+    )
+    assert unknown.statuses["head-sha"][0][1] == "pending"
 
 
 # --- path escape + digest fullmatch reject before any filesystem/path join -
@@ -491,8 +538,54 @@ def test_threat_arming_a_fork_merge_request_never_starts_a_pipeline_in_the_paren
         return_value=httpx.Response(200, json={})
     )
 
-    GitLabApi(project="42", token="not-a-real-token").enable_auto_merge(  # noqa: S106
-        7, head_sha="c" * 40
-    )
+    api = GitLabApi(project="42", token="not-a-real-token")  # noqa: S106
+    api.enable_auto_merge(7, head_sha="c" * 40)
+    # The human-lane route into the same endpoint has the same boundary.
+    api.ensure_head_pipeline(7, head_sha="c" * 40)
 
     assert merge.called  # the arm itself is unchanged
+
+
+# --- a CAS-only PR is validated ----------------------------------------------
+
+
+def test_threat_cas_only_pull_request_is_validated() -> None:
+    """A branch that touches only `p/<ns>/<pkg>/o/sha256/*` — adds a tampered
+    object, or deletes one a tag still names — changes no package root, so a
+    root-only diff selected nothing and the required check went green over it.
+    `validate-pr` maps each object to its owning root and runs the full
+    closure and hash validation on it."""
+    root_bytes = serialize_package_root(
+        _root(tags={"1.0.0": TagEntry(content=_RESERVED_DIGEST, observed=_TS)})
+    )
+    cas_path = f"p/kitware/cmake/o/sha256/{_RESERVED_DIGEST.removeprefix('sha256:')}.json"
+
+    def verdict(*, present: dict[str, bytes], changed: tuple[str, ...]) -> ExitCode:
+        policy_bytes = (
+            b'{"name":"ocx.sh","name_segments":2,"registry_hosts":["ghcr.io"],'
+            b'"reserved_namespaces":[]}\n'
+        )
+        files = InMemoryFiles(
+            files={INDEX_POLICY_PATH: policy_bytes, _ROOT_PATH: root_bytes} | present
+        )
+
+        class _Git:
+            def changed_package_roots(
+                self, base_sha: str, *, root_glob: str, include_deleted: bool = False
+            ) -> tuple[str, ...]:
+                return changed if include_deleted else ()
+
+            def file_at(self, ref: str, path: str) -> bytes | None:
+                return policy_bytes if path == INDEX_POLICY_PATH else None
+
+        return validate_pr.run(
+            argparse.Namespace(base_sha="base", offline=True, same_repo_pr=False, fork_pr=True),
+            git=_Git(),
+            files=files,
+            registry_for=lambda _policy: FakeRegistry(),
+            base_files=InMemoryFiles(),
+        )
+
+    assert verdict(present={cas_path: _RESERVED_INDEX_BYTES}, changed=(cas_path,)) == ExitCode.OK
+    assert verdict(present={cas_path: b"tampered"}, changed=(cas_path,)) == ExitCode.ANOMALY
+    assert verdict(present={}, changed=(cas_path,)) == ExitCode.ANOMALY

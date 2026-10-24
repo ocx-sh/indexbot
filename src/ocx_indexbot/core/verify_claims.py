@@ -98,12 +98,18 @@ def _verify_tag_claim(
     *,
     carried_over: bool = False,
 ) -> ClaimFinding | None:
-    """One tag's claim, re-observed unless `carried_over`.
+    """One tag's claim: the local CAS object first, then the registry unless
+    `carried_over`.
+
+    The CAS check is offline and answers for bytes this index stores whatever
+    the tag did upstream, so it runs first: a moved, vanished, yanked or
+    ephemeral row whose object is gone reports that, not the registry-derived
+    finding the sweep treats as drift or grace.
 
     `carried_over` says this exact `tag -> content_digest` pair is already
     committed on the base ref, so the caller is not asserting it — see
     `verify_claims`'s `base` parameter. The registry re-derivation below is
-    then skipped and only the local CAS checks run. `Observation.content_digest` is the
+    then skipped and only the local CAS check runs. `Observation.content_digest` is the
     physical registry's own digest for the image index the tag resolves to
     *now*, so the equality below compares the committed claim against a
     registry-computed value — nothing is re-derived on this side that could
@@ -117,15 +123,16 @@ def _verify_tag_claim(
     tag resolves to. Letting it propagate would break this module's
     returns-findings-never-raises contract, drop the finding the sweep exists
     to produce, and abandon every package queued behind this one."""
-    if carried_over:
-        return _verify_blob_claim(
-            package_id,
-            tag,
-            content_digest,
-            cas_object_bytes,
-            missing_kind="cas-object-missing",
-            mismatch_kind="cas-object-hash-mismatch",
-        )
+    blob_finding = _verify_blob_claim(
+        package_id,
+        tag,
+        content_digest,
+        cas_object_bytes,
+        missing_kind="cas-object-missing",
+        mismatch_kind="cas-object-hash-mismatch",
+    )
+    if blob_finding is not None or carried_over:
+        return blob_finding
     try:
         observation = observe_one_tag(repository, tag, registry)
     except ValidationError:
@@ -134,14 +141,7 @@ def _verify_tag_claim(
         return ClaimFinding(package_id=package_id, kind="tag-missing-upstream", detail=tag)
     if observation.content_digest != content_digest:
         return ClaimFinding(package_id=package_id, kind="digest-mismatch", detail=tag)
-    return _verify_blob_claim(
-        package_id,
-        tag,
-        content_digest,
-        cas_object_bytes,
-        missing_kind="cas-object-missing",
-        mismatch_kind="cas-object-hash-mismatch",
-    )
+    return None
 
 
 def verify_claims(

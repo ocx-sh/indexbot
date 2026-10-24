@@ -19,12 +19,10 @@ function is the boring, single-source-of-truth option (CONTRACTS.md §13 item
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Final, cast, get_args
 
 from ocx_indexbot.core.diff import ChangeClass, classify_change, tag_diff_summary
-from ocx_indexbot.core.grammar import package_id_max_length
-from ocx_indexbot.core.policy import IndexPolicy
+from ocx_indexbot.core.policy import IndexPolicy, cas_owner_root_path
 from ocx_indexbot.core.registry_checks import check_tag_gone
 from ocx_indexbot.core.validate_entry import check_repository_allowlisted, parse_package_root
 from ocx_indexbot.exit_codes import ExitCode
@@ -47,28 +45,6 @@ one refresh-class and one new-package-class, classifies as `new-package`
 overall — the most conservative disposition among every changed root wins."""
 
 
-def _cas_path_max_length(name_segments: int) -> int:
-    """`p/` + the package id + `/o/sha256/` + 64 hex + `.` + a 4-char
-    extension. Derived from the declared depth rather than fixed at the
-    two-segment 256, so BD-4's cap-before-regex order still has something to
-    cap against on an index that nests deeper."""
-    return len("p/") + package_id_max_length(name_segments) + len("/o/sha256/") + 64 + 1 + 4
-
-
-_LEGACY_CAS_PATH_MAX_LENGTH: Final[int] = 256
-"""The two-segment value this module used before 0.2.0 made depth
-configuration: 221 legitimate characters, rounded up. Kept only as the
-documented reference point for `_cas_path_max_length` above."""
-
-_CAS_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[a-f0-9]{64}")
-
-_CAS_EXTENSIONS: Final[frozenset[str]] = frozenset({"json", "md", "svg", "png"})
-"""Every extension `cli/announce.py` writes under a package's `o/sha256/`
-tree: `.json` image indices plus the `.md` readme and `.svg`/`.png`
-logo desc blobs (`announce._cas_path`/`_logo_extension`; CONTRACTS.md §7
-`core/desc.py`, ADR-6 FP-4)."""
-
-
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Populate `parser` with `classify-pr`'s CLI surface — `--pr-number` is
     a trusted GitHub Actions expression value (`github.event.pull_request.number`,
@@ -86,38 +62,11 @@ def _is_package_root_path(path: str, *, name_segments: int) -> bool:
     excludes CAS objects (`p/<ns>/<pkg>/o/sha256/<hex>.json`, one level
     deeper) and anything outside `p/` entirely. Mirrors the shape check
     `cli/validate.py`'s `_package_id_from_root_path` and
-    `cli/reconcile.py`'s `_discover_package_ids` each already hand-roll for
+    `cli/reconcile.py`'s `discover_package_ids` each already hand-roll for
     their own call site (CONTRACTS.md's established per-module convention,
     not extracted into a shared helper here either)."""
     parts = path.split("/")
     return len(parts) == name_segments + 1 and parts[0] == "p" and parts[-1].endswith(".json")
-
-
-def _cas_owner_root_path(path: str, *, name_segments: int) -> str | None:
-    """The `p/<segments>.json` root that owns `path`, if `path` is a
-    `p/<segments>/o/sha256/<64-hex>.<ext>` package-local CAS object — else
-    `None`.
-
-    Hand-rolled shape check, same per-module convention as
-    `_is_package_root_path` above. Total by construction: a malformed
-    CAS-shaped path returns `None` rather than raising, so an unparseable
-    diff entry lands on the caller's conservative branch instead of crashing
-    the classifier.
-    """
-    if len(path) > _cas_path_max_length(name_segments):
-        return None
-    parts = path.split("/")
-    if (
-        len(parts) != name_segments + 4
-        or parts[0] != "p"
-        or parts[name_segments + 1] != "o"
-        or parts[name_segments + 2] != "sha256"
-    ):
-        return None
-    hex_digest, _, extension = parts[-1].partition(".")
-    if extension not in _CAS_EXTENSIONS or _CAS_HEX_RE.fullmatch(hex_digest) is None:
-        return None
-    return "p/" + "/".join(parts[1 : name_segments + 1]) + ".json"
 
 
 def _every_path_in_refresh_scope(
@@ -133,7 +82,7 @@ def _every_path_in_refresh_scope(
     scope — package-local CAS is only in scope alongside its own root.
     """
     return all(
-        path in root_paths or _cas_owner_root_path(path, name_segments=name_segments) in root_paths
+        path in root_paths or cas_owner_root_path(path, name_segments=name_segments) in root_paths
         for path in changed_paths
     )
 

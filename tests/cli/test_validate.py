@@ -10,6 +10,7 @@ from ocx_indexbot.cli import validate
 from ocx_indexbot.core.observe import observe_one_tag
 from ocx_indexbot.core.policy import RegistryConfig
 from ocx_indexbot.core.validate_entry import serialize_package_root
+from ocx_indexbot.errors import ValidationError
 from ocx_indexbot.exit_codes import ExitCode
 from ocx_indexbot.model import (
     Desc,
@@ -118,10 +119,17 @@ def _valid_package() -> tuple[InMemoryFiles, FakeRegistry]:
 
 
 def _args(
-    paths: list[str], *, offline: bool = False, allow_reserved_namespace: bool = False
+    paths: list[str],
+    *,
+    offline: bool = False,
+    allow_reserved_namespace: bool = False,
+    all_roots: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
-        paths=paths, offline=offline, allow_reserved_namespace=allow_reserved_namespace
+        paths=paths,
+        offline=offline,
+        allow_reserved_namespace=allow_reserved_namespace,
+        all=all_roots,
     )
 
 
@@ -874,3 +882,101 @@ def test_base_ref_bytes_this_version_cannot_parse_read_as_no_base_ref_copy() -> 
         base_files=InMemoryFiles(files={_PATH: b"not json"}),
     )
     assert result == ExitCode.VALIDATION_FAILURE
+
+
+# --- --all: every committed root --------------------------------------------
+
+
+def _roots(*paths: str) -> InMemoryFiles:
+    """One valid offline-checkable root per path, plus a CAS subtree under the
+    first one — `--all` must not mistake that subtree for a root."""
+    files: dict[str, bytes] = {}
+    for path in paths:
+        namespace, package = path.removeprefix("p/").removesuffix(".json").split("/")
+        root = PackageRoot(
+            name=f"ocx.sh/{namespace}/{package}",
+            repository=_REPOSITORY,
+            owners=(Owner(login="alice", id=1),),
+            status="active",
+            deprecated_message=None,
+            created="2026-07-17",
+            desc=None,
+            upstream=None,
+            tags={},
+        )
+        files[path] = serialize_package_root(root)
+    first = paths[0].removesuffix(".json")
+    files[f"{first}/o/sha256/{hashlib.sha256(b'{}').hexdigest()}.json"] = b"{}"
+    return InMemoryFiles(files=files)
+
+
+def test_add_arguments_registers_all_and_makes_paths_optional() -> None:
+    parser = argparse.ArgumentParser()
+    validate.add_arguments(parser)
+    assert parser.parse_args(["--all"]).all is True
+    assert parser.parse_args(["--all"]).paths == []
+    assert parser.parse_args(["p/kitware/cmake.json"]).all is False
+
+
+def test_all_validates_every_committed_root(capsys: pytest.CaptureFixture[str]) -> None:
+    files = _roots("p/kitware/cmake.json", "p/acme/tool.json")
+    result = _run(_args([], offline=True, all_roots=True), files=files, registry=FakeRegistry())
+    err = capsys.readouterr().err
+    assert result == ExitCode.OK
+    assert "p/acme/tool.json: OK" in err
+    assert "p/kitware/cmake.json: OK" in err
+    assert "/o/sha256/" not in err
+
+
+def test_all_reports_every_root_and_fails_on_a_bad_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = _roots("p/kitware/cmake.json", "p/acme/tool.json")
+    files.write_bytes("p/acme/tool.json", b"not json")
+    result = _run(_args([], offline=True, all_roots=True), files=files, registry=FakeRegistry())
+    err = capsys.readouterr().err
+    assert result == ExitCode.VALIDATION_FAILURE
+    assert "p/acme/tool.json: FAIL" in err
+    assert "p/kitware/cmake.json: OK" in err
+
+
+def test_all_over_zero_roots_succeeds(capsys: pytest.CaptureFixture[str]) -> None:
+    result = _run(
+        _args([], offline=True, all_roots=True), files=InMemoryFiles(), registry=FakeRegistry()
+    )
+    assert result == ExitCode.OK
+    assert "0 root(s)" in capsys.readouterr().err
+
+
+def test_all_admits_a_committed_reserved_root(capsys: pytest.CaptureFixture[str]) -> None:
+    files = _roots(_RESERVED_PATH)
+    result = _run(_args([], offline=True, all_roots=True), files=files, registry=FakeRegistry())
+    assert result == ExitCode.OK
+    assert "reserved segment admitted" in capsys.readouterr().err
+
+
+def test_all_does_not_open_the_reserved_refusal_for_explicit_paths() -> None:
+    """The PR and fork lanes name their files; only a sweep of the committed
+    tree is already-on-main, so naming the same root still claims it."""
+    files = _roots(_RESERVED_PATH)
+    result = _run(_args([_RESERVED_PATH], offline=True), files=files, registry=FakeRegistry())
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
+def test_all_still_blocks_a_committed_control_path_segment() -> None:
+    files = _roots("p/admin/cmake.json")
+    result = _run(_args([], offline=True, all_roots=True), files=files, registry=FakeRegistry())
+    assert result == ExitCode.VALIDATION_FAILURE
+
+
+@pytest.mark.parametrize("paths", [[], ["p/kitware/cmake.json"]])
+def test_all_is_exclusive_with_explicit_paths_and_paths_are_required_without_it(
+    paths: list[str],
+) -> None:
+    all_roots = bool(paths)
+    with pytest.raises(ValidationError, match="exactly one of"):
+        _run(
+            _args(paths, offline=True, all_roots=all_roots),
+            files=_roots("p/kitware/cmake.json"),
+            registry=FakeRegistry(),
+        )

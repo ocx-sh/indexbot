@@ -92,12 +92,14 @@ def test_verify_claims_tag_missing_upstream() -> None:
 
 def test_verify_claims_digest_mismatch() -> None:
     entry, object_bytes, registry = _observed_claim("3.28.1")
-    stale_entry = TagEntry(content="sha256:" + "0" * 64, observed="2026-07-17T00:00:00Z")
+    stale_bytes = b"bytes of a superseded index"
+    stale_digest = f"sha256:{hashlib.sha256(stale_bytes).hexdigest()}"
+    stale_entry = TagEntry(content=stale_digest, observed="2026-07-17T00:00:00Z")
     root = _root({"3.28.1": stale_entry})
     findings = verify_claims(
         _PACKAGE_ID,
         root,
-        {stale_entry.content: object_bytes, entry.content: object_bytes},
+        {stale_digest: stale_bytes, entry.content: object_bytes},
         registry,
     )
     assert findings == (
@@ -163,6 +165,32 @@ def test_verify_claims_cas_object_hash_mismatch() -> None:
     entry, _object_bytes, registry = _observed_claim("3.28.1")
     root = _root({"3.28.1": entry})
     findings = verify_claims(_PACKAGE_ID, root, {entry.content: b"tampered bytes"}, registry)
+    assert findings == (
+        ClaimFinding(package_id=_PACKAGE_ID, kind="cas-object-hash-mismatch", detail="3.28.1"),
+    )
+
+
+def test_a_moved_tag_with_a_missing_cas_object_reports_the_missing_object() -> None:
+    entry, _object_bytes, registry = _drifted("3.28.1")
+    findings = verify_claims(_PACKAGE_ID, _root({"3.28.1": entry}), {}, registry)
+    assert findings == (
+        ClaimFinding(package_id=_PACKAGE_ID, kind="cas-object-missing", detail="3.28.1"),
+    )
+
+
+def test_a_vanished_tag_with_a_missing_cas_object_reports_the_missing_object() -> None:
+    entry, _object_bytes, _registry = _observed_claim("3.28.1")
+    findings = verify_claims(_PACKAGE_ID, _root({"3.28.1": entry}), {}, FakeRegistry())
+    assert findings == (
+        ClaimFinding(package_id=_PACKAGE_ID, kind="cas-object-missing", detail="3.28.1"),
+    )
+
+
+def test_a_moved_tag_with_a_tampered_cas_object_reports_the_hash_mismatch() -> None:
+    entry, _object_bytes, registry = _drifted("3.28.1")
+    findings = verify_claims(
+        _PACKAGE_ID, _root({"3.28.1": entry}), {entry.content: b"tampered bytes"}, registry
+    )
     assert findings == (
         ClaimFinding(package_id=_PACKAGE_ID, kind="cas-object-hash-mismatch", detail="3.28.1"),
     )
