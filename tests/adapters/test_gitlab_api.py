@@ -1904,6 +1904,73 @@ def test_list_open_merge_requests_returns_ascending_iids() -> None:
     assert _client().list_open_pull_requests() == (3, 7, 12)
 
 
+# ---- merge_settings ----------------------------------------------------------
+
+
+@respx.mock
+def test_merge_settings_reads_the_two_project_flags_in_one_request() -> None:
+    route = respx.get(_PROJECT).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 42,
+                "only_allow_merge_if_pipeline_succeeds": True,
+                "only_allow_merge_if_all_discussions_are_resolved": False,
+            },
+        )
+    )
+
+    assert _client().merge_settings() == {
+        "only_allow_merge_if_pipeline_succeeds": True,
+        "only_allow_merge_if_all_discussions_are_resolved": False,
+    }
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_merge_settings_reports_an_absent_or_non_boolean_flag_as_unknown() -> None:
+    """GitLab omits these fields for a token that may not read them; absent is
+    not off, and a warning that says "off" for it would be a false alarm."""
+    respx.get(_PROJECT).mock(
+        return_value=httpx.Response(
+            200, json={"id": 42, "only_allow_merge_if_all_discussions_are_resolved": "yes"}
+        )
+    )
+
+    assert _client().merge_settings() == {
+        "only_allow_merge_if_pipeline_succeeds": None,
+        "only_allow_merge_if_all_discussions_are_resolved": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, content=b"<html>proxy login</html>"),
+        httpx.Response(200, json=["not", "an", "object"]),
+    ],
+    ids=["not-json", "not-an-object"],
+)
+@respx.mock
+def test_merge_settings_with_an_unusable_body_leaves_as_a_forge_error(
+    response: httpx.Response,
+) -> None:
+    """A 200 from a proxy is not a `ValueError` for the poll sweep to die on:
+    it takes the same reported-and-continue path as any failed read."""
+    respx.get(_PROJECT).mock(return_value=response)
+
+    with pytest.raises(ForgeError):
+        _client().merge_settings()
+
+
+@respx.mock
+def test_merge_settings_failure_leaves_as_a_forge_error() -> None:
+    respx.get(_PROJECT).mock(return_value=httpx.Response(404, json={"message": "no"}))
+
+    with pytest.raises(ForgeError):
+        _client().merge_settings()
+
+
 # ---- pagination --------------------------------------------------------------
 
 

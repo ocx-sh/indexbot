@@ -247,3 +247,86 @@ def test_the_arm_is_bound_to_the_revision_that_was_gated() -> None:
     assert _run(github) == ExitCode.OK
 
     assert github.auto_merge_head_sha[1] == github.pull_request_info[1].head_sha
+
+
+_PIPELINE_SETTING = "only_allow_merge_if_pipeline_succeeds"
+_DISCUSSIONS_SETTING = "only_allow_merge_if_all_discussions_are_resolved"
+
+
+def _warning(setting: str) -> str:
+    return (
+        f"governance-poll: GitLab project setting {setting} is off; the human lane is not enforced"
+    )
+
+
+@pytest.mark.parametrize(
+    ("settings", "off"),
+    [
+        ({_PIPELINE_SETTING: False, _DISCUSSIONS_SETTING: True}, [_PIPELINE_SETTING]),
+        ({_PIPELINE_SETTING: True, _DISCUSSIONS_SETTING: False}, [_DISCUSSIONS_SETTING]),
+        (
+            {_PIPELINE_SETTING: False, _DISCUSSIONS_SETTING: False},
+            [_PIPELINE_SETTING, _DISCUSSIONS_SETTING],
+        ),
+    ],
+)
+def test_warns_once_per_merge_setting_that_is_off_and_the_exit_code_is_unchanged(
+    settings: dict[str, bool | None], off: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    github = _forge(1, 2)
+    github.merge_settings_response = settings
+
+    assert _run(github) is ExitCode.OK
+
+    err = capsys.readouterr().err
+    assert [line for line in err.splitlines() if "GitLab project setting" in line] == [
+        _warning(name) for name in off
+    ]
+    assert github.calls.count("merge_settings") == 1, "read once per run, not per merge request"
+
+
+def test_an_unreported_merge_setting_is_unknown_not_off(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    github = _forge(1)
+    github.merge_settings_response = {_PIPELINE_SETTING: None, _DISCUSSIONS_SETTING: True}
+
+    assert _run(github) is ExitCode.OK
+
+    assert "GitLab project setting" not in capsys.readouterr().err
+
+
+def test_no_warning_when_both_merge_settings_are_on(capsys: pytest.CaptureFixture[str]) -> None:
+    github = _forge(1)
+    github.merge_settings_response = {_PIPELINE_SETTING: True, _DISCUSSIONS_SETTING: True}
+
+    assert _run(github) is ExitCode.OK
+
+    assert "GitLab project setting" not in capsys.readouterr().err
+
+
+def test_a_forge_with_no_merge_settings_prints_no_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    github = _forge(1)
+
+    assert _run(github) is ExitCode.OK
+
+    assert "GitLab project setting" not in capsys.readouterr().err
+    assert github.calls.count("merge_settings") == 1
+
+
+def test_an_unreadable_project_never_ends_the_sweep(capsys: pytest.CaptureFixture[str]) -> None:
+    """The settings read is advisory: a failed read is reported and the
+    merge requests are still gated, with the exit code the sweep earned."""
+    github = _forge(1)
+
+    def _explode() -> dict[str, bool]:
+        raise TransientError("GitLab API rate limit exceeded")
+
+    github.merge_settings = _explode  # pyright: ignore[reportAttributeAccessIssue]
+
+    assert _run(github) is ExitCode.OK
+
+    assert github.auto_merge_enabled == {1}
+    assert "could not read the GitLab project settings" in capsys.readouterr().err

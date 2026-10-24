@@ -477,6 +477,21 @@ class ForgePort(Protocol):
         """
         ...
 
+    def merge_settings(self) -> dict[str, bool | None] | None:
+        """The project merge settings the human lane depends on, by name, or
+        `None` when the forge has nothing to read. A setting the forge does not
+        report is `None` too — unknown, which is not the same as off.
+
+        GitLab only: `only_allow_merge_if_pipeline_succeeds` is what makes the
+        external commit status blocking, and
+        `only_allow_merge_if_all_discussions_are_resolved` is what holds a
+        fork merge request. Either off leaves the lane unenforced, silently.
+        `cli/governance_poll.py` reads this once per run and warns. GitHub
+        returns `None` without a request: branch protection needs an admin
+        token and is brittle to read.
+        """
+        ...
+
     def create_or_update_issue(
         self, *, title: str, body: str, labels: list[str] | None = None
     ) -> int:

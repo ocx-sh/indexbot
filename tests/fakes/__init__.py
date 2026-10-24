@@ -345,6 +345,15 @@ class FakeGitHub:
         canned, so "configured" is the only meaning "open" can have here."""
         return tuple(sorted(self.pull_request_info))
 
+    merge_settings_response: dict[str, bool | None] | None = None
+    """What `merge_settings` reports: setting name -> on/off/unknown, or `None`
+    for a forge with nothing to read (GitHub). Each read is recorded in
+    `calls`."""
+
+    def merge_settings(self) -> dict[str, bool | None] | None:
+        self.calls.append("merge_settings")
+        return self.merge_settings_response
+
     def create_or_update_issue(
         self, *, title: str, body: str, labels: list[str] | None = None
     ) -> int:

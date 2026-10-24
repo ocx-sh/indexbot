@@ -79,6 +79,13 @@ if TYPE_CHECKING:
 
 _FORGE = "GitLab"
 
+_MERGE_SETTINGS = (
+    "only_allow_merge_if_pipeline_succeeds",
+    "only_allow_merge_if_all_discussions_are_resolved",
+)
+"""The project settings that make the human lane blocking — see
+`ForgePort.merge_settings`."""
+
 GITLAB_API_URL: Final[str] = "https://gitlab.com/api/v4"
 """gitlab.com's API root. A self-hosted instance passes its own — in CI that
 is `$CI_API_V4_URL`, which the runner sets on every job."""
@@ -821,6 +828,24 @@ class GitLabApi:
     def list_open_pull_requests(self) -> tuple[int, ...]:
         items = self._paginate(self._project_url("merge_requests"), {"state": "opened"})
         return tuple(sorted(int(item["iid"]) for item in items))
+
+    def merge_settings(self) -> dict[str, bool | None]:
+        """Each setting as the project reports it, `None` where it reports
+        nothing: GitLab leaves these fields out for a token below the access
+        level that may read them, and an absent field is not an "off"."""
+        url = self._project_url()
+        with self._client() as client:
+            response = client.get(url)
+        self._check(response)
+        self._raise(response)
+        try:
+            project = as_object(response, forge=_FORGE, url=url)
+        except ValueError as exc:
+            raise ForgeError(f"{_FORGE} API returned a non-JSON body for {url}") from exc
+        return {
+            name: value if isinstance(value := project.get(name), bool) else None
+            for name in _MERGE_SETTINGS
+        }
 
     def create_or_update_issue(
         self, *, title: str, body: str, labels: list[str] | None = None

@@ -410,7 +410,8 @@ it comes from settings the bot cannot set for you.
 === "GitHub"
 
     - Branch protection on the default branch requiring the validate lane's
-      check and `governance/review-required`.
+      check. Do not require `governance/review-required`: it is deliberately
+      not a required check, and requiring it deadlocks the human lane.
     - Auto-merge enabled for the repository, or the arm does nothing.
 
 === "GitLab"
@@ -434,6 +435,11 @@ it comes from settings the bot cannot set for you.
       an `INDEXBOT_LANE` variable: `governance` (the poll lane — its interval
       is the gate's latency, not its strength), `reconcile`, and
       `housekeeping`.
+
+    `indexbot governance-poll` reads these two project settings once per run
+    and prints `governance-poll: GitLab project setting <name> is off; the
+    human lane is not enforced` to stderr for each one that is off. It is a
+    warning only; the exit code does not change.
 
     Approvals need no setting: an approval counts only when it was granted
     after the last push, which the bot establishes from server-side

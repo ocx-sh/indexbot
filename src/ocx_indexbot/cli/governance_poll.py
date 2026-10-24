@@ -85,6 +85,26 @@ def _gate_one(
     return f"{change_class} -> {state}"
 
 
+def _warn_on_unenforced_merge_settings(github: ForgePort) -> None:
+    """One read per run, advisory only: a missing setting silently turns the
+    human lane off, but the sweep's exit code answers for merge requests, not
+    for project configuration, and an unreadable project must not end it."""
+    try:
+        settings = github.merge_settings()
+    except IndexBotError as exc:
+        print(
+            f"governance-poll: could not read the GitLab project settings: {exc}", file=sys.stderr
+        )
+        return
+    for name, enabled in (settings or {}).items():
+        if enabled is False:
+            print(
+                f"governance-poll: GitLab project setting {name} is off; "
+                "the human lane is not enforced",
+                file=sys.stderr,
+            )
+
+
 def run(
     args: argparse.Namespace,
     *,
@@ -101,6 +121,7 @@ def run(
     """
     del args  # no CLI surface: the sweep's scope is "every open MR", always
     worst = ExitCode.OK
+    _warn_on_unenforced_merge_settings(github)
     numbers = github.list_open_pull_requests()
     print(f"governance-poll: {len(numbers)} open merge request(s)", file=sys.stderr)
     for number in numbers:

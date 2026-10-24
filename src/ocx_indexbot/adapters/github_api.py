@@ -612,6 +612,11 @@ class GitHubApi:
         items = self._paginate(self._repo_url("pulls"), {"state": "open"})
         return tuple(sorted(int(item["number"]) for item in items))
 
+    def merge_settings(self) -> None:
+        """Nothing to read: branch protection needs an admin token and is
+        brittle to parse. No request is made."""
+        return None
+
     def resolve_review_thread(self, pr_number: int, *, marker: str) -> None:
         """Nothing to do. An issue comment is not resolvable and blocks no
         merge here; the commit status carries the decision, and branch

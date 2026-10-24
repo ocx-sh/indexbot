@@ -1750,6 +1750,17 @@ def test_list_open_pull_requests_returns_ascending_numbers() -> None:
     assert _client().list_open_pull_requests() == (2, 9)
 
 
+# ---- merge_settings ----------------------------------------------------------
+
+
+@respx.mock
+def test_merge_settings_reads_nothing_on_github() -> None:
+    """Branch protection needs an admin token and is brittle to read, so the
+    GitHub adapter has nothing to report and makes no request at all."""
+    assert _client().merge_settings() is None
+    assert not respx.calls
+
+
 # ---- _paginate bound (shared by get_pull_request_info / create_or_update_issue) --
 
 
