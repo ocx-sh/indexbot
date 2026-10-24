@@ -67,26 +67,15 @@ class FileWrite:
     content: str | bytes
 
 
-def _live_tag_content_digests(root: PackageRoot) -> frozenset[str]:
-    """Content digests of every *live* (non-yanked) tag (ADR-1 D8) — this
-    module's own CAS-pruning input (`_reachable_digests`). The catalog
-    package's view-model emitter ports the same digest-iteration rule
-    independently for its platform union (`cat/src/viewmodel/`, WP-05) —
-    this module no longer has a second in-tree caller of its own."""
-    return frozenset(entry.content for entry in root.tags.values() if entry.yanked is None)
-
-
 def _reachable_digests(root: PackageRoot) -> frozenset[str]:
     """Content digests this package's CAS copy must keep (ADR-1 D8).
 
-    Every *live* (non-yanked) tag's `content` digest, plus `desc.readme`/
-    `desc.logo` (never yankable themselves). A yanked tag's content survives
-    only incidentally, if some other live tag shares the same digest
-    (emergent aliasing, ADR-1 D3, applies to reachability too) — CONTRACTS.md
-    §8's explicit disambiguation of ADR-1 D8's "orphaned by a repointed or
-    yanked tag" wording.
+    Every tag's `content` digest — yanked tags included, because the served
+    root still lists them and a reader walking it must find each object — plus
+    `desc.readme`/`desc.logo`. Only an object orphaned by a repointed tag (no
+    tag references its digest any more) is pruned.
     """
-    digests = set(_live_tag_content_digests(root))
+    digests = {entry.content for entry in root.tags.values()}
     if root.desc is not None:
         if root.desc.readme is not None:
             digests.add(root.desc.readme)

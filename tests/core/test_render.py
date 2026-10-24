@@ -235,7 +235,7 @@ def _case_yanked_excluded() -> list[SourcePackage]:
     }
     content_by_digest = {
         f"{_digest('x')}.json": _index_bytes("1.0.0"),
-        # only referenced by the yanked tag, no live tag shares it -> pruned.
+        # only referenced by the yanked tag: still served, so the tree stays closed.
         f"{_digest('y')}.json": _index_bytes(
             "0.9.0-yanked", platforms=({"architecture": "amd64", "os": "windows"},)
         ),

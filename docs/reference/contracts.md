@@ -716,14 +716,12 @@ output tree (`--out`, applied by `cli/render.py` after `site:build`'s
 VitePress build completes — see `taskfile.yml`'s `render:build` task and its
 `emptyOutDir` footgun comment).
 
-Reachability walk per package: only `tags[*].content` digests of *live*
-(non-yanked) tags, and, transitively, `desc.readme`/`desc.logo` digests, are
-copied — CAS objects orphaned by a repointed or yanked tag are pruning
+Reachability walk per package: every tag's `content` digest, yanked or not,
+and, transitively, the `desc.readme`/`desc.logo` digests, are copied, so the
+served tree stays closed over the root it serves — CAS objects orphaned by a
+repointed tag (no tag references the digest any more) are the pruning
 candidates (ADR-1 D8, **deployment artifact only**, never source-tree git
-history). A yanked tag's content is pruned **only if unreachable from every
-other live tag** — yanking does not itself force pruning while another tag
-still shares the digest (emergent aliasing, ADR-1 D3, applies to
-reachability too).
+history).
 
 Returned file list:
 - `config.json`: `{"format_version": format_version, "name_segments":

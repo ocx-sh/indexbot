@@ -94,6 +94,7 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "ocx_indexbot"
 
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
+_DIGEST_C = "sha256:" + "c" * 64
 _TS = "2026-07-17T00:00:00Z"
 _OWNER = Owner(login="alice", id=1)
 _PKG = PackageId(segments=("kitware", "cmake"))
@@ -223,11 +224,19 @@ def test_g05_governance_key_change_is_human_review(
 
 
 def test_g06_render_reachability_filter() -> None:
-    """G-06: render copies only CAS reachable from a live tag; an orphaned
-    CAS object (no live tag references its digest) is excluded."""
+    """G-06: render copies the CAS of every tag, yanked or not; an object only
+    a repointed tag once referenced (no tag references its digest) is excluded."""
     live_obj = _index_bytes(architecture="amd64")
+    yanked_obj = _index_bytes(architecture="s390x", digest="sha256:" + "4" * 64)
     orphan_obj = _index_bytes(architecture="arm64", digest="sha256:" + "2" * 64)
-    root = _root(tags={"1.0.0": TagEntry(content=_DIGEST_A, observed=_TS)})
+    root = _root(
+        tags={
+            "1.0.0": TagEntry(content=_DIGEST_A, observed=_TS),
+            "0.9.0": TagEntry(
+                content=_DIGEST_C, observed=_TS, yanked=Yank(reason="broken", at=_TS)
+            ),
+        }
+    )
     source = SourcePackage(
         package_id=_PKG,
         root=root,
@@ -235,10 +244,12 @@ def test_g06_render_reachability_filter() -> None:
         content_by_digest={
             f"{_DIGEST_A}.json": live_obj,
             f"{_DIGEST_B}.json": orphan_obj,
+            f"{_DIGEST_C}.json": yanked_obj,
         },
     )
     paths = {fw.path for fw in build_render_plan((source,), name_segments=2)}
     assert cas_relpath(_PKG, _DIGEST_A, "json") in paths
+    assert cas_relpath(_PKG, _DIGEST_C, "json") in paths
     assert cas_relpath(_PKG, _DIGEST_B, "json") not in paths
 
 
