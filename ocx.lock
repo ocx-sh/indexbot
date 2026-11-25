@@ -1,14 +1,15 @@
 [metadata]
-lock_version = 3
+lock_version = 4
 declaration_hash_version = 1
-declaration_hash = "sha256:a434bb9af8df47a348049d57f5ee65d93685eb8d828f06c0427752d0b11edc66"
-generated_by = "ocx 0.5.8"
-generated_at = "2026-08-24T17:53:06Z"
+declaration_hash = "sha256:407e1835fbe9a052b09cd43492d8f8d1c48ec6f2db2316fbec58c8069bddc0da"
+generated_by = "ocx 0.6.8"
+generated_at = "2026-11-25T16:56:12Z"
 
 [[tool]]
 name = "actionlint"
 group = "default"
 repository = "ocx.sh/actionlint/actionlint"
+declared = "ocx.sh/actionlint/actionlint:1"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:6f439b6d7556a3824840608eaed7416177ade18d9cfa12eb7c3831caf2f44e3f"
@@ -19,9 +20,23 @@ repository = "ocx.sh/actionlint/actionlint"
 "windows/arm64" = "sha256:686bd57c0af310a195b97b34e1821465a7c45c0c5ad8f47260993a104e07b45c"
 
 [[tool]]
+name = "cosign"
+group = "default"
+repository = "ocx.sh/sigstore/cosign"
+declared = "ocx.sh/sigstore/cosign:3.1.1"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:ec417cb34aa12c7ee87458fe7ebba9111afbde80f841c49be367bf6d1cc08f10"
+"darwin/arm64" = "sha256:3758c52546f1bf3867d6080b3e0d20103ae40cdf016ae5e47592a93247f73854"
+"linux/amd64" = "sha256:10d3ef6ef2d9a37e8239db2c67576b399eb6b30d7395f5f507c0c16b5c109637"
+"linux/arm64" = "sha256:95a2764e4fe976b3f0c1a3576cd67041f35ebf4a1c0d36f21da6de27604045bc"
+"windows/amd64" = "sha256:e14e23c3c751b9cd0d45e449f4a0a99837e91e2874dba661afc2fcdaba8dda3c"
+
+[[tool]]
 name = "git-cliff"
 group = "default"
 repository = "ocx.sh/git-cliff/git-cliff"
+declared = "ocx.sh/git-cliff/git-cliff:2"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:895c57b54ef4fa802287dfdf03194f4b4c21c4436c8387481beade38804962e4"
@@ -35,6 +50,7 @@ repository = "ocx.sh/git-cliff/git-cliff"
 name = "gitleaks"
 group = "default"
 repository = "ocx.sh/gitleaks/gitleaks"
+declared = "ocx.sh/gitleaks/gitleaks:8"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:34091f2a708065187d4ecd5173cc0e66aea3c1481df0e5f91e3b32fab9c4adcc"
@@ -47,6 +63,7 @@ repository = "ocx.sh/gitleaks/gitleaks"
 name = "lychee"
 group = "default"
 repository = "ocx.sh/lychee/lychee"
+declared = "ocx.sh/lychee/lychee:0"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:69d2e005250872a67fc687cb88423baf25a496d5f2017aaacce7337d8dd4ef41"
@@ -59,6 +76,7 @@ repository = "ocx.sh/lychee/lychee"
 name = "task"
 group = "default"
 repository = "ocx.sh/go-task/task"
+declared = "ocx.sh/go-task/task:3"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:958d2f88bec42ed62b3ab8e0435bffe5cecdfdad43055c3a8e7ec376564c4886"
@@ -72,6 +90,7 @@ repository = "ocx.sh/go-task/task"
 name = "uv"
 group = "default"
 repository = "ocx.sh/astral-sh/uv"
+declared = "ocx.sh/astral-sh/uv:0"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:c66b0df03c8f1a33e811ddab8443007f808f38260988793feb32e8b35428c898"
