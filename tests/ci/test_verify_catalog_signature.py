@@ -19,7 +19,11 @@ DEFAULT_TYPE = "https://ocx.sh/attestation/index-catalog/v1"
 
 
 def _run(
-    tmp_path: Path, *, stub_exit: int = 0, args: list[str] | None = None, **env: str
+    tmp_path: Path,
+    *,
+    stub_exit: int = 0,
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str] | None, Path, Path]:
     argv_log = tmp_path / "argv"
     stub = tmp_path / "cosign"
@@ -38,7 +42,7 @@ def _run(
         "COSIGN": str(stub),
         "SIGNER_IDENTITY": IDENTITY,
         "SIGNER_ISSUER": ISSUER,
-        **env,
+        **(env or {}),
     }
     result = subprocess.run(  # noqa: S603 - the script under test, a fixed path
         [str(SCRIPT), *(args if args is not None else [str(catalog), str(bundle)])],
@@ -72,7 +76,7 @@ def test_cosign_refusal_code_is_passed_through(tmp_path: Path) -> None:
 
 
 def test_predicate_type_is_overridable(tmp_path: Path) -> None:
-    _, argv, _, _ = _run(tmp_path, PREDICATE_TYPE="urn:other")
+    _, argv, _, _ = _run(tmp_path, env={"PREDICATE_TYPE": "urn:other"})
 
     assert argv is not None
     assert argv[argv.index("--type") + 1] == "urn:other"
@@ -82,7 +86,7 @@ def test_predicate_type_is_overridable(tmp_path: Path) -> None:
 def test_missing_signer_pin_is_a_usage_error_and_cosign_never_runs(
     tmp_path: Path, missing: str
 ) -> None:
-    result, argv, _, _ = _run(tmp_path, **{missing: ""})
+    result, argv, _, _ = _run(tmp_path, env={missing: ""})
 
     assert result.returncode == 2
     assert missing in result.stderr
