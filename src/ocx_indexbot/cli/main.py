@@ -29,6 +29,7 @@ from collections.abc import Callable, Sequence
 from typing import cast
 
 from ocx_indexbot import __version__
+from ocx_indexbot.cli import check_expiry as _check_expiry_cli
 from ocx_indexbot.cli import ci_cmd as _ci_cli
 from ocx_indexbot.cli import classify_pr as _classify_pr_cli
 from ocx_indexbot.cli import governance_check as _governance_check_cli
@@ -141,6 +142,7 @@ _ARG_POPULATORS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
     "stale": _stale_cli.add_arguments,
     "ci": _ci_cli.add_arguments,
     "workflows-check": _workflows_check_cli.add_arguments,
+    "check-expiry": _check_expiry_cli.add_arguments,
     "schema": _schema_cli.add_arguments,
 }
 """Subcommand name -> its subparser's CLI-surface populator. A name present

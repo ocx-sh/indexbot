@@ -1,0 +1,54 @@
+name: Catalog expiry
+
+# The published ocx.sh catalog carries a signed `expires`. If the re-sign job
+# in ocx-sh/index quietly stops, `enforce` clients start failing weeks later;
+# this run goes red first. A failed run is the alert — no secrets, no writes.
+on:
+  schedule:
+    - cron: '23 6 * * *'  # daily, 06:23 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  CATALOG_URL: https://index.ocx.sh/c/index.json
+  BUNDLE_URL: https://index.ocx.sh/c/index.json.sigstore.json
+  # The built-in ocx.sh signer pin (plan C-203): the index's own render-deploy
+  # workflow on main, via GitHub's OIDC issuer.
+  SIGNER_IDENTITY: https://github.com/ocx-sh/index/.github/workflows/render-deploy.yml@refs/heads/main
+  SIGNER_ISSUER: https://token.actions.githubusercontent.com
+  PREDICATE_TYPE: https://ocx.sh/attestation/index-catalog/v1
+
+jobs:
+  check:
+    # Cron is upstream-only: a fork inherits every schedule and would run it
+    # off its own stale YAML.
+    if: github.repository_owner == 'ocx-sh'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e  # v1
+      - name: Fetch the served catalog and signature
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' \
+            --output index.json "$CATALOG_URL"
+          curl --fail --silent --show-error --location --proto '=https' \
+            --output index.json.sigstore.json "$BUNDLE_URL"
+      - name: Expiry and signature binding
+        run: |
+          uv run --locked indexbot check-expiry \
+            --catalog index.json --bundle index.json.sigstore.json --min-days 21
+      - name: Verify the signature with cosign
+        run: |
+          ocx package exec ocx.sh/sigstore/cosign:3.1.1 -- cosign verify-blob-attestation \
+            --bundle index.json.sigstore.json \
+            --type "$PREDICATE_TYPE" \
+            --certificate-identity "$SIGNER_IDENTITY" \
+            --certificate-oidc-issuer "$SIGNER_ISSUER" \
+            index.json
