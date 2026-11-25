@@ -177,7 +177,7 @@ def test_forge_api_missing_token_raises(monkeypatch: pytest.MonkeyPatch) -> None
 # --- DISPATCH table shape -------------------------------------------------------
 
 
-def test_dispatch_registers_exactly_the_fourteen_subcommands() -> None:
+def test_dispatch_registers_exactly_the_fifteen_subcommands() -> None:
     assert set(_wiring.DISPATCH) == {
         "ci",
         "reconcile",
@@ -192,6 +192,7 @@ def test_dispatch_registers_exactly_the_fourteen_subcommands() -> None:
         "label-failed-run",
         "stale",
         "workflows-check",
+        "check-expiry",
         "schema",
     }
 
@@ -1050,3 +1051,15 @@ def test_project_api_github_defaults_to_github_com(monkeypatch: pytest.MonkeyPat
     assert isinstance(api, GitHubApi)
     assert api.base_url == "https://api.github.com"
     assert api.graphql_url == "https://api.github.com/graphql"
+
+
+def test_check_expiry_is_reachable_through_the_shipped_entrypoint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Dispatch reaches the module with the real fetcher and clock; a local
+    catalog expiring far ahead passes and prints its remaining days."""
+    catalog = tmp_path / "index.json"
+    catalog.write_text('{"expires": "2999-01-01T00:00:00Z"}')
+
+    assert main_module.main(["check-expiry", "--catalog", str(catalog)]) == int(ExitCode.OK)
+    assert "day(s) remaining" in capsys.readouterr().out

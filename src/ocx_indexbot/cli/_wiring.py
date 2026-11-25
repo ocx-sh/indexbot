@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from ocx_indexbot.adapters.github_api import GITHUB_API_URL, GITHUB_GRAPHQL_URL, GitHubApi
 from ocx_indexbot.adapters.gitlab_api import GITLAB_API_URL, GitLabApi
+from ocx_indexbot.adapters.http_fetch import fetch_source
 from ocx_indexbot.adapters.local_files import LocalFiles
 from ocx_indexbot.adapters.local_git import LocalGit
 from ocx_indexbot.adapters.registry_v2 import (
@@ -41,6 +42,7 @@ from ocx_indexbot.adapters.registry_v2 import (
 )
 from ocx_indexbot.adapters.system_clock import SystemClock
 from ocx_indexbot.cli import (
+    check_expiry,
     ci_cmd,
     classify_pr,
     governance_check,
@@ -540,6 +542,12 @@ def _run_stale(args: argparse.Namespace) -> ExitCode:
     return stale.run(args, github=_forge_api(), clock=SystemClock())
 
 
+def _run_check_expiry(args: argparse.Namespace) -> ExitCode:
+    """No policy, no credential: the catalog and its bundle are public
+    documents, so this subcommand reads no environment at all."""
+    return check_expiry.run(args, fetch=fetch_source, clock=SystemClock())
+
+
 DISPATCH: dict[str, Callable[[argparse.Namespace], ExitCode]] = {
     "reconcile": _run_reconcile,
     "validate": _run_validate,
@@ -554,6 +562,7 @@ DISPATCH: dict[str, Callable[[argparse.Namespace], ExitCode]] = {
     "label-failed-run": _run_label_failed_run,
     "stale": _run_stale,
     "workflows-check": _run_workflows_check,
+    "check-expiry": _run_check_expiry,
     # No port of any kind: the schema is package data, read through
     # importlib.resources and written to stdout.
     "schema": schema_cmd.run,

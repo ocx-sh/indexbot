@@ -1,9 +1,9 @@
 # CLI reference
 
-One console script, `indexbot`, with 14 subcommands: `reconcile`,
+One console script, `indexbot`, with 15 subcommands: `reconcile`,
 `validate`, `validate-pr`, `ci`, `render`, `seed-import`, `classify-pr`,
 `governance-check`, `governance-gate`, `governance-poll`, `label-failed-run`,
-`stale`, `workflows-check`, `schema`. `--version` prints the installed
+`stale`, `workflows-check`, `check-expiry`, `schema`. `--version` prints the installed
 distribution version.
 
 None of them publishes. Announcing a tag — building a package root and its
@@ -510,6 +510,29 @@ indexbot workflows-check [--forge github|gitlab] [--dir DIR] [--owner ORG]
 | `--forge` | Which forge's tree to audit. Defaults to `github` |
 | `--dir` | On `github`: the workflow directory (default `.github/workflows`). On `gitlab`: the directory holding included files, alongside the root `.gitlab-ci.yml` which is always read regardless of this flag (default `.gitlab-ci`) |
 | `--owner` | Enables WF-07, the cron upstream-guard check. `github` only — `gitlab` has no rule here that reads it |
+
+## `check-expiry`
+
+Alert before a published catalog's signature lapses. Fetches the catalog,
+requires an `expires` instant at least `--min-days` away, and, given
+`--bundle`, that the signature bundle's statement binds exactly these catalog
+bytes (one subject `c/index.json`, matching sha256, predicate type
+`https://ocx.sh/attestation/index-catalog/v1`). It does not verify the
+certificate chain or signer; run `cosign verify-blob-attestation` for that.
+
+```bash
+indexbot check-expiry --catalog URL|PATH [--bundle URL|PATH] [--min-days N]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--catalog` | The catalog: an `https://` URL or a file path. Required |
+| `--bundle` | Its Sigstore bundle, same forms. Omit to check expiry only |
+| `--min-days` | Fail when fewer days remain. Defaults to `21` |
+
+Exits `0` when every check passes, `1` when `expires` is absent, malformed,
+zoneless or too close, the bundle does not bind the catalog, or a document is
+missing (HTTP 4xx, no file), and `75` on a connection failure or HTTP 5xx.
 
 ## `schema`
 
