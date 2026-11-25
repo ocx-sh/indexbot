@@ -45,10 +45,6 @@ jobs:
           uv run --locked indexbot check-expiry \
             --catalog index.json --bundle index.json.sigstore.json --min-days 21
       - name: Verify the signature with cosign
-        run: |
-          ocx package exec ocx.sh/sigstore/cosign:3.1.1 -- cosign verify-blob-attestation \
-            --bundle index.json.sigstore.json \
-            --type "$PREDICATE_TYPE" \
-            --certificate-identity "$SIGNER_IDENTITY" \
-            --certificate-oidc-issuer "$SIGNER_ISSUER" \
-            index.json
+        env:
+          COSIGN: ocx package exec ocx.sh/sigstore/cosign:3.1.1 -- cosign
+        run: scripts/verify-catalog-signature.sh index.json index.json.sigstore.json
